@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "navi-auditor"
+version = "0.1.0"
+description = "Layer 4: Viz & Replay — Recorder, Rewinder, and storage backends"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "navi-contracts>=0.1.0",
+    "pyzmq>=26.0",
+    "typer>=0.15",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "zarr>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+open3d = [
+    "open3d>=0.18",
+]
+
+[project.scripts]
+navi-auditor = "navi_auditor.cli:app"
+
+[tool.uv.sources]
+navi-contracts = { path = "../contracts", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/navi_auditor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--tb=short"]
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks integration tests",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disable_error_code = ["type-arg", "no-any-return", "unused-ignore"]
+
+[[tool.mypy.overrides]]
+module = [
+    "zmq",
+    "typer",
+    "cv2",
+    "zarr",
+    "navi_contracts",
+    "navi_contracts.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["navi_auditor.cli"]
+disable_error_code = ["misc"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
