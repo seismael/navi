@@ -15,6 +15,8 @@ dependencies = [
     "numpy>=1.26",
     "opencv-python>=4.9",
     "zarr>=3.0",
+    "PyQt6>=6.6",
+    "pyqtgraph>=0.13",
 ]
 
 [project.optional-dependencies]
@@ -66,11 +68,19 @@ module = [
     "zarr",
     "navi_contracts",
     "navi_contracts.*",
+    "pyqtgraph",
+    "pyqtgraph.*",
+    "PyQt6",
+    "PyQt6.*",
 ]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["navi_auditor.cli"]
+disable_error_code = ["misc"]
+
+[[tool.mypy.overrides]]
+module = ["navi_auditor.dashboard.*"]
 disable_error_code = ["misc"]
 
 [dependency-groups]

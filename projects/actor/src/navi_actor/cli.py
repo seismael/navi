@@ -61,6 +61,10 @@ def run(
 @app.command()
 def train(
     sub: str = typer.Option("tcp://localhost:5559", help="ZMQ SUB address (DistanceMatrix stream)"),
+    pub: str = typer.Option(
+        "",
+        help="ZMQ PUB bind address for training telemetry (empty disables)",
+    ),
     step_endpoint: str = typer.Option(
         "tcp://localhost:5560",
         help="Section Manager REP address (step mode)",
@@ -119,6 +123,7 @@ def train(
     trainer = OnlineSphericalTrainer(
         sub_address=sub,
         step_endpoint=step_endpoint,
+        pub_address=pub,
         learning_rate=learning_rate,
         sigma_forward=sigma_forward,
         sigma_yaw=sigma_yaw,

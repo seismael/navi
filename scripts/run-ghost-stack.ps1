@@ -118,7 +118,7 @@ try {
     Write-Host "  $actorLogOut"
     Write-Host "  $actorLogErr"
 
-    & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --step-endpoint "tcp://localhost:5560"
+    & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560"
 }
 finally {
     foreach ($proc in @($actorProc, $sectionProc)) {

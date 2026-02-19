@@ -15,11 +15,14 @@ import zmq
 from navi_actor.policy import LearnedSphericalPolicy, PolicyCheckpoint
 from navi_actor.spherical_features import extract_spherical_features
 from navi_contracts import (
+    TOPIC_ACTION,
     TOPIC_DISTANCE_MATRIX,
+    TOPIC_TELEMETRY_EVENT,
     Action,
     DistanceMatrix,
     StepRequest,
     StepResult,
+    TelemetryEvent,
     deserialize,
     serialize,
 )
@@ -83,6 +86,7 @@ class OnlineSphericalTrainer:
         self,
         sub_address: str,
         step_endpoint: str,
+        pub_address: str = "",
         learning_rate: float = 3e-3,
         sigma_forward: float = 0.12,
         sigma_yaw: float = 0.16,
@@ -91,6 +95,7 @@ class OnlineSphericalTrainer:
     ) -> None:
         self._sub_address = sub_address
         self._step_endpoint = step_endpoint
+        self._pub_address = pub_address
         self._learning_rate = float(max(1e-6, learning_rate))
         self._sigma_forward = float(max(1e-3, sigma_forward))
         self._sigma_yaw = float(max(1e-3, sigma_yaw))
@@ -110,6 +115,7 @@ class OnlineSphericalTrainer:
         self._ctx: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._sub_socket: zmq.Socket[bytes] | None = None
         self._step_socket: zmq.Socket[bytes] | None = None
+        self._pub_socket: zmq.Socket[bytes] | None = None
 
     def start(self) -> None:
         """Open training sockets."""
@@ -122,6 +128,11 @@ class OnlineSphericalTrainer:
         req.connect(self._step_endpoint)
         self._step_socket = req
 
+        if self._pub_address:
+            pub = self._ctx.socket(zmq.PUB)
+            pub.bind(self._pub_address)
+            self._pub_socket = pub
+
     def stop(self) -> None:
         """Close training sockets."""
         if self._sub_socket is not None:
@@ -130,6 +141,9 @@ class OnlineSphericalTrainer:
         if self._step_socket is not None:
             self._step_socket.close()
             self._step_socket = None
+        if self._pub_socket is not None:
+            self._pub_socket.close()
+            self._pub_socket = None
         self._ctx.term()
 
     def train(
@@ -185,6 +199,7 @@ class OnlineSphericalTrainer:
                 step_id=step_id,
                 timestamp=time.time(),
             )
+            self._publish_action(action)
 
             result = self._request_step(action, step_id)
             next_obs = self._recv_latest_matrix(timeout_ms=1000)
@@ -194,7 +209,19 @@ class OnlineSphericalTrainer:
             reward, collided, is_novel = self._compute_training_reward(obs, next_obs, forward_cmd, yaw_cmd)
             reward += 0.2 * float(result.reward)
 
+            advantage = float(reward - self._reward_baseline)
             self._update_policy(features, forward_cmd, yaw_cmd, forward_mean, yaw_mean, reward)
+
+            # Publish per-step training telemetry
+            self._publish_training_step(
+                step_id=step_id,
+                reward=reward,
+                advantage=advantage,
+                collided=collided,
+                is_novel=is_novel,
+                forward_cmd=forward_cmd,
+                yaw_cmd=yaw_cmd,
+            )
 
             reward_acc += reward
             collision_count += int(collided)
@@ -227,6 +254,10 @@ class OnlineSphericalTrainer:
                         novelty_rate=latest_eval.novelty_rate,
                         coverage_mean=latest_eval.coverage_mean,
                     )
+                )
+                self._publish_eval_telemetry(
+                    step_id=current_step,
+                    metrics=latest_eval,
                 )
                 _LOGGER.info(
                     "[eval] step=%d reward_mean=%.4f collision_rate=%.3f novelty_rate=%.3f coverage_mean=%.3f",
@@ -561,6 +592,82 @@ class OnlineSphericalTrainer:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
+
+    # ── ZMQ telemetry helpers ──────────────────────────────────────────
+
+    def _publish_action(self, action: Action) -> None:
+        """Publish action_v2 on the PUB socket so the dashboard can see it."""
+        if self._pub_socket is None:
+            return
+        self._pub_socket.send_multipart([
+            TOPIC_ACTION.encode("utf-8"),
+            serialize(action),
+        ])
+
+    def _publish_training_step(
+        self,
+        *,
+        step_id: int,
+        reward: float,
+        advantage: float,
+        collided: bool,
+        is_novel: bool,
+        forward_cmd: float,
+        yaw_cmd: float,
+    ) -> None:
+        """Publish per-step training telemetry for dashboard curves."""
+        if self._pub_socket is None:
+            return
+        grad_norm_fwd = float(np.linalg.norm(self._w_forward))
+        grad_norm_yaw = float(np.linalg.norm(self._w_yaw))
+        event = TelemetryEvent(
+            event_type="actor.training.step",
+            episode_id=0,
+            env_id=0,
+            step_id=step_id,
+            payload=np.array([
+                reward,
+                advantage,
+                float(collided),
+                float(is_novel),
+                forward_cmd,
+                yaw_cmd,
+                grad_norm_fwd,
+                grad_norm_yaw,
+            ], dtype=np.float32),
+            timestamp=time.time(),
+        )
+        self._pub_socket.send_multipart([
+            TOPIC_TELEMETRY_EVENT.encode("utf-8"),
+            serialize(event),
+        ])
+
+    def _publish_eval_telemetry(
+        self,
+        *,
+        step_id: int,
+        metrics: EvaluationMetrics,
+    ) -> None:
+        """Publish evaluation window summary for dashboard plots."""
+        if self._pub_socket is None:
+            return
+        event = TelemetryEvent(
+            event_type="actor.training.eval",
+            episode_id=0,
+            env_id=0,
+            step_id=step_id,
+            payload=np.array([
+                metrics.reward_mean,
+                metrics.collision_rate,
+                metrics.novelty_rate,
+                metrics.coverage_mean,
+            ], dtype=np.float32),
+            timestamp=time.time(),
+        )
+        self._pub_socket.send_multipart([
+            TOPIC_TELEMETRY_EVENT.encode("utf-8"),
+            serialize(event),
+        ])
 
     @staticmethod
     def _periodic_checkpoint_path(checkpoint_dir: str, checkpoint_prefix: str, step: int) -> str:

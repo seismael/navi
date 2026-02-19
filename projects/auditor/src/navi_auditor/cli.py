@@ -55,6 +55,10 @@ def dashboard(
         "tcp://localhost:5559",
         help="Simulation Layer DistanceMatrix SUB address",
     ),
+    actor_sub: str = typer.Option(
+        "tcp://localhost:5557",
+        help="Actor/Trainer PUB SUB address (action_v2 + telemetry)",
+    ),
     step_endpoint: str = typer.Option(
         "tcp://localhost:5560",
         help="Section Manager REP address for Tab-toggle manual stepping",
@@ -63,11 +67,13 @@ def dashboard(
     linear_speed: float = typer.Option(1.5, help="Max horizontal linear speed"),
     yaw_rate: float = typer.Option(1.5, help="Max yaw rate"),
 ) -> None:
-    """Run live matrix visualizer with Tab-toggle manual/AI control."""
-    typer.echo("Dashboard: press Tab to toggle manual/AI control, WASD/arrows to move")
+    """Run live high-performance RL training visualiser (PyQtGraph)."""
+    typer.echo("Initialising Ghost-Matrix RL Dashboard...")
+    typer.echo("  Tab=toggle manual/AI  WASD/arrows=move  +/-=zoom  ESC=quit")
 
     dashboard_runner = MatrixViewer(
         matrix_sub=matrix_sub,
+        actor_sub=actor_sub,
         step_endpoint=step_endpoint,
         hz=hz,
         linear_speed=linear_speed,

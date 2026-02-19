@@ -9,6 +9,7 @@ import numpy as np
 import zmq
 
 from navi_actor.policy import ShallowPolicy
+from navi_actor.spherical_features import extract_spherical_features
 from navi_contracts import (
     TOPIC_ACTION,
     TOPIC_DISTANCE_MATRIX,
@@ -131,6 +132,13 @@ class ActorServer:
                             ],
                             dtype=np.float32,
                         ),
+                    )
+                    # Publish spherical features for live inference monitoring
+                    features = extract_spherical_features(msg)
+                    self._publish_telemetry(
+                        event_type="actor.inference.features",
+                        step_id=action.step_id,
+                        payload=features,
                     )
                     if self._config.mode == "step" and self._step_socket is not None:
                         result = self.step(action)

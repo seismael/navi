@@ -129,7 +129,13 @@ class Recorder:
 
 
 class LiveDashboard:
-    """OpenCV-based live distance-matrix visualizer.
+    """OpenCV-based live distance-matrix visualizer (legacy).
+
+    .. deprecated::
+        Replaced by ``navi_auditor.dashboard.GhostMatrixDashboard`` which
+        uses PyQtGraph for GPU-accelerated rendering, multi-stream ZMQ
+        ingestion, and real-time RL training curves.  This class is
+        retained for fallback in environments without PyQt6.
 
     Renders at true 30-60 fps using ``cv2.imshow`` with deterministic
     ``waitKey`` polling — no matplotlib overhead.
