@@ -35,7 +35,7 @@ class ImagePanel(pg.GraphicsLayoutWidget):
         self._title = title
 
         self._view = self.addViewBox(row=0, col=0)
-        self._view.setAspectLocked(True)
+        self._view.setAspectLocked(False)
         self._view.invertY(True)
         self._view.setMenuEnabled(False)
 
@@ -55,6 +55,11 @@ class ImagePanel(pg.GraphicsLayoutWidget):
         rgb = bgr[:, :, ::-1]  # BGR → RGB
         transposed = np.ascontiguousarray(rgb.transpose(1, 0, 2))
         self._img_item.setImage(transposed, autoLevels=False, levels=(0, 255))
+        self._view.setRange(
+            xRange=[0, transposed.shape[0]],
+            yRange=[0, transposed.shape[1]],
+            padding=0,
+        )
 
     def add_action_arrow(self) -> ActionArrow:
         """Create and attach a centred action arrow overlay."""

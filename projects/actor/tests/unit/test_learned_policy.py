@@ -33,12 +33,18 @@ def _obs() -> DistanceMatrix:
 
 def _checkpoint() -> PolicyCheckpoint:
     return PolicyCheckpoint(
-        w_forward=np.full((13,), 0.2, dtype=np.float32),
+        w_forward=np.full((17,), 0.2, dtype=np.float32),
         b_forward=0.1,
-        w_yaw=np.full((13,), -0.1, dtype=np.float32),
+        w_yaw=np.full((17,), -0.1, dtype=np.float32),
         b_yaw=0.0,
+        w_vertical=np.full((17,), 0.0, dtype=np.float32),
+        b_vertical=0.0,
+        w_lateral=np.full((17,), 0.0, dtype=np.float32),
+        b_lateral=0.0,
         max_forward=0.8,
         max_yaw=1.2,
+        max_vertical=0.8,
+        max_lateral=0.8,
     )
 
 
@@ -61,5 +67,9 @@ def test_checkpoint_roundtrip() -> None:
 
     assert np.allclose(expected.w_forward, loaded.w_forward)
     assert np.allclose(expected.w_yaw, loaded.w_yaw)
+    assert np.allclose(expected.w_vertical, loaded.w_vertical)
+    assert np.allclose(expected.w_lateral, loaded.w_lateral)
     assert np.isclose(expected.max_forward, loaded.max_forward)
     assert np.isclose(expected.max_yaw, loaded.max_yaw)
+    assert np.isclose(expected.max_vertical, loaded.max_vertical)
+    assert np.isclose(expected.max_lateral, loaded.max_lateral)

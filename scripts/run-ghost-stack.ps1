@@ -70,7 +70,7 @@ $sectionArgs = @(
     "--mode", "step",
     "--pub", $SectionManagerPub,
     "--rep", $SectionManagerRep,
-    "--generator", "rooms"
+    "--generator", "arena"
 )
 
 $actorArgs = @(

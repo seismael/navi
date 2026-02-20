@@ -35,7 +35,7 @@ def _obs(step_id: int, depth_value: float = 0.8, x: float = 0.0, z: float = 0.0)
 def test_build_features_uses_full_spherical_bins() -> None:
     trainer = OnlineSphericalTrainer(sub_address="tcp://localhost:1", step_endpoint="tcp://localhost:2")
     features = trainer._build_features(_obs(step_id=0))
-    assert features.shape == (13,)
+    assert features.shape == (17,)
     assert np.all(np.isfinite(features))
     assert np.all((features >= 0.0) & (features <= 1.0))
 
@@ -48,8 +48,12 @@ def test_policy_update_changes_weights() -> None:
     trainer._update_policy(
         features=features,
         forward_cmd=0.7,
+        vertical_cmd=0.0,
+        lateral_cmd=0.0,
         yaw_cmd=0.1,
         forward_mean=0.4,
+        vertical_mean=0.0,
+        lateral_mean=0.0,
         yaw_mean=0.0,
         reward=1.0,
     )
@@ -62,7 +66,9 @@ def test_collision_reward_penalizes_blocked_motion() -> None:
     obs = _obs(step_id=1, depth_value=0.7, x=0.0, z=0.0)
     next_obs = _obs(step_id=2, depth_value=0.02, x=0.0, z=0.0)
 
-    reward, collided, _is_novel = trainer._compute_training_reward(obs, next_obs, forward_cmd=0.8, yaw_cmd=0.0)
+    reward, collided, _is_novel = trainer._compute_training_reward(
+        obs, next_obs, forward_cmd=0.8, yaw_cmd=0.0, vertical_cmd=0.0, lateral_cmd=0.0,
+    )
     assert collided
     assert reward < 0.0
 
@@ -78,12 +84,16 @@ def test_novelty_reward_is_higher_for_unseen_cell() -> None:
         next_obs,
         forward_cmd=0.2,
         yaw_cmd=0.0,
+        vertical_cmd=0.0,
+        lateral_cmd=0.0,
     )
     reward_second, _collided_second, is_novel_second = trainer._compute_training_reward(
         obs,
         next_obs,
         forward_cmd=0.2,
         yaw_cmd=0.0,
+        vertical_cmd=0.0,
+        lateral_cmd=0.0,
     )
 
     assert is_novel_first

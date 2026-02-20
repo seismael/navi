@@ -34,6 +34,16 @@ if TYPE_CHECKING:
 
 __all__: list[str] = ["SectionManagerServer"]
 
+# Semantic IDs used for reward computation
+_SEM_TARGET: int = 10
+_TARGET_DISCOVERY_RADIUS: float = 3.0
+_TARGET_MAX_REWARD: float = 5.0
+_EXPLORATION_REWARD: float = 0.3
+_COLLISION_PENALTY: float = -2.0
+_CIRCLING_PENALTY: float = -0.5
+_PROGRESS_REWARD_SCALE: float = 0.8
+_CIRCLING_WINDOW: int = 20
+
 
 class SectionManagerServer:
     """Section Manager ZMQ server.
@@ -87,6 +97,13 @@ class SectionManagerServer:
             elevation_bins=config.elevation_bins,
             max_distance=config.max_distance,
         )
+
+        # Episode tracking for reward computation
+        self._episode_return: float = 0.0
+        self._visited_cells: set[tuple[int, int]] = set()
+        self._discovered_targets: set[tuple[int, int, int]] = set()
+        self._yaw_history: list[float] = []
+        self._pos_history: list[tuple[float, float]] = []
 
         # ZMQ
         self._context: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
@@ -195,14 +212,31 @@ class SectionManagerServer:
     def step(self, request: StepRequest) -> StepResult:
         """Execute a single step: apply action, slide window, publish observation.
 
+        Computes structured rewards:
+        - **Target discovery** (max): large positive for approaching target voxels
+        - **Exploration** (medium): positive for visiting new spatial cells
+        - **Progress** (medium): positive for forward translation
+        - **Collision** (negative): penalty when motion is blocked
+        - **Circling** (negative): penalty when yaw spins with little translation
+
         Returns:
-            ``StepResult`` with step acknowledgement data.
+            ``StepResult`` with step acknowledgement data and computed reward.
         """
         action = request.action
         now = time.time()
 
         previous_pose = self._pose
         new_pose = self._apply_action(action, now)
+
+        # Detect collision: proposed vs actual motion
+        proposed_motion = np.sqrt(
+            (new_pose.x - previous_pose.x) ** 2
+            + (new_pose.z - previous_pose.z) ** 2
+        )
+        linear_cmd = float(action.linear_velocity[0, 0]) if action.linear_velocity.ndim == 2 else float(action.linear_velocity[0])
+        expected_motion = max(1e-3, abs(linear_cmd))
+        collided = linear_cmd > 0.15 and proposed_motion / expected_motion < 0.15
+
         self._pose = new_pose
 
         wedge = self._window.shift(
@@ -240,13 +274,61 @@ class SectionManagerServer:
             payload=np.array([new_pose.x, new_pose.y, new_pose.z, new_pose.yaw], dtype=np.float32),
         )
 
+        # ── Reward computation ───────────────────────────────────────
+        reward = 0.0
+
+        # 1) Target discovery — highest reward tier
+        target_reward = self._compute_target_reward(new_pose)
+        reward += target_reward
+
+        # 2) Exploration — medium reward for visiting new cells
+        cell = (int(np.floor(new_pose.x / 2.0)), int(np.floor(new_pose.z / 2.0)))
+        is_novel = cell not in self._visited_cells
+        if is_novel:
+            self._visited_cells.add(cell)
+            reward += _EXPLORATION_REWARD
+
+        # 3) Progress — reward forward translation
+        dx = new_pose.x - previous_pose.x
+        dz = new_pose.z - previous_pose.z
+        dy = new_pose.y - previous_pose.y
+        progress = float(np.sqrt(dx * dx + dz * dz + dy * dy))
+        reward += _PROGRESS_REWARD_SCALE * progress
+
+        # 4) Collision penalty
+        if collided:
+            reward += _COLLISION_PENALTY
+
+        # 5) Anti-circling — penalise spinning in place
+        self._yaw_history.append(float(new_pose.yaw))
+        self._pos_history.append((float(new_pose.x), float(new_pose.z)))
+        if len(self._yaw_history) > _CIRCLING_WINDOW:
+            self._yaw_history = self._yaw_history[-_CIRCLING_WINDOW:]
+            self._pos_history = self._pos_history[-_CIRCLING_WINDOW:]
+        if len(self._yaw_history) >= _CIRCLING_WINDOW:
+            yaw_travel = sum(
+                abs(self._yaw_history[i] - self._yaw_history[i - 1])
+                for i in range(1, len(self._yaw_history))
+            )
+            pos_travel = sum(
+                np.sqrt(
+                    (self._pos_history[i][0] - self._pos_history[i - 1][0]) ** 2
+                    + (self._pos_history[i][1] - self._pos_history[i - 1][1]) ** 2
+                )
+                for i in range(1, len(self._pos_history))
+            )
+            if yaw_travel > 3.0 and pos_travel < 1.0:
+                reward += _CIRCLING_PENALTY
+
+        self._episode_return += reward
         self._step_id += 1
+
         return StepResult(
             step_id=request.step_id,
             done=False,
             truncated=False,
-            reward=0.0,
-            episode_return=0.0,
+            reward=reward,
+            episode_return=self._episode_return,
             timestamp=now,
         )
 
@@ -303,6 +385,47 @@ class SectionManagerServer:
                 payload=np.array([new_pose.x, new_pose.y, new_pose.z, new_pose.yaw], dtype=np.float32),
             )
             self._step_id += 1
+
+    # ------------------------------------------------------------------
+    # Reward helpers
+    # ------------------------------------------------------------------
+
+    def _compute_target_reward(self, pose: RobotPose) -> float:
+        """Check proximity to target voxels (semantic ID = 10) and reward discovery."""
+        voxels = self._local_snapshot(radius_chunks=1)
+        if voxels.shape[0] == 0:
+            return 0.0
+
+        # Filter for target voxels
+        sem = np.rint(voxels[:, 4]).astype(np.int32)
+        target_mask = sem == _SEM_TARGET
+        if not np.any(target_mask):
+            return 0.0
+
+        target_voxels = voxels[target_mask, :3]
+        robot_pos = np.array([pose.x, pose.y, pose.z], dtype=np.float32)
+        distances = np.linalg.norm(target_voxels - robot_pos[None, :], axis=1)
+        min_dist = float(np.min(distances))
+
+        if min_dist > _TARGET_DISCOVERY_RADIUS:
+            return 0.0
+
+        # Check if closest target was already discovered
+        closest_idx = int(np.argmin(distances))
+        target_cell = (
+            int(np.floor(float(target_voxels[closest_idx, 0]))),
+            int(np.floor(float(target_voxels[closest_idx, 1]))),
+            int(np.floor(float(target_voxels[closest_idx, 2]))),
+        )
+
+        if target_cell in self._discovered_targets:
+            # Already discovered — small proximity reward
+            return 0.1
+
+        self._discovered_targets.add(target_cell)
+        # Scale reward: closer = higher (max at distance 0)
+        proximity_factor = 1.0 - (min_dist / _TARGET_DISCOVERY_RADIUS)
+        return _TARGET_MAX_REWARD * proximity_factor
 
     # ------------------------------------------------------------------
     # Helpers

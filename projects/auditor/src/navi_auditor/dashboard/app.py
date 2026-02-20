@@ -24,9 +24,11 @@ from navi_auditor.dashboard.panels import (
 )
 from navi_auditor.dashboard.renderers import (
     VIEW_RANGE_M,
+    add_orientation_guides,
     compute_nav_metrics,
     depth_to_viridis,
     draw_semantic_legend,
+    overlay_overhead_annotations,
     render_bev_occupancy,
     render_first_person,
     render_forward_polar,
@@ -136,14 +138,15 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         self._polar_panel = ImagePanel(title="FORWARD POLAR")
         self._overhead_panel = ImagePanel(title="OVERHEAD + HUD")
-        self._overhead_arrow = self._overhead_panel.add_action_arrow()
         self._bev_panel = ImagePanel(title="BIRD'S EYE 360")
         self._depth_panel = ImagePanel(title="RAW DEPTH (Viridis)")
+        self._pano_panel = ImagePanel(title="PANORAMA 360\u00b0")
 
         self._spatial_tabs.addTab(self._polar_panel, "Polar")
         self._spatial_tabs.addTab(self._overhead_panel, "Overhead")
         self._spatial_tabs.addTab(self._bev_panel, "Bird's Eye")
         self._spatial_tabs.addTab(self._depth_panel, "Raw Depth")
+        self._spatial_tabs.addTab(self._pano_panel, "Panorama")
         right_splitter.addWidget(self._spatial_tabs)
 
         # Right-bottom: training plots in a 2x2 grid
@@ -227,12 +230,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         fp_img, _center_m = render_first_person(
             fov_depth, fov_semantic, fov_valid, 960, 720,
+            pitch=dm.robot_pose.pitch,
         )
         draw_semantic_legend(fp_img, 14, 14)
         self._fp_panel.set_image(fp_img)
 
     def _update_spatial_panels(self, dm: object) -> None:
-        """Update side spatial panels: polar, overhead, bev, raw depth."""
+        """Update side spatial panels: polar, overhead, bev, raw depth, panorama."""
         from navi_contracts import DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
@@ -252,6 +256,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             fov_depth, fov_valid, 320, 320,
             scan_history=self._scan_history,
         )
+        add_orientation_guides(polar_img)
         self._polar_panel.set_image(polar_img)
 
         # Overhead minimap
@@ -259,22 +264,33 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         if self._overhead_zoom > 1.01:
             overhead_bgr = zoom_overhead(overhead_bgr, self._overhead_zoom)
         overhead_bgr = cv2.convertScaleAbs(overhead_bgr, alpha=1.1, beta=45)
+        pose_list = list(self._engine.state.pose_history)
+        overlay_overhead_annotations(overhead_bgr, self._overhead_zoom, pose_list)
         self._overhead_panel.set_image(overhead_bgr)
 
         # Bird's Eye
-        pose_list = list(self._engine.state.pose_history)
+        pose_list_bev = list(self._engine.state.pose_history)
         bev_img = render_bev_occupancy(
             depth_2d, valid_2d, 320, 320,
-            pose_history=pose_list,
+            pose_history=pose_list_bev,
         )
         self._bev_panel.set_image(bev_img)
 
-        # Raw depth (Viridis)
-        viridis_img = depth_to_viridis(fov_depth, fov_valid)
+        # Raw depth (Viridis) — transpose to fix 180° flip
+        viridis_img = depth_to_viridis(fov_depth.T, fov_valid.T)
         viridis_resized = cv2.resize(
             viridis_img, (320, 320), interpolation=cv2.INTER_NEAREST,
         )
+        add_orientation_guides(viridis_resized)
         self._depth_panel.set_image(viridis_resized)
+
+        # Panorama 360° — full azimuth transposed
+        pano_img = depth_to_viridis(depth_2d.T, valid_2d.T)
+        pano_resized = cv2.resize(
+            pano_img, (640, 240), interpolation=cv2.INTER_NEAREST,
+        )
+        add_orientation_guides(pano_resized)
+        self._pano_panel.set_image(pano_resized)
 
     def _update_status(self, dm: object, action: object) -> None:
         """Update status bar from latest data."""
@@ -307,12 +323,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             self._status_bar.set_velocity(lin, yaw)
 
     def _update_action_arrow(self, dm: object, action: object) -> None:
-        """Update the action intention arrow overlays."""
+        """Update the action intention arrow overlay on first-person view."""
         from navi_contracts import Action
 
         if not isinstance(action, Action):
             self._fp_arrow.setVisible(False)
-            self._overhead_arrow.setVisible(False)
             return
 
         lin = float(action.linear_velocity[0, 0])
@@ -329,15 +344,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             advantage=advantage,
             img_width=960,
             img_height=720,
-        )
-
-        self._overhead_arrow.setVisible(True)
-        self._overhead_arrow.update_from_action(
-            linear_speed=lin,
-            yaw_rate=yaw,
-            advantage=advantage,
-            img_width=320,
-            img_height=320,
         )
 
     def _refresh_plots(self) -> None:

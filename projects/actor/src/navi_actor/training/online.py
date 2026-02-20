@@ -47,6 +47,8 @@ class OnlineTrainingMetrics:
     collision_rate: float
     forward_mean: float
     yaw_abs_mean: float
+    vertical_abs_mean: float
+    lateral_abs_mean: float
     novelty_rate: float
     visited_cells: int
     eval_reward_mean: float
@@ -90,8 +92,12 @@ class OnlineSphericalTrainer:
         learning_rate: float = 3e-3,
         sigma_forward: float = 0.12,
         sigma_yaw: float = 0.16,
+        sigma_vertical: float = 0.10,
+        sigma_lateral: float = 0.10,
         max_forward: float = 1.2,
         max_yaw: float = 1.2,
+        max_vertical: float = 0.8,
+        max_lateral: float = 0.8,
     ) -> None:
         self._sub_address = sub_address
         self._step_endpoint = step_endpoint
@@ -99,16 +105,24 @@ class OnlineSphericalTrainer:
         self._learning_rate = float(max(1e-6, learning_rate))
         self._sigma_forward = float(max(1e-3, sigma_forward))
         self._sigma_yaw = float(max(1e-3, sigma_yaw))
+        self._sigma_vertical = float(max(1e-3, sigma_vertical))
+        self._sigma_lateral = float(max(1e-3, sigma_lateral))
         self._max_forward = float(max(0.1, max_forward))
         self._max_yaw = float(max(0.1, max_yaw))
+        self._max_vertical = float(max(0.1, max_vertical))
+        self._max_lateral = float(max(0.1, max_lateral))
 
-        self._feature_dim = 13
+        self._feature_dim = 17
         self._rng = np.random.default_rng(42)
 
         self._w_forward = self._rng.normal(0.0, 0.1, size=(self._feature_dim,)).astype(np.float32)
         self._b_forward = np.float32(0.0)
         self._w_yaw = self._rng.normal(0.0, 0.1, size=(self._feature_dim,)).astype(np.float32)
         self._b_yaw = np.float32(0.0)
+        self._w_vertical = self._rng.normal(0.0, 0.1, size=(self._feature_dim,)).astype(np.float32)
+        self._b_vertical = np.float32(0.0)
+        self._w_lateral = self._rng.normal(0.0, 0.1, size=(self._feature_dim,)).astype(np.float32)
+        self._b_lateral = np.float32(0.0)
 
         self._reward_baseline = 0.0
         self._visited_cells: set[tuple[int, int]] = set()
@@ -185,15 +199,22 @@ class OnlineSphericalTrainer:
             msg = "Did not receive initial distance_matrix_v2 message."
             raise RuntimeError(msg)
         self._visited_cells = {self._pose_cell(latest)}
+        vertical_abs_acc = 0.0
+        lateral_abs_acc = 0.0
 
         for step_id in range(total_steps):
             obs = latest
             features = self._build_features(obs)
-            forward_cmd, yaw_cmd, forward_mean, yaw_mean = self._sample_action(features)
+            (
+                forward_cmd, vertical_cmd, lateral_cmd, yaw_cmd,
+                forward_mean, vertical_mean, lateral_mean, yaw_mean,
+            ) = self._sample_action(features)
 
             action = Action(
                 env_ids=obs.env_ids.astype(np.int32, copy=False),
-                linear_velocity=np.array([[forward_cmd, 0.0, 0.0]], dtype=np.float32),
+                linear_velocity=np.array(
+                    [[forward_cmd, vertical_cmd, lateral_cmd]], dtype=np.float32,
+                ),
                 angular_velocity=np.array([[0.0, 0.0, yaw_cmd]], dtype=np.float32),
                 policy_id="brain-v2-train-spherical",
                 step_id=step_id,
@@ -206,11 +227,18 @@ class OnlineSphericalTrainer:
             if next_obs is None:
                 next_obs = obs
 
-            reward, collided, is_novel = self._compute_training_reward(obs, next_obs, forward_cmd, yaw_cmd)
+            reward, collided, is_novel = self._compute_training_reward(
+                obs, next_obs, forward_cmd, yaw_cmd, vertical_cmd, lateral_cmd,
+            )
             reward += 0.2 * float(result.reward)
 
             advantage = float(reward - self._reward_baseline)
-            self._update_policy(features, forward_cmd, yaw_cmd, forward_mean, yaw_mean, reward)
+            self._update_policy(
+                features,
+                forward_cmd, vertical_cmd, lateral_cmd, yaw_cmd,
+                forward_mean, vertical_mean, lateral_mean, yaw_mean,
+                reward,
+            )
 
             # Publish per-step training telemetry
             self._publish_training_step(
@@ -228,6 +256,8 @@ class OnlineSphericalTrainer:
             novelty_count += int(is_novel)
             forward_acc += float(forward_cmd)
             yaw_abs_acc += abs(float(yaw_cmd))
+            vertical_abs_acc += abs(float(vertical_cmd))
+            lateral_abs_acc += abs(float(lateral_cmd))
             self._reward_baseline = 0.98 * self._reward_baseline + 0.02 * reward
 
             current_step = step_id + 1
@@ -290,6 +320,8 @@ class OnlineSphericalTrainer:
             collision_rate=collision_count / float(total_steps),
             forward_mean=forward_acc / float(total_steps),
             yaw_abs_mean=yaw_abs_acc / float(total_steps),
+            vertical_abs_mean=vertical_abs_acc / float(total_steps),
+            lateral_abs_mean=lateral_abs_acc / float(total_steps),
             novelty_rate=novelty_count / float(total_steps),
             visited_cells=len(self._visited_cells),
             eval_reward_mean=latest_eval.reward_mean,
@@ -328,11 +360,13 @@ class OnlineSphericalTrainer:
 
             for _t in range(eval_horizon):
                 features = self._build_features(episode_obs)
-                forward_cmd, yaw_cmd = self._deterministic_action(features)
+                forward_cmd, vertical_cmd, lateral_cmd, yaw_cmd = self._deterministic_action(features)
 
                 action = Action(
                     env_ids=episode_obs.env_ids.astype(np.int32, copy=False),
-                    linear_velocity=np.array([[forward_cmd, 0.0, 0.0]], dtype=np.float32),
+                    linear_velocity=np.array(
+                        [[forward_cmd, vertical_cmd, lateral_cmd]], dtype=np.float32,
+                    ),
                     angular_velocity=np.array([[0.0, 0.0, yaw_cmd]], dtype=np.float32),
                     policy_id="brain-v2-eval-spherical",
                     step_id=eval_step_id,
@@ -413,27 +447,58 @@ class OnlineSphericalTrainer:
     def _build_features(self, obs: DistanceMatrix) -> np.ndarray:
         return extract_spherical_features(obs)
 
-    def _sample_action(self, features: np.ndarray) -> tuple[float, float, float, float]:
+    def _sample_action(
+        self,
+        features: np.ndarray,
+    ) -> tuple[float, float, float, float, float, float, float, float]:
+        """Sample stochastic 4-DOF action: forward, vertical, lateral, yaw."""
         f_pre = float(np.dot(self._w_forward, features) + self._b_forward)
         y_pre = float(np.dot(self._w_yaw, features) + self._b_yaw)
+        v_pre = float(np.dot(self._w_vertical, features) + self._b_vertical)
+        l_pre = float(np.dot(self._w_lateral, features) + self._b_lateral)
 
         f_sig = 1.0 / (1.0 + np.exp(-f_pre))
         y_tanh = np.tanh(y_pre)
+        v_tanh = np.tanh(v_pre)
+        l_tanh = np.tanh(l_pre)
         forward_mean = float(self._max_forward * f_sig)
         yaw_mean = float(self._max_yaw * y_tanh)
+        vertical_mean = float(self._max_vertical * v_tanh)
+        lateral_mean = float(self._max_lateral * l_tanh)
 
-        forward = float(np.clip(forward_mean + self._sigma_forward * self._rng.standard_normal(), 0.0, self._max_forward))
-        yaw = float(np.clip(yaw_mean + self._sigma_yaw * self._rng.standard_normal(), -self._max_yaw, self._max_yaw))
-        return forward, yaw, forward_mean, yaw_mean
+        forward = float(np.clip(
+            forward_mean + self._sigma_forward * self._rng.standard_normal(),
+            0.0, self._max_forward,
+        ))
+        yaw = float(np.clip(
+            yaw_mean + self._sigma_yaw * self._rng.standard_normal(),
+            -self._max_yaw, self._max_yaw,
+        ))
+        vertical = float(np.clip(
+            vertical_mean + self._sigma_vertical * self._rng.standard_normal(),
+            -self._max_vertical, self._max_vertical,
+        ))
+        lateral = float(np.clip(
+            lateral_mean + self._sigma_lateral * self._rng.standard_normal(),
+            -self._max_lateral, self._max_lateral,
+        ))
+        return forward, vertical, lateral, yaw, forward_mean, vertical_mean, lateral_mean, yaw_mean
 
-    def _deterministic_action(self, features: np.ndarray) -> tuple[float, float]:
-        """Infer deterministic action means for evaluation episodes."""
+    def _deterministic_action(
+        self,
+        features: np.ndarray,
+    ) -> tuple[float, float, float, float]:
+        """Infer deterministic 4-DOF action means for evaluation episodes."""
         f_pre = float(np.dot(self._w_forward, features) + self._b_forward)
         y_pre = float(np.dot(self._w_yaw, features) + self._b_yaw)
+        v_pre = float(np.dot(self._w_vertical, features) + self._b_vertical)
+        l_pre = float(np.dot(self._w_lateral, features) + self._b_lateral)
 
         forward = float(self._max_forward / (1.0 + np.exp(-f_pre)))
         yaw = float(self._max_yaw * np.tanh(y_pre))
-        return forward, yaw
+        vertical = float(self._max_vertical * np.tanh(v_pre))
+        lateral = float(self._max_lateral * np.tanh(l_pre))
+        return forward, vertical, lateral, yaw
 
     def _compute_training_reward(
         self,
@@ -441,14 +506,20 @@ class OnlineSphericalTrainer:
         next_obs: DistanceMatrix,
         forward_cmd: float,
         yaw_cmd: float,
+        vertical_cmd: float = 0.0,
+        lateral_cmd: float = 0.0,
     ) -> tuple[float, bool, bool]:
         feats = self._build_features(next_obs)
         front_min = float(feats[0])
         front_mean = float(feats[1])
+        floor_min = float(feats[13])
+        ceil_min = float(feats[14])
+        vert_clearance = float(feats[15])
 
         dx = float(next_obs.robot_pose.x - obs.robot_pose.x)
+        dy = float(next_obs.robot_pose.y - obs.robot_pose.y)
         dz = float(next_obs.robot_pose.z - obs.robot_pose.z)
-        progress = float(np.sqrt(dx * dx + dz * dz))
+        progress = float(np.sqrt(dx * dx + dy * dy + dz * dz))
 
         expected = max(1e-3, float(max(forward_cmd, 0.0)))
         progress_ratio = progress / expected
@@ -465,6 +536,12 @@ class OnlineSphericalTrainer:
         reward += 0.45 if is_novel else -0.05
         reward += 0.05 if abs(yaw_cmd) > 0.1 and front_mean > 0.12 else 0.0
         reward -= 0.03 * abs(yaw_cmd)
+        # Vertical clearance awareness
+        reward += 0.1 * min(vert_clearance, 1.0)
+        if floor_min < 0.05:
+            reward -= 0.6
+        if ceil_min < 0.05:
+            reward -= 0.6
         if collided:
             reward -= 1.5
         if front_min < 0.06:
@@ -482,10 +559,14 @@ class OnlineSphericalTrainer:
         feats = self._build_features(next_obs)
         front_min = float(feats[0])
         front_mean = float(feats[1])
+        floor_min = float(feats[13])
+        ceil_min = float(feats[14])
+        vert_clearance = float(feats[15])
 
         dx = float(next_obs.robot_pose.x - obs.robot_pose.x)
+        dy = float(next_obs.robot_pose.y - obs.robot_pose.y)
         dz = float(next_obs.robot_pose.z - obs.robot_pose.z)
-        progress = float(np.sqrt(dx * dx + dz * dz))
+        progress = float(np.sqrt(dx * dx + dy * dy + dz * dz))
 
         expected = max(1e-3, float(max(forward_cmd, 0.0)))
         progress_ratio = progress / expected
@@ -500,6 +581,12 @@ class OnlineSphericalTrainer:
         reward += 0.45 if is_novel else -0.05
         reward += 0.05 if abs(yaw_cmd) > 0.1 and front_mean > 0.12 else 0.0
         reward -= 0.03 * abs(yaw_cmd)
+        # Vertical clearance awareness
+        reward += 0.1 * min(vert_clearance, 1.0)
+        if floor_min < 0.05:
+            reward -= 0.6
+        if ceil_min < 0.05:
+            reward -= 0.6
         if collided:
             reward -= 1.5
         if front_min < 0.06:
@@ -519,8 +606,14 @@ class OnlineSphericalTrainer:
             b_forward=float(self._b_forward),
             w_yaw=self._w_yaw.copy(),
             b_yaw=float(self._b_yaw),
+            w_vertical=self._w_vertical.copy(),
+            b_vertical=float(self._b_vertical),
+            w_lateral=self._w_lateral.copy(),
+            b_lateral=float(self._b_lateral),
             max_forward=self._max_forward,
             max_yaw=self._max_yaw,
+            max_vertical=self._max_vertical,
+            max_lateral=self._max_lateral,
         )
 
     def save_checkpoint(self, path: str) -> None:
@@ -680,8 +773,12 @@ class OnlineSphericalTrainer:
         self,
         features: np.ndarray,
         forward_cmd: float,
+        vertical_cmd: float,
+        lateral_cmd: float,
         yaw_cmd: float,
         forward_mean: float,
+        vertical_mean: float,
+        lateral_mean: float,
         yaw_mean: float,
         reward: float,
     ) -> None:
@@ -689,18 +786,30 @@ class OnlineSphericalTrainer:
 
         f_sig = np.clip(forward_mean / self._max_forward, 1e-5, 1.0 - 1e-5)
         y_tanh = np.clip(yaw_mean / self._max_yaw, -0.999, 0.999)
+        v_tanh = np.clip(vertical_mean / self._max_vertical, -0.999, 0.999)
+        l_tanh = np.clip(lateral_mean / self._max_lateral, -0.999, 0.999)
 
         dmean_dfpre = self._max_forward * f_sig * (1.0 - f_sig)
         dmean_dypre = self._max_yaw * (1.0 - y_tanh * y_tanh)
+        dmean_dvpre = self._max_vertical * (1.0 - v_tanh * v_tanh)
+        dmean_dlpre = self._max_lateral * (1.0 - l_tanh * l_tanh)
 
-        dlogp_dmean_f = (forward_cmd - forward_mean) / (self._sigma_forward * self._sigma_forward)
-        dlogp_dmean_y = (yaw_cmd - yaw_mean) / (self._sigma_yaw * self._sigma_yaw)
+        dlogp_dmean_f = (forward_cmd - forward_mean) / (self._sigma_forward ** 2)
+        dlogp_dmean_y = (yaw_cmd - yaw_mean) / (self._sigma_yaw ** 2)
+        dlogp_dmean_v = (vertical_cmd - vertical_mean) / (self._sigma_vertical ** 2)
+        dlogp_dmean_l = (lateral_cmd - lateral_mean) / (self._sigma_lateral ** 2)
 
         grad_f = advantage * dlogp_dmean_f * dmean_dfpre
         grad_y = advantage * dlogp_dmean_y * dmean_dypre
+        grad_v = advantage * dlogp_dmean_v * dmean_dvpre
+        grad_l = advantage * dlogp_dmean_l * dmean_dlpre
 
         lr = self._learning_rate
         self._w_forward = (self._w_forward + lr * grad_f * features).astype(np.float32)
         self._b_forward = np.float32(self._b_forward + lr * grad_f)
         self._w_yaw = (self._w_yaw + lr * grad_y * features).astype(np.float32)
         self._b_yaw = np.float32(self._b_yaw + lr * grad_y)
+        self._w_vertical = (self._w_vertical + lr * grad_v * features).astype(np.float32)
+        self._b_vertical = np.float32(self._b_vertical + lr * grad_v)
+        self._w_lateral = (self._w_lateral + lr * grad_l * features).astype(np.float32)
+        self._b_lateral = np.float32(self._b_lateral + lr * grad_l)

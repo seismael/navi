@@ -162,6 +162,8 @@ def train(
         f"visited_cells={metrics.visited_cells} "
         f"forward_mean={metrics.forward_mean:.3f} "
         f"yaw_abs_mean={metrics.yaw_abs_mean:.3f} "
+        f"vertical_abs_mean={metrics.vertical_abs_mean:.3f} "
+        f"lateral_abs_mean={metrics.lateral_abs_mean:.3f} "
         f"eval_reward_mean={metrics.eval_reward_mean:.4f} "
         f"eval_collision_rate={metrics.eval_collision_rate:.3f} "
         f"eval_novelty_rate={metrics.eval_novelty_rate:.3f} "
