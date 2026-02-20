@@ -149,7 +149,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._spatial_tabs.addTab(self._pano_panel, "Panorama")
         right_splitter.addWidget(self._spatial_tabs)
 
-        # Right-bottom: training plots in a 2x2 grid
+        # Right-bottom: training plots in a 3x3 grid
         plot_container = QtWidgets.QWidget()
         plot_layout = QtWidgets.QGridLayout(plot_container)
         plot_layout.setContentsMargins(2, 2, 2, 2)
@@ -158,12 +158,22 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_reward = RollingPlot(title="Step Reward", color="#2e86de")
         self._plot_collision = RollingPlot(title="Collision", color="#e74c3c")
         self._plot_novelty = RollingPlot(title="Novelty", color="#27ae60")
-        self._plot_coverage = RollingPlot(title="Eval Coverage", color="#8e44ad")
+        self._plot_policy_loss = RollingPlot(title="Policy Loss", color="#f39c12")
+        self._plot_value_loss = RollingPlot(title="Value Loss", color="#e67e22")
+        self._plot_entropy = RollingPlot(title="Entropy", color="#1abc9c")
+        self._plot_intrinsic = RollingPlot(title="Intrinsic Reward", color="#9b59b6")
+        self._plot_rnd_loss = RollingPlot(title="RND Loss", color="#e74c3c")
+        self._plot_beta = RollingPlot(title="Beta (Anneal)", color="#3498db")
 
         plot_layout.addWidget(self._plot_reward, 0, 0)
         plot_layout.addWidget(self._plot_collision, 0, 1)
-        plot_layout.addWidget(self._plot_novelty, 1, 0)
-        plot_layout.addWidget(self._plot_coverage, 1, 1)
+        plot_layout.addWidget(self._plot_novelty, 0, 2)
+        plot_layout.addWidget(self._plot_policy_loss, 1, 0)
+        plot_layout.addWidget(self._plot_value_loss, 1, 1)
+        plot_layout.addWidget(self._plot_entropy, 1, 2)
+        plot_layout.addWidget(self._plot_intrinsic, 2, 0)
+        plot_layout.addWidget(self._plot_rnd_loss, 2, 1)
+        plot_layout.addWidget(self._plot_beta, 2, 2)
         right_splitter.addWidget(plot_container)
 
         # Set default split ratios
@@ -178,7 +188,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_reward.set_data_from_deque(state.reward_history)
         self._plot_collision.set_data_from_deque(state.collision_history)
         self._plot_novelty.set_data_from_deque(state.novelty_history)
-        self._plot_coverage.set_data_from_deque(state.eval_coverage_history)
+        # PPO-specific plots
+        self._plot_policy_loss.set_data_from_deque(state.ppo_policy_loss_history)
+        self._plot_value_loss.set_data_from_deque(state.ppo_value_loss_history)
+        self._plot_entropy.set_data_from_deque(state.ppo_entropy_history)
+        self._plot_intrinsic.set_data_from_deque(state.ppo_intrinsic_reward_history)
+        self._plot_rnd_loss.set_data_from_deque(state.ppo_rnd_loss_history)
+        self._plot_beta.set_data_from_deque(state.ppo_beta_history)
 
     # ── tick / render loop ───────────────────────────────────────────
 
@@ -351,7 +367,12 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_reward.refresh()
         self._plot_collision.refresh()
         self._plot_novelty.refresh()
-        self._plot_coverage.refresh()
+        self._plot_policy_loss.refresh()
+        self._plot_value_loss.refresh()
+        self._plot_entropy.refresh()
+        self._plot_intrinsic.refresh()
+        self._plot_rnd_loss.refresh()
+        self._plot_beta.refresh()
 
     # ── teleop / keyboard control ────────────────────────────────────
 

@@ -7,6 +7,8 @@ __all__: list[str] = [
     "EvaluationPoint",
     "OnlineSphericalTrainer",
     "OnlineTrainingMetrics",
+    "PpoTrainer",
+    "PpoTrainingMetrics",
     "TrainingLoop",
 ]
 
@@ -17,3 +19,4 @@ from navi_actor.training.online import (
     OnlineSphericalTrainer,
     OnlineTrainingMetrics,
 )
+from navi_actor.training.ppo_trainer import PpoTrainer, PpoTrainingMetrics

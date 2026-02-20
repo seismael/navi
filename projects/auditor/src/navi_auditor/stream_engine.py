@@ -89,6 +89,49 @@ class StreamState:
     # Inference features
     latest_features: np.ndarray | None = None
 
+    # PPO per-step telemetry
+    ppo_raw_reward_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_shaped_reward_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_intrinsic_reward_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_loop_similarity_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_loop_detected_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_beta_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_done_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+
+    # PPO per-update telemetry
+    ppo_policy_loss_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_value_loss_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_entropy_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_kl_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_rnd_loss_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_reward_ema_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+
     # Telemetry ring (raw events)
     telemetry_buffer: deque[TelemetryEvent] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
@@ -248,6 +291,28 @@ class StreamEngine:
             self.state.eval_collision_history.append(float(p[1]))
             self.state.eval_novelty_history.append(float(p[2]))
             self.state.eval_coverage_history.append(float(p[3]))
+
+        elif et == "actor.training.ppo.step" and len(p) >= 9:
+            self.state.ppo_raw_reward_history.append(float(p[0]))
+            self.state.ppo_shaped_reward_history.append(float(p[1]))
+            self.state.ppo_intrinsic_reward_history.append(float(p[2]))
+            self.state.ppo_loop_similarity_history.append(float(p[3]))
+            self.state.ppo_loop_detected_history.append(float(p[4]))
+            self.state.ppo_beta_history.append(float(p[5]))
+            self.state.ppo_done_history.append(float(p[6]))
+            # Also push to generic reward/collision for backward compat
+            self.state.reward_history.append(float(p[1]))
+            self.state.collision_history.append(float(p[6]))
+            self.state.forward_cmd_history.append(float(p[7]))
+            self.state.yaw_cmd_history.append(float(p[8]))
+
+        elif et == "actor.training.ppo.update" and len(p) >= 9:
+            self.state.ppo_reward_ema_history.append(float(p[0]))
+            self.state.ppo_policy_loss_history.append(float(p[1]))
+            self.state.ppo_value_loss_history.append(float(p[2]))
+            self.state.ppo_entropy_history.append(float(p[3]))
+            self.state.ppo_kl_history.append(float(p[4]))
+            self.state.ppo_rnd_loss_history.append(float(p[7]))
 
         elif et == "actor.inference.features":
             self.state.latest_features = np.asarray(p, dtype=np.float32)

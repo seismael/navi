@@ -5,16 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "navi-actor"
 version = "0.1.0"
-description = "Layer 3: The Brain — ViT Token Encoder, MLP Action Head, and Training Loop"
+description = "Layer 3: The Brain — Cognitive Actor with Mamba2 SSM, PPO, and RND"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "navi-contracts>=0.1.0",
     "pyzmq>=26.0",
     "typer>=0.15",
-    "jax>=0.4.33",
-    "jaxlib>=0.4.33",
-    "optax>=0.2.3",
+    "torch>=2.2",
     "numpy>=1.26",
     "matplotlib>=3.9",
 ]
@@ -65,6 +63,14 @@ module = [
     "matplotlib.*",
     "navi_contracts",
     "navi_contracts.*",
+    "torch",
+    "torch.*",
+    "mamba_ssm",
+    "mamba_ssm.*",
+    "causal_conv1d",
+    "causal_conv1d.*",
+    "faiss",
+    "faiss.*",
 ]
 ignore_missing_imports = true
 

@@ -1,0 +1,123 @@
+"""Actor-Critic heads for continuous 4-DOF drone control."""
+
+from __future__ import annotations
+
+import math
+
+import torch
+from torch import Tensor, nn
+
+__all__: list[str] = ["ActorCriticHeads"]
+
+
+class ActorCriticHeads(nn.Module):  # type: ignore[misc]
+    """Separate actor (Gaussian policy) and critic (value) heads.
+
+    Actor outputs a 4-dim mean and uses a learnable log_std parameter.
+    Action dimensions: [fwd, vert, lat, yaw].
+    Critic outputs a scalar state-value estimate.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 128,
+        *,
+        max_forward: float = 1.2,
+        max_vertical: float = 0.8,
+        max_lateral: float = 0.8,
+        max_yaw: float = 1.2,
+    ) -> None:
+        super().__init__()
+        self.action_dim = 4
+
+        self.action_scales = torch.tensor(
+            [max_forward, max_vertical, max_lateral, max_yaw],
+            dtype=torch.float32,
+        )
+
+        # Actor MLP
+        self.actor = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, self.action_dim),
+            nn.Tanh(),  # outputs in [-1, 1], scaled by action_scales
+        )
+
+        # Learnable log standard deviation (per action dim)
+        self.log_std = nn.Parameter(torch.zeros(self.action_dim))
+
+        # Critic MLP
+        self.critic = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, features: Tensor) -> tuple[Tensor, Tensor]:
+        """Compute action mean and state value.
+
+        Args:
+            features: (B, D) feature tensor from encoder (or Mamba core).
+
+        Returns:
+            action_mean: (B, 4) scaled action means.
+            value: (B,) state-value estimates.
+
+        """
+        scales = self.action_scales.to(features.device)
+        raw_mean: Tensor = self.actor(features)  # (B, 4) in [-1, 1]
+        action_mean = raw_mean * scales  # (B, 4)
+        value: Tensor = self.critic(features).squeeze(-1)  # (B,)
+        return action_mean, value
+
+    def log_prob(self, features: Tensor, actions: Tensor) -> Tensor:
+        """Evaluate log probability of given actions under the current policy.
+
+        Args:
+            features: (B, D) feature tensor.
+            actions: (B, 4) action tensor.
+
+        Returns:
+            log_prob: (B,) log probabilities (sum over action dims).
+
+        """
+        action_mean, _ = self.forward(features)
+        std = self.log_std.exp()
+        # Gaussian log-prob per dim, then sum
+        var = std * std
+        log_p = (
+            -0.5 * ((actions - action_mean) ** 2) / var
+            - self.log_std
+            - 0.5 * math.log(2.0 * math.pi)
+        )
+        return log_p.sum(dim=-1)
+
+    def entropy(self) -> Tensor:
+        """Compute policy entropy (independent Gaussian).
+
+        Returns:
+            entropy: scalar — sum of per-dim differential entropies.
+
+        """
+        std = self.log_std.exp()
+        ent = 0.5 + 0.5 * math.log(2.0 * math.pi) + torch.log(std)
+        return ent.sum()
+
+    def sample(self, features: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Sample actions from the policy distribution.
+
+        Args:
+            features: (B, D) feature tensor.
+
+        Returns:
+            actions: (B, 4) sampled actions.
+            log_probs: (B,) log probabilities.
+            values: (B,) state-value estimates.
+
+        """
+        action_mean, values = self.forward(features)
+        std = self.log_std.exp()
+        dist = torch.distributions.Normal(action_mean, std)
+        actions = dist.sample()
+        log_probs = dist.log_prob(actions).sum(dim=-1)
+        return actions, log_probs, values

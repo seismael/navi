@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import zmq
@@ -31,6 +31,15 @@ class _RuntimePolicyProtocol(Protocol):
     def act(self, observation: DistanceMatrix, step_id: int) -> Action:
         ...
 
+
+class _StatefulPolicyProtocol(Protocol):
+    """Protocol for policies with recurrent hidden state."""
+
+    def act(
+        self, obs: Any, step_id: int, hidden: Any,
+    ) -> tuple[list[float], Any]:
+        ...
+
 __all__: list[str] = ["ActorServer"]
 
 
@@ -40,12 +49,27 @@ class ActorServer:
     Modes:
     - async: subscribes to DistanceMatrix and publishes Action.
     - step: after infer, sends StepRequest and waits for StepResult.
+
+    Supports both stateless (_RuntimePolicyProtocol) and stateful
+    (_StatefulPolicyProtocol) policies. Stateful policies maintain
+    a hidden state that is reset on episode boundaries.
     """
 
-    def __init__(self, config: ActorConfig, policy: _RuntimePolicyProtocol | None = None) -> None:
+    def __init__(
+        self,
+        config: ActorConfig,
+        policy: Any = None,
+    ) -> None:
         self._config = config
         self._step_counter: int = 0
-        self._policy = policy if policy is not None else ShallowPolicy(policy_id="brain-v2-shallow", gain=0.5)
+        self._policy: Any
+        if policy is not None:
+            self._policy = policy
+        else:
+            self._policy = ShallowPolicy(policy_id="brain-v2-shallow", gain=0.5)
+
+        self._stateful = _is_stateful(self._policy)
+        self._hidden_state: Any = None  # recurrent hidden state
 
         self._context: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._sub_socket: zmq.Socket[bytes] | None = None
@@ -71,7 +95,28 @@ class ActorServer:
             self._step_socket = step_socket
 
     def infer(self, update: DistanceMatrix) -> Action:
-        """Compute Action from DistanceMatrix using the shallow policy."""
+        """Compute Action from DistanceMatrix using the active policy.
+
+        Handles both stateless and stateful (recurrent) policies.
+        """
+        if self._stateful:
+            action_list, self._hidden_state = self._policy.act(
+                update, step_id=self._step_counter, hidden=self._hidden_state,
+            )
+            return Action(
+                env_ids=np.asarray(update.env_ids, dtype=np.int32),
+                linear_velocity=np.array(
+                    [[action_list[0], action_list[1], action_list[2]]],
+                    dtype=np.float32,
+                ),
+                angular_velocity=np.array(
+                    [[0.0, 0.0, action_list[3]]], dtype=np.float32
+                ),
+                policy_id="cognitive-mamba",
+                step_id=self._step_counter,
+                timestamp=time.time(),
+            )
+
         action = self._policy.act(update, step_id=self._step_counter)
         return Action(
             env_ids=action.env_ids,
@@ -142,6 +187,9 @@ class ActorServer:
                     )
                     if self._config.mode == "step" and self._step_socket is not None:
                         result = self.step(action)
+                        # Reset hidden state on episode boundaries
+                        if self._stateful and (result.done or result.truncated):
+                            self._hidden_state = None
                         self._publish_telemetry(
                             event_type="actor.step_result",
                             step_id=result.step_id,
@@ -188,3 +236,19 @@ class ActorServer:
                 serialize(event),
             ]
         )
+
+
+def _is_stateful(policy: object) -> bool:
+    """Check if a policy follows the stateful (recurrent) protocol.
+
+    A stateful policy's ``act`` method accepts a ``hidden`` keyword argument
+    and returns a ``(action_list, hidden)`` tuple.
+    """
+    import inspect
+
+    act_method = getattr(policy, "act", None)
+    if act_method is None:
+        return False
+    sig = inspect.signature(act_method)
+    params = list(sig.parameters.keys())
+    return "hidden" in params
