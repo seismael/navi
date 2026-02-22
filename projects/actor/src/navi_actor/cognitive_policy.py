@@ -40,10 +40,10 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         *,
         azimuth_bins: int = 64,
         elevation_bins: int = 32,
-        max_forward: float = 1.2,
-        max_vertical: float = 0.8,
-        max_lateral: float = 0.8,
-        max_yaw: float = 1.2,
+        max_forward: float = 1.0,
+        max_vertical: float = 1.0,
+        max_lateral: float = 1.0,
+        max_yaw: float = 1.0,
         d_state: int = 64,
         d_conv: int = 4,
         expand: int = 2,
@@ -158,7 +158,9 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         features, new_hidden = self.temporal_core.forward_step(z_t, hidden)
 
         log_probs = self.heads.log_prob(features, actions)
-        _, values = self.heads(features)
+        # Stop-gradient: critic sees detached features so value-loss
+        # gradients never flow back through the shared backbone.
+        values: Tensor = self.heads.critic(features.detach()).squeeze(-1)
         entropy = self.heads.entropy()
         return log_probs, values, entropy, new_hidden, z_t
 
@@ -195,7 +197,9 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         flat_actions = actions_seq.reshape(batch * seq_len, -1)
 
         log_probs = self.heads.log_prob(flat_features, flat_actions)
-        _, values = self.heads(flat_features)
+        # Stop-gradient: critic sees detached features so value-loss
+        # gradients never flow back through the shared backbone.
+        values: Tensor = self.heads.critic(flat_features.detach()).squeeze(-1)
         entropy = self.heads.entropy()
         return log_probs, values, entropy, new_hidden, z_flat
 

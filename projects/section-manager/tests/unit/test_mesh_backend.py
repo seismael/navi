@@ -96,13 +96,15 @@ class TestMeshSceneBackend:
         x1, z1 = obs1.robot_pose.x, obs1.robot_pose.z
 
         dist = np.sqrt((x1 - x0) ** 2 + (z1 - z0) ** 2)
-        assert dist > 0.1, f"Agent should have moved but dist={dist:.3f}"
+        # dt=0.02 → displacement ≈ velocity × dt × (1-smoothing)
+        assert dist > 1e-4, f"Agent should have moved but dist={dist:.6f}"
 
     def test_yaw_changes_on_step(self) -> None:
         b = _make_backend()
         b.reset(0)
         _, _ = b.step(_make_action(fwd=0.0, yaw=0.5), 1)
-        assert abs(b.pose.yaw) > 0.3
+        # dt=0.02 → yaw change ≈ 0.5 × 0.02 × 0.7 = 0.007 rad
+        assert abs(b.pose.yaw) > 1e-4
 
     def test_delta_depth_nonzero_after_motion(self) -> None:
         b = _make_backend()

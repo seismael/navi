@@ -17,21 +17,21 @@ def test_forward_shapes() -> None:
 
 
 def test_action_scaling() -> None:
-    """Action means should be bounded by action_scales."""
+    """Action means should be bounded by action_scales (normalised to 1.0)."""
     heads = ActorCriticHeads(
         input_dim=128,
-        max_forward=1.2,
-        max_vertical=0.8,
-        max_lateral=0.8,
-        max_yaw=1.2,
+        max_forward=1.0,
+        max_vertical=1.0,
+        max_lateral=1.0,
+        max_yaw=1.0,
     )
     features = torch.randn(100, 128)
     mean, _ = heads(features)
     # Tanh output * scale => |mean| <= scale
-    assert mean[:, 0].abs().max() <= 1.2 + 1e-5
-    assert mean[:, 1].abs().max() <= 0.8 + 1e-5
-    assert mean[:, 2].abs().max() <= 0.8 + 1e-5
-    assert mean[:, 3].abs().max() <= 1.2 + 1e-5
+    assert mean[:, 0].abs().max() <= 1.0 + 1e-5
+    assert mean[:, 1].abs().max() <= 1.0 + 1e-5
+    assert mean[:, 2].abs().max() <= 1.0 + 1e-5
+    assert mean[:, 3].abs().max() <= 1.0 + 1e-5
 
 
 def test_log_prob_shape() -> None:

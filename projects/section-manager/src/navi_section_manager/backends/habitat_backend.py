@@ -94,6 +94,13 @@ class HabitatBackend(SimulatorBackend):
         self._episode_id: int = 0
         self._episode_step: int = 0
         self._max_steps_per_episode: int = config.max_steps_per_episode
+        self._physics_dt: float = config.physics_dt
+
+        # Drone speed scales (normalised steering → m/s / rad/s)
+        self._drone_speed: float = config.drone_speed
+        self._drone_climb: float = config.drone_climb_rate
+        self._drone_strafe: float = config.drone_strafe_speed
+        self._drone_yaw: float = config.drone_yaw_rate
         self._needs_reset: bool = False
         self._pose = RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=0.0)
 
@@ -317,10 +324,10 @@ class HabitatBackend(SimulatorBackend):
             lin = action.linear_velocity
             ang = action.angular_velocity
 
-        forward = float(lin[0])
-        strafe = float(lin[1]) if len(lin) > 1 else 0.0
-        vertical = float(lin[2]) if len(lin) > 2 else 0.0
-        yaw_rate = float(ang[2]) if len(ang) > 2 else 0.0
+        forward = float(lin[0]) * self._drone_speed
+        strafe = (float(lin[1]) if len(lin) > 1 else 0.0) * self._drone_strafe
+        vertical = (float(lin[2]) if len(lin) > 2 else 0.0) * self._drone_climb
+        yaw_rate = (float(ang[2]) if len(ang) > 2 else 0.0) * self._drone_yaw
 
         # Direct physics-based velocity control
         agent = self._sim.get_agent(0)
@@ -337,7 +344,7 @@ class HabitatBackend(SimulatorBackend):
         world_vz = -forward * cos_y + strafe * sin_y
 
         # Apply translation
-        dt = 1.0  # step delta
+        dt = self._physics_dt
         new_pos = np.array([
             agent_state.position[0] + world_vx * dt,
             agent_state.position[1] + vertical * dt,

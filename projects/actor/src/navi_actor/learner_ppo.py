@@ -117,15 +117,37 @@ class PpoLearner:
         self._learning_rate = learning_rate
         self._rnd_learning_rate = rnd_learning_rate
         self._optimizer: torch.optim.Adam | None = None
+        self._value_optimizer: torch.optim.Adam | None = None
         self._rnd_optimizer: torch.optim.Adam | None = None
 
     def _get_optimizer(self, policy: CognitiveMambaPolicy) -> torch.optim.Adam:
-        """Lazily create or return the Adam optimizer."""
+        """Lazily create or return the policy optimizer.
+
+        Covers encoder + temporal core + actor head + log_std.
+        The critic head has a *separate* optimizer so that value-loss
+        gradients never flow through the shared backbone.
+        """
         if self._optimizer is None:
+            policy_params = (
+                list(policy.encoder.parameters())
+                + list(policy.temporal_core.parameters())
+                + list(policy.heads.actor.parameters())
+                + [policy.heads.log_std]
+            )
             self._optimizer = torch.optim.Adam(
-                policy.parameters(), lr=self._learning_rate
+                policy_params, lr=self._learning_rate
             )
         return self._optimizer
+
+    def _get_value_optimizer(
+        self, policy: CognitiveMambaPolicy
+    ) -> torch.optim.Adam:
+        """Lazily create or return the critic-head optimizer."""
+        if self._value_optimizer is None:
+            self._value_optimizer = torch.optim.Adam(
+                policy.heads.critic.parameters(), lr=self._learning_rate
+            )
+        return self._value_optimizer
 
     def _get_rnd_optimizer(self, rnd: RNDModule) -> torch.optim.Adam:
         """Lazily create or return the RND predictor optimizer."""
@@ -178,10 +200,15 @@ class PpoLearner:
             Aggregated PpoMetrics from the epoch.
 
         """
-        optimizer = self._get_optimizer(policy)
+        policy_optimizer = self._get_optimizer(policy)
+        value_optimizer = self._get_value_optimizer(policy)
         rnd_optimizer = self._get_rnd_optimizer(rnd) if rnd is not None else None
         device = policy.device
         policy.train()
+
+        # Collect param lists for per-group gradient clipping
+        policy_params = list(policy_optimizer.param_groups[0]["params"])
+        value_params = list(value_optimizer.param_groups[0]["params"])
 
         running_policy_loss = 0.0
         running_value_loss = 0.0
@@ -245,19 +272,30 @@ class PpoLearner:
                 # Entropy bonus
                 entropy_loss = -ent
 
-                # Total loss
-                total_loss: Tensor = (
-                    policy_loss
-                    + self._value_coeff * value_loss
-                    + self._entropy_coeff * entropy_loss
+                # ── Gradient-isolated updates ──
+                # Both backward passes run BEFORE any optimizer step
+                # to avoid in-place modification of shared parameters.
+                actor_loss: Tensor = (
+                    policy_loss + self._entropy_coeff * entropy_loss
                 )
+                critic_loss: Tensor = self._value_coeff * value_loss
 
-                optimizer.zero_grad()
-                total_loss.backward()
+                policy_optimizer.zero_grad()
+                value_optimizer.zero_grad()
+                actor_loss.backward(retain_graph=True)
+                critic_loss.backward()
+
                 torch.nn.utils.clip_grad_norm_(
-                    policy.parameters(), self._max_grad_norm
+                    policy_params, self._max_grad_norm
                 )
-                optimizer.step()
+                torch.nn.utils.clip_grad_norm_(
+                    value_params, self._max_grad_norm
+                )
+                policy_optimizer.step()
+                value_optimizer.step()
+
+                # Composite metric for logging (not used for backprop)
+                total_loss_val = actor_loss.item() + critic_loss.item()
 
                 # RND distillation loss (separate optimizer)
                 rnd_loss_val = 0.0
@@ -288,7 +326,7 @@ class PpoLearner:
                 running_entropy += ent.item()
                 running_kl += approx_kl
                 running_clip += clip_frac
-                running_total += total_loss.item()
+                running_total += total_loss_val
                 running_rnd_loss += rnd_loss_val
                 n_updates += 1
 
@@ -353,7 +391,9 @@ class PpoLearner:
             Aggregated PpoMetrics from the training pass.
 
         """
-        optimizer = self._get_optimizer(policy)
+        # Ensure optimizers exist (used inside the V-trace PPO loop below)
+        self._get_optimizer(policy)
+        self._get_value_optimizer(policy)
         rnd_optimizer = self._get_rnd_optimizer(rnd) if rnd is not None else None
         device = policy.device
         policy.train()
@@ -386,6 +426,10 @@ class PpoLearner:
             ) / (vtrace_advantages.std() + 1e-8)
 
         # PPO epochs over the V-trace-corrected batch
+        policy_optimizer = self._get_optimizer(policy)
+        value_optimizer = self._get_value_optimizer(policy)
+        policy_params = list(policy_optimizer.param_groups[0]["params"])
+        value_params = list(value_optimizer.param_groups[0]["params"])
         running_policy_loss = 0.0
         running_value_loss = 0.0
         running_entropy = 0.0
@@ -418,18 +462,28 @@ class PpoLearner:
                 value_loss: Tensor = 0.5 * (new_vals - ret_mb).pow(2).mean()
 
                 entropy_loss = -ent
-                total_loss: Tensor = (
-                    policy_loss
-                    + self._value_coeff * value_loss
-                    + self._entropy_coeff * entropy_loss
-                )
 
-                optimizer.zero_grad()
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    policy.parameters(), self._max_grad_norm,
+                # ── Gradient-isolated updates ──
+                actor_loss: Tensor = (
+                    policy_loss + self._entropy_coeff * entropy_loss
                 )
-                optimizer.step()
+                critic_loss: Tensor = self._value_coeff * value_loss
+
+                policy_optimizer.zero_grad()
+                value_optimizer.zero_grad()
+                actor_loss.backward(retain_graph=True)
+                critic_loss.backward()
+
+                torch.nn.utils.clip_grad_norm_(
+                    policy_params, self._max_grad_norm,
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    value_params, self._max_grad_norm,
+                )
+                policy_optimizer.step()
+                value_optimizer.step()
+
+                total_loss_val = actor_loss.item() + critic_loss.item()
 
                 # RND distillation
                 rnd_loss_val = 0.0
@@ -458,7 +512,7 @@ class PpoLearner:
                 running_entropy += ent.item()
                 running_kl += approx_kl
                 running_clip += clip_frac
-                running_total += total_loss.item()
+                running_total += total_loss_val
                 running_rnd_loss += rnd_loss_val
                 n_updates += 1
 

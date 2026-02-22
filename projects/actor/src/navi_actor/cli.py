@@ -226,6 +226,7 @@ def train_ppo(
     gamma: float = typer.Option(0.99, help="Discount factor"),
     gae_lambda: float = typer.Option(0.95, help="GAE lambda"),
     entropy_coeff: float = typer.Option(0.01, help="Entropy bonus coefficient"),
+    value_coeff: float = typer.Option(0.005, help="Value loss coefficient (low to prevent gradient domination)"),
     # Reward shaping
     collision_penalty: float = typer.Option(0.0, help="Collision termination penalty (backend supplies its own)"),
     existential_tax: float = typer.Option(-0.01, help="Per-step existence cost"),
@@ -267,6 +268,7 @@ def train_ppo(
         gamma=gamma,
         gae_lambda=gae_lambda,
         entropy_coeff=entropy_coeff,
+        value_coeff=value_coeff,
         collision_penalty=collision_penalty,
         existential_tax=existential_tax,
         velocity_weight=velocity_weight,
@@ -326,7 +328,7 @@ def train_sequential(
         help="Number of actors sharing each scene",
     ),
     steps_per_scene: int = typer.Option(
-        10_000, help="Environment steps per scene (across all actors)",
+        100_000, help="Environment steps per scene (across all actors)",
     ),
     backend: str = typer.Option("mesh", help="Simulation backend"),
     # PPO hyper-parameters
@@ -340,6 +342,7 @@ def train_sequential(
     gamma: float = typer.Option(0.99, help="Discount factor"),
     gae_lambda: float = typer.Option(0.95, help="GAE lambda"),
     entropy_coeff: float = typer.Option(0.01, help="Entropy bonus coefficient"),
+    value_coeff: float = typer.Option(0.005, help="Value loss coefficient (low to prevent gradient domination)"),
     # Reward shaping
     collision_penalty: float = typer.Option(0.0, help="Collision penalty (backend supplies its own)"),
     existential_tax: float = typer.Option(-0.01, help="Per-step existence cost"),
@@ -395,6 +398,14 @@ def train_sequential(
         raw_scenes = scene_data
     elif isinstance(scene_data, dict) and "scenes" in scene_data:
         raw_scenes = scene_data["scenes"]
+    elif isinstance(scene_data, dict) and "episodes" in scene_data:
+        # Extract unique scene_id values from episodes format
+        seen: set[str] = set()
+        for ep in scene_data["episodes"]:
+            sid = ep.get("scene_id") or ep.get("scene")
+            if sid and str(sid) not in seen:
+                seen.add(str(sid))
+                scenes.append(str(sid))
     for entry in raw_scenes:
         if isinstance(entry, dict):
             # Support both "scene" and "path" keys
@@ -440,6 +451,7 @@ def train_sequential(
         gamma=gamma,
         gae_lambda=gae_lambda,
         entropy_coeff=entropy_coeff,
+        value_coeff=value_coeff,
         collision_penalty=collision_penalty,
         existential_tax=existential_tax,
         velocity_weight=velocity_weight,

@@ -95,3 +95,82 @@ def test_gradient_flow() -> None:
     # Check at least some parameters have gradients
     grads = [p.grad for p in policy.parameters() if p.grad is not None]
     assert len(grads) > 0
+
+
+def test_evaluate_value_stop_gradient() -> None:
+    """evaluate() must stop-gradient: value loss must NOT flow to encoder/temporal."""
+    policy = _make_policy()
+    obs = torch.randn(2, 2, 64, 32)
+    acts = torch.randn(2, 4)
+    _, values, _, _, _ = policy.evaluate(obs, acts)
+
+    # Backward through values only (simulating critic loss)
+    policy.zero_grad()
+    values.sum().backward()
+
+    # Encoder and temporal core should have NO gradients
+    for name, p in policy.encoder.named_parameters():
+        assert p.grad is None or torch.all(p.grad == 0), (
+            f"encoder.{name} must not receive value-loss gradients"
+        )
+    for name, p in policy.temporal_core.named_parameters():
+        assert p.grad is None or torch.all(p.grad == 0), (
+            f"temporal_core.{name} must not receive value-loss gradients"
+        )
+
+    # Critic head SHOULD have gradients
+    critic_grads = [
+        p.grad for p in policy.heads.critic.parameters()
+        if p.grad is not None and not torch.all(p.grad == 0)
+    ]
+    assert len(critic_grads) > 0, "Critic head must receive value-loss gradients"
+
+
+def test_evaluate_sequence_value_stop_gradient() -> None:
+    """evaluate_sequence() must stop-gradient: value loss must NOT flow to backbone."""
+    policy = _make_policy()
+    obs_seq = torch.randn(2, 4, 2, 64, 32)
+    acts_seq = torch.randn(2, 4, 4)
+    _, values, _, _, _ = policy.evaluate_sequence(obs_seq, acts_seq)
+
+    policy.zero_grad()
+    values.sum().backward()
+
+    for name, p in policy.encoder.named_parameters():
+        assert p.grad is None or torch.all(p.grad == 0), (
+            f"encoder.{name} must not receive value-loss gradients"
+        )
+    for name, p in policy.temporal_core.named_parameters():
+        assert p.grad is None or torch.all(p.grad == 0), (
+            f"temporal_core.{name} must not receive value-loss gradients"
+        )
+
+    critic_grads = [
+        p.grad for p in policy.heads.critic.parameters()
+        if p.grad is not None and not torch.all(p.grad == 0)
+    ]
+    assert len(critic_grads) > 0, "Critic head must receive value-loss gradients"
+
+
+def test_evaluate_actor_gradient_flows_to_backbone() -> None:
+    """evaluate() actor loss SHOULD propagate through encoder+temporal (not blocked)."""
+    policy = _make_policy()
+    obs = torch.randn(2, 2, 64, 32)
+    acts = torch.randn(2, 4)
+    log_probs, _, _, _, _ = policy.evaluate(obs, acts)
+
+    policy.zero_grad()
+    (-log_probs.sum()).backward()
+
+    # Encoder and temporal core SHOULD have gradients from policy loss
+    encoder_grads = [
+        p.grad for p in policy.encoder.parameters()
+        if p.grad is not None and not torch.all(p.grad == 0)
+    ]
+    assert len(encoder_grads) > 0, "Encoder must receive policy-loss gradients"
+
+    temporal_grads = [
+        p.grad for p in policy.temporal_core.parameters()
+        if p.grad is not None and not torch.all(p.grad == 0)
+    ]
+    assert len(temporal_grads) > 0, "Temporal core must receive policy-loss gradients"

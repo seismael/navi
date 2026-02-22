@@ -32,8 +32,21 @@ class MjxEnvironment:
     validating JAX/MuJoCo availability for runtime capability reporting.
     """
 
-    def __init__(self, dt: float = 1.0) -> None:
+    def __init__(
+        self,
+        dt: float = 0.02,
+        *,
+        speed_scales: tuple[float, float, float, float] = (10.0, 3.0, 5.0, 3.0),
+    ) -> None:
         self._dt = dt
+        # Drone speed scales: (fwd m/s, vert m/s, lat m/s, yaw rad/s)
+        self._speed_fwd = speed_scales[0]
+        self._speed_vert = speed_scales[1]
+        self._speed_lat = speed_scales[2]
+        self._speed_yaw = speed_scales[3]
+        self._prev_linear = np.zeros(3, dtype=np.float32)
+        self._prev_angular = np.zeros(3, dtype=np.float32)
+        self._smoothing: float = 0.3  # momentum factor: 0=instant, 1=no change
         self._backend_info = self._probe_backend()
 
     @property
@@ -41,43 +54,89 @@ class MjxEnvironment:
         """Return detected backend details."""
         return self._backend_info
 
+    @property
+    def dt(self) -> float:
+        """Return the physics timestep (seconds)."""
+        return self._dt
+
+    def set_smoothing(self, alpha: float) -> None:
+        """Set the velocity smoothing factor.
+
+        Args:
+            alpha: Momentum factor in [0, 1].  0 = instant response
+                   (no smoothing), values near 1 = heavy damping.
+                   Default is 0.3 which simulates light drone inertia.
+        """
+        self._smoothing = max(0.0, min(1.0, alpha))
+
+    def reset_velocity(self) -> None:
+        """Zero the internal velocity state (call on episode reset)."""
+        self._prev_linear[:] = 0.0
+        self._prev_angular[:] = 0.0
+
     def step_pose(self, pose: RobotPose, action: Action, timestamp: float) -> RobotPose:
         """Step the robot pose by one simulation tick.
 
-        Linear velocity is applied in *body frame*: ``linear[0]`` is
-        forward along the robot's heading (yaw), ``linear[2]`` is
-        lateral.  The body-frame vector is rotated by ``pose.yaw``
-        before being added to the world-frame position.
+        The action carries **normalised steering** in [-1, 1].
+        This method scales by ``speed_scales`` to get velocity
+        (m/s / rad/s), applies momentum smoothing, rotates to
+        world frame, and integrates by ``dt``.
+
+        A first-order exponential smoothing filter simulates
+        drone inertia::
+
+            actual = (1 - alpha) * commanded + alpha * previous
+
+        where ``alpha`` is the smoothing factor (default 0.3).
         """
         linear: NDArray[np.float32]
         angular: NDArray[np.float32]
 
-        linear = (
+        raw_lin = (
             action.linear_velocity[0]
             if action.linear_velocity.ndim == 2
             else action.linear_velocity
         )
-        angular = (
+        raw_ang = (
             action.angular_velocity[0]
             if action.angular_velocity.ndim == 2
             else action.angular_velocity
         )
 
+        # Scale normalised steering → physical velocity
+        linear = np.array([
+            float(raw_lin[0]) * self._speed_fwd,
+            float(raw_lin[1]) * self._speed_vert if len(raw_lin) > 1 else 0.0,
+            float(raw_lin[2]) * self._speed_lat if len(raw_lin) > 2 else 0.0,
+        ], dtype=np.float32)
+        angular = np.array([
+            float(raw_ang[0]),
+            float(raw_ang[1]) if len(raw_ang) > 1 else 0.0,
+            float(raw_ang[2]) * self._speed_yaw if len(raw_ang) > 2 else 0.0,
+        ], dtype=np.float32)
+
+        # Apply first-order exponential smoothing (momentum)
+        a = self._smoothing
+        smooth_lin = (1.0 - a) * linear + a * self._prev_linear
+        smooth_ang = (1.0 - a) * angular + a * self._prev_angular
+        self._prev_linear[:] = smooth_lin
+        self._prev_angular[:] = smooth_ang
+
         # Rotate body-frame XZ velocity into world frame using yaw
         cos_yaw = float(np.cos(pose.yaw))
         sin_yaw = float(np.sin(pose.yaw))
-        fwd = float(linear[0])
-        lat = float(linear[2])
+        fwd = float(smooth_lin[0])
+        lat = float(smooth_lin[2])
         dx = fwd * cos_yaw - lat * sin_yaw
         dz = fwd * sin_yaw + lat * cos_yaw
 
         return RobotPose(
             x=pose.x + dx * self._dt,
-            y=pose.y + float(linear[1]) * self._dt,
+            y=pose.y + float(smooth_lin[1]) * self._dt,
             z=pose.z + dz * self._dt,
-            roll=pose.roll + float(angular[0]) * self._dt,
-            pitch=pose.pitch + float(angular[1]) * self._dt,
-            yaw=pose.yaw + float(angular[2]) * self._dt,
+            roll=pose.roll + float(smooth_ang[0]) * self._dt,
+            pitch=pose.pitch + float(smooth_ang[1]) * self._dt,
+            yaw=pose.yaw + float(smooth_ang[2]) * self._dt,
             timestamp=timestamp,
         )
 

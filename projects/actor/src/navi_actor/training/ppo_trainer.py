@@ -204,6 +204,10 @@ class PpoTrainer:
         # Optimizer states (may not exist if no update has run yet)
         if self._learner._optimizer is not None:
             state["optimizer_state_dict"] = self._learner._optimizer.state_dict()
+        if self._learner._value_optimizer is not None:
+            state["value_optimizer_state_dict"] = (
+                self._learner._value_optimizer.state_dict()
+            )
         if self._learner._rnd_optimizer is not None:
             state["rnd_optimizer_state_dict"] = (
                 self._learner._rnd_optimizer.state_dict()
@@ -246,6 +250,9 @@ class PpoTrainer:
             if "optimizer_state_dict" in data:
                 opt = self._learner._get_optimizer(self._policy)
                 opt.load_state_dict(data["optimizer_state_dict"])
+            if "value_optimizer_state_dict" in data:
+                val_opt = self._learner._get_value_optimizer(self._policy)
+                val_opt.load_state_dict(data["value_optimizer_state_dict"])
             if "rnd_optimizer_state_dict" in data:
                 rnd_opt = self._learner._get_rnd_optimizer(self._rnd)
                 rnd_opt.load_state_dict(data["rnd_optimizer_state_dict"])

@@ -42,7 +42,7 @@ _EXPLORATION_REWARD: float = 0.3
 _COLLISION_PENALTY: float = -2.0
 _CIRCLING_PENALTY: float = -0.5
 _PROGRESS_REWARD_SCALE: float = 0.8
-_CIRCLING_WINDOW: int = 20
+_CIRCLING_WINDOW: int = 200  # physics ticks (~4 s at dt=0.02)
 
 
 @dataclass
@@ -91,7 +91,15 @@ class VoxelBackend(SimulatorBackend):
         )
         self._lookahead = LookAheadBuffer(capacity=128)
 
-        self._mjx_env = MjxEnvironment(dt=1.0)
+        self._mjx_env = MjxEnvironment(
+            dt=config.physics_dt,
+            speed_scales=(
+                config.drone_speed,
+                config.drone_climb_rate,
+                config.drone_strafe_speed,
+                config.drone_yaw_rate,
+            ),
+        )
         self._distance_builder = DistanceMatrixBuilder(
             azimuth_bins=config.azimuth_bins,
             elevation_bins=config.elevation_bins,
@@ -136,6 +144,7 @@ class VoxelBackend(SimulatorBackend):
         a.episode_step = 0
         a.needs_reset = False
         a.prev_depth = None
+        self._mjx_env.reset_velocity()
 
         spawn = self._generator.spawn_position()
         a.pose = RobotPose(
@@ -173,8 +182,8 @@ class VoxelBackend(SimulatorBackend):
             if action.linear_velocity.ndim == 2
             else float(action.linear_velocity[0])
         )
-        expected_motion = max(1e-3, abs(linear_cmd))
-        collided = linear_cmd > 0.15 and proposed_motion / expected_motion < 0.15
+        expected_motion = max(1e-3, abs(linear_cmd) * self._mjx_env.dt)
+        collided = linear_cmd > 0.5 and expected_motion > 1e-6 and proposed_motion / expected_motion < 0.15
 
         a.pose = new_pose
         a.episode_step += 1

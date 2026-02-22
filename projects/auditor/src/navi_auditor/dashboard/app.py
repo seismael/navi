@@ -1,11 +1,10 @@
 """Ghost-Matrix RL Dashboard — PyQtGraph/Qt6 main application.
 
 GPU-accelerated, dockable-panel layout with real-time RL training
-curves, action-intention overlays, depth-mapped colormaps, semantic
-legend, and Tab-toggle manual teleop.
+curves, depth-mapped colormaps, and live occupancy map.
 
-Replaces the legacy OpenCV ``LiveDashboard`` with a professional
-robotics observability suite.
+Provides a two-panel spatial view (Live Map + Raw Depth) on the left
+and a dense two-column chart grid of training metrics on the right.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ from navi_auditor.dashboard.renderers import (
     add_orientation_guides,
     compute_nav_metrics,
     depth_to_viridis,
-    render_first_person,
 )
 from navi_auditor.stream_engine import StreamEngine
 
@@ -105,7 +103,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
     # ── layout construction ──────────────────────────────────────────
 
     def _build_layout(self) -> None:
-        """Build the main window layout: 2x2 viewports left, stacked charts right."""
+        """Build the main window layout: spatial views left, 2-col charts right."""
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main_layout = QtWidgets.QVBoxLayout(central)
@@ -128,37 +126,28 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             self._actor_tab_bar.currentChanged.connect(self._on_actor_tab_changed)
             main_layout.addWidget(self._actor_tab_bar)
 
-        # Body: splitter with left (2x2 viewports) and right (chart stack)
+        # Body: splitter with left (spatial views) and right (chart grid)
         body = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         main_layout.addWidget(body, stretch=1)
 
-        # ── Left: 2x2 viewport grid (~67%) ───────────────────────────
-        viewport_container = QtWidgets.QWidget()
-        viewport_grid = QtWidgets.QGridLayout(viewport_container)
-        viewport_grid.setContentsMargins(2, 2, 2, 2)
-        viewport_grid.setSpacing(2)
+        # ── Left: stacked spatial views (~30%) ───────────────────────
+        view_container = QtWidgets.QWidget()
+        view_layout = QtWidgets.QVBoxLayout(view_container)
+        view_layout.setContentsMargins(2, 2, 2, 2)
+        view_layout.setSpacing(2)
 
-        # Top-left: First Person View
-        self._fp_panel = ImagePanel(title="FIRST PERSON")
-        self._fp_arrow = self._fp_panel.add_action_arrow()
-        viewport_grid.addWidget(self._fp_panel, 0, 0)
-
-        # Top-right: Live 2D Occupancy Map
+        # Live 2D Occupancy Map
         self._occ_map = OccupancyMap(max_distance=15.0)
         self._env_panel = ImagePanel(title="LIVE MAP")
-        viewport_grid.addWidget(self._env_panel, 0, 1)
+        view_layout.addWidget(self._env_panel, stretch=1)
 
-        # Bottom-left: Raw Depth (Viridis)
+        # Raw Depth (Viridis)
         self._depth_panel = ImagePanel(title="RAW DEPTH (Viridis)")
-        viewport_grid.addWidget(self._depth_panel, 1, 0)
+        view_layout.addWidget(self._depth_panel, stretch=1)
 
-        # Bottom-right: Panorama 360°
-        self._pano_panel = ImagePanel(title="PANORAMA 360\u00b0")
-        viewport_grid.addWidget(self._pano_panel, 1, 1)
+        body.addWidget(view_container)
 
-        body.addWidget(viewport_container)
-
-        # ── Right: stacked training metric charts (~33%) ─────────────
+        # ── Right: 2-column training metric chart grid (~70%) ────────
         chart_scroll = QtWidgets.QScrollArea()
         chart_scroll.setWidgetResizable(True)
         chart_scroll.setHorizontalScrollBarPolicy(
@@ -169,19 +158,27 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         )
 
         chart_container = QtWidgets.QWidget()
-        chart_layout = QtWidgets.QVBoxLayout(chart_container)
-        chart_layout.setContentsMargins(2, 2, 2, 2)
-        chart_layout.setSpacing(2)
+        chart_grid = QtWidgets.QGridLayout(chart_container)
+        chart_grid.setContentsMargins(2, 2, 2, 2)
+        chart_grid.setSpacing(3)
 
+        # Create all plots
+        self._plot_reward_ema = RollingPlot(
+            title="Reward EMA", color="#2e86de",
+        )
         self._plot_reward = RollingPlot(title="Step Reward", color="#2e86de")
         self._plot_episode_return = RollingPlot(
             title="Episode Return", color="#8e44ad",
         )
-        self._plot_collision = RollingPlot(title="Done / Collision", color="#e74c3c")
         self._plot_episode_len = RollingPlot(
             title="Episode Length", color="#1abc9c",
         )
-        self._plot_forward = RollingPlot(title="Forward Velocity", color="#27ae60")
+        self._plot_collision = RollingPlot(
+            title="Done / Collision", color="#e74c3c",
+        )
+        self._plot_forward = RollingPlot(
+            title="Forward Velocity", color="#27ae60",
+        )
         self._plot_yaw = RollingPlot(title="Yaw Rate", color="#f39c12")
         self._plot_front_depth = RollingPlot(
             title="Front Depth (min)", color="#3498db",
@@ -190,8 +187,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_near_fraction = RollingPlot(
             title="Near-Object Fraction", color="#e74c3c",
         )
-
-        # PPO-specific training metric charts
         self._plot_policy_loss = RollingPlot(
             title="Policy Loss", color="#9b59b6",
         )
@@ -219,43 +214,46 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_beta = RollingPlot(
             title="Beta (intrinsic coeff)", color="#9b59b6",
         )
-        self._plot_reward_ema = RollingPlot(
-            title="Reward EMA", color="#2e86de",
-        )
 
-        chart_h = 120
-        for plot in (
-            self._plot_reward,
-            self._plot_episode_return,
-            self._plot_collision,
-            self._plot_episode_len,
-            self._plot_forward,
-            self._plot_yaw,
-            self._plot_front_depth,
-            self._plot_mean_depth,
-            self._plot_near_fraction,
-            self._plot_reward_ema,
-            self._plot_policy_loss,
-            self._plot_value_loss,
-            self._plot_entropy,
-            self._plot_kl,
-            self._plot_clip_fraction,
-            self._plot_rnd_loss,
-            self._plot_intrinsic,
-            self._plot_loop_sim,
-            self._plot_beta,
-        ):
-            plot.setMinimumHeight(chart_h)
-            plot.setMaximumHeight(chart_h * 2)
-            chart_layout.addWidget(plot)
+        # Arrange in 2-column grid — most important charts at top
+        # Row 0: headline metrics
+        # Row 1-4: PPO training diagnostics
+        # Row 5+: sensor / navigation metrics
+        chart_pairs: list[tuple[RollingPlot, RollingPlot]] = [
+            (self._plot_reward_ema, self._plot_episode_return),
+            (self._plot_policy_loss, self._plot_value_loss),
+            (self._plot_entropy, self._plot_kl),
+            (self._plot_clip_fraction, self._plot_rnd_loss),
+            (self._plot_reward, self._plot_collision),
+            (self._plot_episode_len, self._plot_forward),
+            (self._plot_yaw, self._plot_front_depth),
+            (self._plot_mean_depth, self._plot_near_fraction),
+            (self._plot_intrinsic, self._plot_loop_sim),
+            (self._plot_beta, self._plot_beta),  # placeholder, handled below
+        ]
 
-        chart_layout.addStretch()
+        chart_h = 110
+        for row, (left, right) in enumerate(chart_pairs):
+            if row == len(chart_pairs) - 1:
+                # Last row: beta spans both columns
+                self._plot_beta.setMinimumHeight(chart_h)
+                self._plot_beta.setMaximumHeight(chart_h * 2)
+                chart_grid.addWidget(self._plot_beta, row, 0, 1, 2)
+                break
+            left.setMinimumHeight(chart_h)
+            left.setMaximumHeight(chart_h * 2)
+            right.setMinimumHeight(chart_h)
+            right.setMaximumHeight(chart_h * 2)
+            chart_grid.addWidget(left, row, 0)
+            chart_grid.addWidget(right, row, 1)
+
+        chart_grid.setRowStretch(len(chart_pairs), 1)
         chart_scroll.setWidget(chart_container)
         body.addWidget(chart_scroll)
 
-        # Set default split ratios: 2/3 viewports, 1/3 charts
-        body.setStretchFactor(0, 2)
-        body.setStretchFactor(1, 1)
+        # Split ratios: ~30% spatial views, ~70% charts
+        body.setStretchFactor(0, 3)
+        body.setStretchFactor(1, 7)
 
     def _wire_plots(self) -> None:
         """Connect rolling plots to the active actor's stream state."""
@@ -315,41 +313,14 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         action = state.latest_action
 
         if dm is not None:
-            self._update_viewport(dm)
             self._update_spatial_panels(dm)
             self._update_status(dm, action)
 
-        self._update_action_arrow(dm, action)
         self._refresh_plots()
         self._handle_teleop()
 
-    def _update_viewport(self, dm: object) -> None:
-        """Render first-person view and push to viewport panel."""
-        from navi_contracts import DistanceMatrix
-
-        assert isinstance(dm, DistanceMatrix)
-        depth_2d = dm.depth[0]
-        semantic_2d = dm.semantic[0]
-        valid_2d = dm.valid_mask[0]
-        az_bins = depth_2d.shape[0]
-
-        fov_bins = max(1, int(az_bins * _FOV_FRACTION))
-        centre_bin = az_bins // 2
-        fov_lo = centre_bin - fov_bins // 2
-        fov_hi = fov_lo + fov_bins
-
-        fov_depth = depth_2d[fov_lo:fov_hi, :]
-        fov_semantic = semantic_2d[fov_lo:fov_hi, :]
-        fov_valid = valid_2d[fov_lo:fov_hi, :]
-
-        fp_img, _center_m = render_first_person(
-            fov_depth, fov_semantic, fov_valid, 960, 720,
-            pitch=dm.robot_pose.pitch,
-        )
-        self._fp_panel.set_image(fp_img)
-
     def _update_spatial_panels(self, dm: object) -> None:
-        """Update 2x2 viewport panels: 3D environment, raw depth, panorama."""
+        """Update spatial view panels: live occupancy map + raw depth."""
         from navi_contracts import DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
@@ -380,14 +351,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         add_orientation_guides(viridis_resized)
         self._depth_panel.set_image(viridis_resized)
 
-        # Panorama 360° — full azimuth transposed
-        pano_img = depth_to_viridis(depth_2d.T, valid_2d.T)
-        pano_resized = cv2.resize(
-            pano_img, (640, 360), interpolation=cv2.INTER_NEAREST,
-        )
-        add_orientation_guides(pano_resized)
-        self._pano_panel.set_image(pano_resized)
-
     def _update_status(self, dm: object, action: object) -> None:
         """Update status bar from latest data."""
         from navi_contracts import Action, DistanceMatrix
@@ -417,30 +380,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             lin = float(action.linear_velocity[0, 0])
             yaw = float(action.angular_velocity[0, 2])
             self._status_bar.set_velocity(lin, yaw)
-
-    def _update_action_arrow(self, dm: object, action: object) -> None:
-        """Update the action intention arrow overlay on first-person view."""
-        from navi_contracts import Action
-
-        if not isinstance(action, Action):
-            self._fp_arrow.setVisible(False)
-            return
-
-        lin = float(action.linear_velocity[0, 0])
-        yaw = float(action.angular_velocity[0, 2])
-
-        # Use latest advantage for colour if available
-        state = self._engine.state
-        advantage = float(state.advantage_history[-1]) if state.advantage_history else 0.0
-
-        self._fp_arrow.setVisible(True)
-        self._fp_arrow.update_from_action(
-            linear_speed=lin,
-            yaw_rate=yaw,
-            advantage=advantage,
-            img_width=960,
-            img_height=720,
-        )
 
     def _refresh_plots(self) -> None:
         """Redraw all rolling training plots."""

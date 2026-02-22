@@ -15,6 +15,17 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
 
     Actor outputs a 4-dim mean and uses a learnable log_std parameter.
     Action dimensions: [fwd, vert, lat, yaw].
+
+    Steering convention
+    -------------------
+    All four dimensions are **normalised steering commands** in [-1, 1].
+    The policy has no concept of speed — it only expresses *directional
+    intent* (forward/backward, up/down, left/right, turn).
+
+    Actual velocity (m/s, rad/s) is determined by ``drone_speed`` and
+    related parameters on the **backend** (Section Manager config).
+    This means the same trained model works at any flight speed.
+
     Critic outputs a scalar state-value estimate.
     """
 
@@ -22,10 +33,10 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
         self,
         input_dim: int = 128,
         *,
-        max_forward: float = 1.2,
-        max_vertical: float = 0.8,
-        max_lateral: float = 0.8,
-        max_yaw: float = 1.2,
+        max_forward: float = 1.0,
+        max_vertical: float = 1.0,
+        max_lateral: float = 1.0,
+        max_yaw: float = 1.0,
     ) -> None:
         super().__init__()
         self.action_dim = 4

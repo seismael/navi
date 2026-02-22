@@ -25,6 +25,7 @@ class TestStepCycle:
             chunk_size=4,
             window_radius=1,
             lookahead_margin=2,
+            barrier_distance=0.0,
         )
         gen = MazeGenerator(seed=config.seed, chunk_size=config.chunk_size)
         backend = VoxelBackend(config, gen)
@@ -88,6 +89,7 @@ class TestStepCycle:
             chunk_size=4,
             window_radius=1,
             lookahead_margin=2,
+            barrier_distance=0.0,
         )
         gen = MazeGenerator(seed=config.seed, chunk_size=config.chunk_size)
         backend = VoxelBackend(config, gen)

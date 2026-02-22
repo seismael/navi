@@ -18,12 +18,22 @@ The agent is modelled as a **2.5D auto-level quadcopter**: it can
 fly forward/backward, strafe left/right, change altitude, and yaw.
 Roll and pitch are zeroed (auto-stabilised).
 
-Velocity convention (matches ``MjxEnvironment.step_pose``):
+Steering convention
+~~~~~~~~~~~~~~~~~~~
+The policy outputs **normalised steering** in [-1, 1].  The backend
+multiplies by drone speed parameters (``drone_speed``, etc.) to get
+physical velocity:
 
-- ``linear[0]`` — forward  (body +X)
-- ``linear[1]`` — vertical (world +Y)
-- ``linear[2]`` — lateral  (body strafe-right)
-- ``angular[2]`` — yaw rate (rad / step)
+- ``linear[0]``  × ``drone_speed``        → forward  (body +X) m/s
+- ``linear[1]``  × ``drone_climb_rate``   → vertical (world +Y) m/s
+- ``linear[2]``  × ``drone_strafe_speed`` → lateral  (body strafe-right) m/s
+- ``angular[2]`` × ``drone_yaw_rate``     → yaw rate (rad/s)
+
+Changing ``drone_speed`` changes how fast the drone flies **without
+retraining**.  The same trained model works at any speed.
+
+Displacement per tick = velocity × ``physics_dt`` (default 0.02 s = 50 Hz).
+A first-order exponential smoothing filter simulates drone inertia.
 
 Episode management
 ------------------
@@ -64,11 +74,11 @@ _EXPLORATION_REWARD: float = 0.3
 _COLLISION_PENALTY: float = -1.0
 _PROGRESS_REWARD_SCALE: float = 0.8
 _CIRCLING_PENALTY: float = -0.5
-_CIRCLING_WINDOW: int = 20
+_CIRCLING_WINDOW: int = 200  # physics ticks (~4 s at dt=0.02)
 _PROXIMITY_CLEAR_BONUS: float = 0.15
 
 # ── Episode limits ───────────────────────────────────────────────────
-_MAX_STEPS_PER_EPISODE: int = 1000
+_MAX_STEPS_PER_EPISODE: int = 50_000
 _STUCK_CONSECUTIVE: int = 8
 
 # ── Drone physics ────────────────────────────────────────────────────
@@ -100,6 +110,12 @@ class _ActorState:
     floor_y: float = 0.0
     needs_reset: bool = False
     spawn_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    prev_linear: NDArray[np.float32] = field(
+        default_factory=lambda: np.zeros(3, dtype=np.float32),
+    )
+    prev_angular: NDArray[np.float32] = field(
+        default_factory=lambda: np.zeros(3, dtype=np.float32),
+    )
 
 
 class MeshSceneBackend(SimulatorBackend):
@@ -122,6 +138,15 @@ class MeshSceneBackend(SimulatorBackend):
         self._el_bins = config.elevation_bins
         self._max_distance = config.max_distance
         self._n_actors = config.n_actors
+        self._dt: float = config.physics_dt
+        self._smoothing: float = 0.3  # velocity EMA momentum
+        self._steps_per_decision: int = config.steps_per_decision
+
+        # Drone speed scales (normalised steering → m/s / rad/s)
+        self._drone_speed: float = config.drone_speed
+        self._drone_climb: float = config.drone_climb_rate
+        self._drone_strafe: float = config.drone_strafe_speed
+        self._drone_yaw: float = config.drone_yaw_rate
 
         # Load scene mesh
         scene_path = config.habitat_scene
@@ -198,6 +223,8 @@ class MeshSceneBackend(SimulatorBackend):
         a.prev_depth = None
         a.stuck_counter = 0
         a.needs_reset = False
+        a.prev_linear = np.zeros(3, dtype=np.float32)
+        a.prev_angular = np.zeros(3, dtype=np.float32)
 
         sx, sy, sz = a.spawn_position
         a.floor_y = sy - _HOVER_ALTITUDE
@@ -211,7 +238,14 @@ class MeshSceneBackend(SimulatorBackend):
     def step(
         self, action: Action, step_id: int, *, actor_id: int = 0,
     ) -> tuple[DistanceMatrix, StepResult]:
-        """Apply action, update pose, return observation + result."""
+        """Apply action, update pose, return observation + result.
+
+        When ``steps_per_decision > 1`` the same action is applied for
+        multiple physics sub-ticks before building the observation.
+        This simulates the *command-hold* paradigm where the actor
+        sets a desired velocity state and the flight controller
+        maintains it at high frequency.
+        """
         a = self._actors[actor_id]
 
         # Auto-reset on previous truncation / done
@@ -219,37 +253,45 @@ class MeshSceneBackend(SimulatorBackend):
             a.episode_id += 1
             self.reset(a.episode_id, actor_id=actor_id)
 
-        now = time.time()
         prev_pose = a.pose
-        a.step_count += 1
+        collided = False
 
-        # Apply kinematic drone action
-        new_pose = self._apply_action(action, now, actor_id=actor_id)
+        # Run N physics sub-ticks with the same action (command-hold)
+        for _sub in range(self._steps_per_decision):
+            now = time.time()
+            a.step_count += 1
 
-        # Collision detection
-        dx = new_pose.x - prev_pose.x
-        dz = new_pose.z - prev_pose.z
-        actual_motion = math.sqrt(dx * dx + dz * dz)
+            sub_prev = a.pose
+            new_pose = self._apply_action(action, now, actor_id=actor_id)
 
-        lin_vel = action.linear_velocity
-        cmd_fwd = float(lin_vel[0, 0]) if lin_vel.ndim == 2 else float(lin_vel[0])
-        expected = max(1e-3, abs(cmd_fwd))
-        collided = cmd_fwd > 0.15 and actual_motion / expected < 0.15
+            # Collision detection per sub-tick
+            dx = new_pose.x - sub_prev.x
+            dz = new_pose.z - sub_prev.z
+            actual_motion = math.sqrt(dx * dx + dz * dz)
 
-        # Stuck detection + auto-nudge
-        if actual_motion < 0.05:
-            a.stuck_counter += 1
-        else:
-            a.stuck_counter = 0
+            lin_vel = action.linear_velocity
+            cmd_fwd = float(lin_vel[0, 0]) if lin_vel.ndim == 2 else float(lin_vel[0])
+            expected = max(1e-3, abs(cmd_fwd)) * self._dt
+            if cmd_fwd > 0.5 and expected > 1e-6 and actual_motion / expected < 0.15:
+                collided = True
 
-        if a.stuck_counter >= _STUCK_CONSECUTIVE:
-            new_pose = self._nudge_escape(new_pose, now)
-            a.stuck_counter = 0
+            # Stuck detection + auto-nudge
+            if actual_motion < 0.001:
+                a.stuck_counter += 1
+            else:
+                a.stuck_counter = 0
 
-        a.pose = new_pose
+            if a.stuck_counter >= _STUCK_CONSECUTIVE:
+                new_pose = self._nudge_escape(new_pose, now)
+                a.stuck_counter = 0
+
+            a.pose = new_pose
+
+            if collided or a.step_count >= _MAX_STEPS_PER_EPISODE:
+                break
 
         obs = self._build_observation(step_id=step_id, actor_id=actor_id)
-        reward = self._compute_reward(prev_pose, new_pose, collided, obs, actor_id=actor_id)
+        reward = self._compute_reward(prev_pose, a.pose, collided, obs, actor_id=actor_id)
         a.episode_return += reward
 
         # Episode horizon → truncation
@@ -571,14 +613,16 @@ class MeshSceneBackend(SimulatorBackend):
     def _apply_action(
         self, action: Action, timestamp: float, *, actor_id: int = 0,
     ) -> RobotPose:
-        """Apply a body-frame drone action to the current pose.
+        """Apply a normalised steering command to the current pose.
 
-        Velocity convention (matches ``MjxEnvironment.step_pose``):
+        The policy outputs steering in [-1, 1].  This method scales
+        the steering by drone speed parameters to get physical
+        velocity (m/s, rad/s), then integrates by ``dt``.
 
-        - ``linear[0]`` = forward  (body +X)
-        - ``linear[1]`` = vertical (world +Y)
-        - ``linear[2]`` = lateral  (body strafe-right)
-        - ``angular[2]`` = yaw rate
+        - ``linear[0]`` = forward steering  → × ``drone_speed``
+        - ``linear[1]`` = vertical steering → × ``drone_climb_rate``
+        - ``linear[2]`` = lateral steering  → × ``drone_strafe_speed``
+        - ``angular[2]`` = yaw steering     → × ``drone_yaw_rate``
 
         Includes altitude-hold spring and collision avoidance.
         """
@@ -589,23 +633,34 @@ class MeshSceneBackend(SimulatorBackend):
             lin = lin[0]
             ang = ang[0]
 
-        fwd = float(lin[0])
-        vert = float(lin[1]) if len(lin) > 1 else 0.0
-        lat = float(lin[2]) if len(lin) > 2 else 0.0
-        yaw_rate = float(ang[2]) if len(ang) > 2 else 0.0
+        # Scale normalised steering [-1, 1] → physical velocity
+        fwd = float(lin[0]) * self._drone_speed
+        vert = (float(lin[1]) if len(lin) > 1 else 0.0) * self._drone_climb
+        lat = (float(lin[2]) if len(lin) > 2 else 0.0) * self._drone_strafe
+        yaw_rate = (float(ang[2]) if len(ang) > 2 else 0.0) * self._drone_yaw
 
-        new_yaw = a.pose.yaw + yaw_rate
+        # First-order exponential smoothing (momentum)
+        sm = self._smoothing
+        s_fwd = (1.0 - sm) * fwd + sm * float(a.prev_linear[0])
+        s_vert = (1.0 - sm) * vert + sm * float(a.prev_linear[1])
+        s_lat = (1.0 - sm) * lat + sm * float(a.prev_linear[2])
+        s_yaw = (1.0 - sm) * yaw_rate + sm * float(a.prev_angular[2])
+        a.prev_linear[:] = [s_fwd, s_vert, s_lat]
+        a.prev_angular[:] = [0.0, 0.0, s_yaw]
+
+        dt = self._dt
+        new_yaw = a.pose.yaw + s_yaw * dt
 
         # Body-to-world rotation (same convention as MjxEnvironment)
         cos_y = math.cos(a.pose.yaw)
         sin_y = math.sin(a.pose.yaw)
-        world_dx = fwd * cos_y - lat * sin_y
-        world_dz = fwd * sin_y + lat * cos_y
+        world_dx = (s_fwd * cos_y - s_lat * sin_y) * dt
+        world_dz = (s_fwd * sin_y + s_lat * cos_y) * dt
 
         # Altitude hold: spring towards hover altitude + command offset
-        target_y = a.floor_y + _HOVER_ALTITUDE + vert
+        target_y = a.floor_y + _HOVER_ALTITUDE + s_vert
         alt_error = target_y - a.pose.y
-        world_dy = _ALTITUDE_SPRING * alt_error
+        world_dy = _ALTITUDE_SPRING * alt_error * dt
 
         # Proposed position
         prop_x = a.pose.x + world_dx

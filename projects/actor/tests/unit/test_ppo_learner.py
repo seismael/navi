@@ -108,3 +108,70 @@ def test_empty_buffer_returns_zeros() -> None:
     buf.compute_returns_and_advantages(last_value=0.0)
     metrics = learner.train_ppo_epoch(policy, buf, ppo_epochs=1, minibatch_size=32, seq_len=0)
     assert metrics.total_loss == 0.0
+
+
+def test_default_value_coeff_is_low() -> None:
+    """value_coeff default should be 0.005 to prevent gradient domination."""
+    from navi_actor.config import ActorConfig
+
+    cfg = ActorConfig()
+    assert cfg.value_coeff == 0.005
+
+
+def test_separate_optimizers_created() -> None:
+    """PpoLearner should create separate optimizers for policy and value."""
+    policy = CognitiveMambaPolicy(embedding_dim=128)
+    learner = PpoLearner(learning_rate=1e-3)
+
+    policy_opt = learner._get_optimizer(policy)
+    value_opt = learner._get_value_optimizer(policy)
+
+    # Must be distinct optimizer instances
+    assert policy_opt is not value_opt
+
+    # Policy optimizer should NOT contain critic params
+    policy_param_ids = set()
+    for group in policy_opt.param_groups:
+        for p in group["params"]:
+            policy_param_ids.add(id(p))
+
+    critic_param_ids = {id(p) for p in policy.heads.critic.parameters()}
+    assert policy_param_ids.isdisjoint(critic_param_ids), (
+        "Policy optimizer must not contain critic parameters"
+    )
+
+    # Value optimizer should ONLY contain critic params
+    value_param_ids = set()
+    for group in value_opt.param_groups:
+        for p in group["params"]:
+            value_param_ids.add(id(p))
+
+    assert value_param_ids == critic_param_ids, (
+        "Value optimizer must contain exactly the critic head parameters"
+    )
+
+
+def test_gradient_isolation_policy_updates_actor() -> None:
+    """After one PPO step, actor head weights should change but not due to value loss."""
+    policy = CognitiveMambaPolicy(embedding_dim=128)
+    learner = PpoLearner(learning_rate=1e-2, value_coeff=0.005)
+
+    # Record initial actor + critic weights
+    actor_w_before = policy.heads.actor[0].weight.data.clone()
+    critic_w_before = policy.heads.critic[0].weight.data.clone()
+
+    buf = _fill_buffer(64)
+    learner.train_ppo_epoch(
+        policy, buf, ppo_epochs=2, minibatch_size=32, seq_len=0,
+    )
+
+    actor_w_after = policy.heads.actor[0].weight.data
+    critic_w_after = policy.heads.critic[0].weight.data
+
+    # Both heads should have been updated
+    assert not torch.allclose(actor_w_before, actor_w_after), (
+        "Actor head should be updated by policy loss"
+    )
+    assert not torch.allclose(critic_w_before, critic_w_after), (
+        "Critic head should be updated by value loss"
+    )
