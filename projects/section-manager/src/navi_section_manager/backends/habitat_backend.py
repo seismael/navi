@@ -45,6 +45,10 @@ _GOAL_RADIUS: float = 0.2
 _CIRCLING_PENALTY: float = -0.5
 _CIRCLING_WINDOW: int = 20
 
+# Dynamic speed scaling constants
+_SAFE_DEPTH_THRESHOLD: float = 0.3
+_MIN_SPEED_FACTOR: float = 0.05
+
 
 class HabitatBackend(SimulatorBackend):
     """SimulatorBackend backed by Meta's habitat-sim.
@@ -97,11 +101,12 @@ class HabitatBackend(SimulatorBackend):
         self._physics_dt: float = config.physics_dt
 
         # Drone speed scales (normalised steering → m/s / rad/s)
-        self._drone_speed: float = config.drone_speed
+        self._drone_max_speed: float = config.drone_max_speed
         self._drone_climb: float = config.drone_climb_rate
         self._drone_strafe: float = config.drone_strafe_speed
         self._drone_yaw: float = config.drone_yaw_rate
         self._needs_reset: bool = False
+        self._prev_depth: NDArray[np.float32] | None = None
         self._pose = RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=0.0)
 
         # Reward tracking
@@ -165,6 +170,7 @@ class HabitatBackend(SimulatorBackend):
         self._yaw_history.clear()
         self._pos_history.clear()
         self._adapter.reset()
+        self._prev_depth = None
 
         return self._obs_to_distance_matrix(obs, step_id=0)
 
@@ -187,6 +193,9 @@ class HabitatBackend(SimulatorBackend):
 
         # Build observation
         dm = self._obs_to_distance_matrix(obs, step_id=step_id)
+
+        # Track depth for dynamic speed scaling on next step
+        self._prev_depth = dm.depth[0].copy() if dm.depth is not None else None
 
         # Compute reward
         reward = self._compute_reward(previous_pose, self._pose, obs)
@@ -220,6 +229,24 @@ class HabitatBackend(SimulatorBackend):
         if self._sim is not None:
             self._sim.close()
             self._sim = None
+
+    # ------------------------------------------------------------------
+    # Dynamic speed scaling
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_speed_factor(
+        prev_depth: NDArray[np.float32] | None,
+    ) -> float:
+        """Proximity-based speed factor from front hemisphere depth."""
+        if prev_depth is None:
+            return _MIN_SPEED_FACTOR
+        az_bins = prev_depth.shape[0]
+        span = max(1, az_bins // 8)
+        front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
+        min_front = float(np.min(front)) if front.size > 0 else 1.0
+        factor = min_front / _SAFE_DEPTH_THRESHOLD
+        return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))
 
     # ------------------------------------------------------------------
     # Habitat configuration
@@ -312,9 +339,7 @@ class HabitatBackend(SimulatorBackend):
         - linear_velocity: (batch, 3) — [forward, strafe, vertical]
         - angular_velocity: (batch, 3) — [roll_rate, pitch_rate, yaw_rate]
 
-        We use habitat-sim's velocity_control interface:
-        - linear_velocity: [x, y, z] in agent-local frame
-        - angular_velocity: [x, y, z] in agent-local frame (Y = yaw)
+        Speed is dynamically scaled by front-hemisphere proximity.
         """
         # Extract from batch dimension
         if action.linear_velocity.ndim == 2:
@@ -324,10 +349,12 @@ class HabitatBackend(SimulatorBackend):
             lin = action.linear_velocity
             ang = action.angular_velocity
 
-        forward = float(lin[0]) * self._drone_speed
-        strafe = (float(lin[1]) if len(lin) > 1 else 0.0) * self._drone_strafe
-        vertical = (float(lin[2]) if len(lin) > 2 else 0.0) * self._drone_climb
-        yaw_rate = (float(ang[2]) if len(ang) > 2 else 0.0) * self._drone_yaw
+        speed_factor = self._compute_speed_factor(self._prev_depth)
+
+        forward = float(lin[0]) * self._drone_max_speed * speed_factor
+        strafe = (float(lin[1]) if len(lin) > 1 else 0.0) * self._drone_strafe * speed_factor
+        vertical = (float(lin[2]) if len(lin) > 2 else 0.0) * self._drone_climb * speed_factor
+        yaw_rate = (float(ang[2]) if len(ang) > 2 else 0.0) * self._drone_yaw  # yaw unscaled
 
         # Direct physics-based velocity control
         agent = self._sim.get_agent(0)

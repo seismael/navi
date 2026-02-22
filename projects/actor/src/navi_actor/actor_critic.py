@@ -9,6 +9,8 @@ from torch import Tensor, nn
 
 __all__: list[str] = ["ActorCriticHeads"]
 
+_SQRT2: float = math.sqrt(2.0)
+
 
 class ActorCriticHeads(nn.Module):  # type: ignore[misc]
     """Separate actor (Gaussian policy) and critic (value) heads.
@@ -22,8 +24,10 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
     The policy has no concept of speed — it only expresses *directional
     intent* (forward/backward, up/down, left/right, turn).
 
-    Actual velocity (m/s, rad/s) is determined by ``drone_speed`` and
+    Actual velocity (m/s, rad/s) is determined by ``drone_max_speed`` and
     related parameters on the **backend** (Section Manager config).
+    Speed is also **dynamic**: the backend scales it with front-hemisphere
+    proximity so the drone crawls near walls and races in open space.
     This means the same trained model works at any flight speed.
 
     Critic outputs a scalar state-value estimate.
@@ -63,6 +67,39 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
             nn.ReLU(inplace=True),
             nn.Linear(64, 1),
         )
+
+        # ── PPO-standard orthogonal initialization ──
+        # ReLU-preceding layers: gain = sqrt(2)
+        # Final actor layer: gain = 0.01 — keeps pre-Tanh activations
+        # near zero so Tanh stays in its linear region at init.
+        # Final critic layer: gain = 1.0 — standard for value heads.
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        """Apply orthogonal initialization (PPO best-practice).
+
+        * Hidden (ReLU) layers: ``gain = sqrt(2)``
+        * Actor output (pre-Tanh): ``gain = 0.01`` — critical to prevent
+          Tanh saturation that kills gradients after the first update.
+        * Critic output: ``gain = 1.0``
+        """
+        for module in (self.actor, self.critic):
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.orthogonal_(layer.weight, gain=_SQRT2)
+                    nn.init.zeros_(layer.bias)
+
+        # Actor final linear (index 2 in Sequential: Linear→ReLU→Linear→Tanh)
+        actor_final = self.actor[2]
+        assert isinstance(actor_final, nn.Linear)
+        nn.init.orthogonal_(actor_final.weight, gain=0.01)
+        nn.init.zeros_(actor_final.bias)
+
+        # Critic final linear (index 2 in Sequential: Linear→ReLU→Linear)
+        critic_final = self.critic[2]
+        assert isinstance(critic_final, nn.Linear)
+        nn.init.orthogonal_(critic_final.weight, gain=1.0)
+        nn.init.zeros_(critic_final.bias)
 
     def forward(self, features: Tensor) -> tuple[Tensor, Tensor]:
         """Compute action mean and state value.

@@ -709,7 +709,9 @@ class PpoTrainer:
                 buf.compute_returns_and_advantages(last_value=last_value)
 
             # ── PPO update — merge all actor buffers ──
-            # Find the first non-empty buffer to use as the base
+            # Find the first non-empty buffer to use as the base.
+            # Insert a synthetic done boundary at the join so that BPTT
+            # chunks never straddle two different actors' trajectories.
             merged: TrajectoryBuffer | None = None
             for actor_id in range(n):
                 buf = self._buffers[actor_id]
@@ -718,6 +720,21 @@ class PpoTrainer:
                 if merged is None:
                     merged = buf
                 else:
+                    # Mark the last transition of the previous actor as
+                    # "done" so the GRU resets across the boundary.
+                    if len(merged) > 0:
+                        tail = merged._transitions[-1]
+                        if not tail.done:
+                            merged._transitions[-1] = PPOTransition(
+                                observation=tail.observation,
+                                action=tail.action,
+                                log_prob=tail.log_prob,
+                                value=tail.value,
+                                reward=tail.reward,
+                                done=True,
+                                truncated=tail.truncated,
+                                hidden_state=tail.hidden_state,
+                            )
                     merged._transitions.extend(buf._transitions)
                     merged._advantages = torch.cat(
                         [merged._advantages, buf._advantages],

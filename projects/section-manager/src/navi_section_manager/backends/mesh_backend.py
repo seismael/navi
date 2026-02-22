@@ -21,16 +21,21 @@ Roll and pitch are zeroed (auto-stabilised).
 Steering convention
 ~~~~~~~~~~~~~~~~~~~
 The policy outputs **normalised steering** in [-1, 1].  The backend
-multiplies by drone speed parameters (``drone_speed``, etc.) to get
-physical velocity:
+multiplies by drone speed parameters to get physical velocity.
+Forward speed is **dynamic**: it scales with the minimum depth in
+the front hemisphere of the previous observation.
 
-- ``linear[0]``  × ``drone_speed``        → forward  (body +X) m/s
-- ``linear[1]``  × ``drone_climb_rate``   → vertical (world +Y) m/s
-- ``linear[2]``  × ``drone_strafe_speed`` → lateral  (body strafe-right) m/s
-- ``angular[2]`` × ``drone_yaw_rate``     → yaw rate (rad/s)
+- ``linear[0]``  × ``drone_max_speed × speed_factor``  → forward m/s
+- ``linear[1]``  × ``drone_climb_rate × speed_factor``  → vertical m/s
+- ``linear[2]``  × ``drone_strafe_speed × speed_factor`` → lateral m/s
+- ``angular[2]`` × ``drone_yaw_rate``                   → yaw rad/s
 
-Changing ``drone_speed`` changes how fast the drone flies **without
-retraining**.  The same trained model works at any speed.
+``speed_factor = clamp(min_front_depth / safe_threshold, 0.05, 1.0)``
+
+In open space the drone reaches ``drone_max_speed``; near walls it
+automatically slows to 5 % of max.  Yaw is never throttled so the
+drone can always turn to escape.  Changing ``drone_max_speed`` does
+**not** require retraining.
 
 Displacement per tick = velocity × ``physics_dt`` (default 0.02 s = 50 Hz).
 A first-order exponential smoothing filter simulates drone inertia.
@@ -41,6 +46,14 @@ Episodes are truncated after ``_MAX_STEPS_PER_EPISODE`` steps.
 A stuck detector monitors displacement over a sliding window;
 if the drone fails to move for ``_STUCK_CONSECUTIVE`` steps it
 gets an auto-nudge toward the clearest direction.
+
+Scene pool cycling
+------------------
+When ``scene_pool`` is set in the config, the backend automatically
+cycles through scenes.  Every ``n_actors`` natural episode completions
+(collisions or truncations) it loads the next ``.glb`` from the pool,
+recomputes spawns, and resets all actors.  This gives maximum
+environment diversity during training without restarting the server.
 """
 
 from __future__ import annotations
@@ -49,6 +62,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -87,6 +101,13 @@ _ALTITUDE_SPRING: float = 0.3
 _COLLISION_CLEARANCE: float = 0.4
 _NUDGE_DISTANCE: float = 0.6
 
+# ── Dynamic speed scaling ────────────────────────────────────────────
+# Forward (and lateral/climb) speed scales with proximity to obstacles.
+# The front hemisphere (±45° azimuth) of the previous depth map
+# determines a speed factor in [_MIN_SPEED_FACTOR, 1.0].
+_SAFE_DEPTH_THRESHOLD: float = 0.3   # normalised depth (~9 m at max_distance=30)
+_MIN_SPEED_FACTOR: float = 0.05      # never below 5 % of max speed
+
 # ── Semantic IDs for mesh faces ──────────────────────────────────────
 _SEM_FLOOR: int = 2
 _SEM_WALL: int = 1
@@ -109,6 +130,7 @@ class _ActorState:
     stuck_counter: int = 0
     floor_y: float = 0.0
     needs_reset: bool = False
+    scene_changed: bool = False  # True = forced reset from scene switch
     spawn_position: tuple[float, float, float] = (0.0, 0.0, 0.0)
     prev_linear: NDArray[np.float32] = field(
         default_factory=lambda: np.zeros(3, dtype=np.float32),
@@ -131,8 +153,6 @@ class MeshSceneBackend(SimulatorBackend):
     """
 
     def __init__(self, config: SectionManagerConfig) -> None:
-        import trimesh  # type: ignore[import-untyped,import-not-found]
-
         self._config = config
         self._az_bins = config.azimuth_bins
         self._el_bins = config.elevation_bins
@@ -143,31 +163,37 @@ class MeshSceneBackend(SimulatorBackend):
         self._steps_per_decision: int = config.steps_per_decision
 
         # Drone speed scales (normalised steering → m/s / rad/s)
-        self._drone_speed: float = config.drone_speed
+        self._drone_max_speed: float = config.drone_max_speed
         self._drone_climb: float = config.drone_climb_rate
         self._drone_strafe: float = config.drone_strafe_speed
         self._drone_yaw: float = config.drone_yaw_rate
 
-        # Load scene mesh
-        scene_path = config.habitat_scene
+        # Scene pool for per-episode cycling
+        self._scene_pool: list[str] = list(config.scene_pool) if config.scene_pool else []
+        self._scene_pool_idx: int = 0
+        self._episodes_in_scene: int = 0
+        self._total_scenes_visited: int = 0
+        # The SM server calls reset() once per actor during start().
+        # Those initial resets must NOT count as episode completions.
+        self._initial_resets_remaining: int = self._n_actors
+
+        # Determine first scene to load
+        scene_path = (
+            self._scene_pool[0] if self._scene_pool
+            else config.habitat_scene
+        )
         if not scene_path:
-            msg = "MeshSceneBackend requires --habitat-scene path"
+            msg = "MeshSceneBackend requires --habitat-scene path or a scene_pool"
             raise ValueError(msg)
+        self._current_scene_path: str = scene_path
 
-        loaded = trimesh.load(scene_path, force="scene")
-        mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
-
-        if not isinstance(mesh, trimesh.Trimesh):
-            msg = f"Could not load a triangle mesh from {scene_path}"
-            raise TypeError(msg)
-
-        self._mesh: Any = mesh
-
-        # Assign semantic IDs based on face normals
-        self._face_semantics = self._classify_faces(mesh)
-
-        # Pre-compute ray directions for equirectangular sampling
+        # Pre-compute ray directions (scene-independent)
         self._ray_dirs = self._build_ray_directions()
+
+        # Load the first scene mesh
+        self._mesh: Any = None
+        self._face_semantics: NDArray[np.int32] = np.empty(0, dtype=np.int32)
+        self._load_scene(scene_path)
 
         # Find valid spawn positions (one per actor if possible)
         spawns = self._find_spawns(self._n_actors)
@@ -188,6 +214,66 @@ class MeshSceneBackend(SimulatorBackend):
                 floor_y=sy - _HOVER_ALTITUDE,
                 spawn_position=sp,
             )
+
+        if self._scene_pool:
+            _log.info(
+                "Scene pool: %d scenes, starting with %s",
+                len(self._scene_pool),
+                Path(scene_path).stem,
+            )
+
+    # ------------------------------------------------------------------
+    # Scene loading / switching
+    # ------------------------------------------------------------------
+
+    def _load_scene(self, scene_path: str) -> None:
+        """Load a .glb/.obj/.ply mesh and update derived state."""
+        import trimesh  # type: ignore[import-untyped,import-not-found]
+
+        _log.info("Loading scene: %s", scene_path)
+        loaded = trimesh.load(scene_path, force="scene")
+        mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
+
+        if not isinstance(mesh, trimesh.Trimesh):
+            msg = f"Could not load a triangle mesh from {scene_path}"
+            raise TypeError(msg)
+
+        self._mesh = mesh
+        self._face_semantics = self._classify_faces(mesh)
+        self._current_scene_path = scene_path
+        _log.info(
+            "Scene loaded: %s (%d faces, %d vertices)",
+            Path(scene_path).stem,
+            len(mesh.faces),
+            len(mesh.vertices),
+        )
+
+    def _switch_to_next_scene(self) -> None:
+        """Advance the scene pool index and load the next scene.
+
+        Called when ``n_actors`` natural episodes have completed in the
+        current scene.  Recomputes spawn positions for the new geometry
+        and marks all actors for forced reset.
+        """
+        self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
+        next_path = self._scene_pool[self._scene_pool_idx]
+        self._total_scenes_visited += 1
+
+        _log.info(
+            "Scene switch [%d/%d] (visited=%d): %s",
+            self._scene_pool_idx + 1,
+            len(self._scene_pool),
+            self._total_scenes_visited,
+            Path(next_path).stem,
+        )
+        self._load_scene(next_path)
+        self._episodes_in_scene = 0
+
+        # Recompute spawns for new geometry
+        spawns = self._find_spawns(self._n_actors)
+        for i, a in self._actors.items():
+            sp = spawns[i % len(spawns)]
+            a.spawn_position = sp
 
     # ------------------------------------------------------------------
     # SimulatorBackend interface
@@ -212,8 +298,34 @@ class MeshSceneBackend(SimulatorBackend):
         return self._actors[actor_id].episode_id
 
     def reset(self, episode_id: int, *, actor_id: int = 0) -> DistanceMatrix:
-        """Reset to spawn and return the initial observation."""
+        """Reset to spawn and return the initial observation.
+
+        When a scene pool is configured, every ``n_actors`` natural
+        episode completions triggers a scene switch.  All other actors
+        are marked for forced reset so they start the new scene on
+        their next ``step()`` call.
+        """
         a = self._actors[actor_id]
+
+        # ── Scene cycling ────────────────────────────────────────
+        # Skip the initial resets that happen during SM start().
+        if self._initial_resets_remaining > 0:
+            self._initial_resets_remaining -= 1
+        elif self._scene_pool and len(self._scene_pool) > 1:
+            # Only count natural episode endings, not forced resets
+            # from scene switches.
+            if not a.scene_changed:
+                self._episodes_in_scene += 1
+                if self._episodes_in_scene >= self._n_actors:
+                    self._switch_to_next_scene()
+                    # Mark ALL other actors for forced reset
+                    for aid in self._actors:
+                        if aid != actor_id:
+                            self._actors[aid].needs_reset = True
+                            self._actors[aid].scene_changed = True
+            a.scene_changed = False  # clear regardless
+
+        # ── Normal reset ─────────────────────────────────────────
         a.episode_id = episode_id
         a.step_count = 0
         a.episode_return = 0.0
@@ -271,7 +383,10 @@ class MeshSceneBackend(SimulatorBackend):
 
             lin_vel = action.linear_velocity
             cmd_fwd = float(lin_vel[0, 0]) if lin_vel.ndim == 2 else float(lin_vel[0])
-            expected = max(1e-3, abs(cmd_fwd)) * self._dt
+            # Use dynamic speed factor for expected displacement
+            speed_factor = self._compute_speed_factor(a.prev_depth)
+            effective_speed = abs(cmd_fwd) * self._drone_max_speed * speed_factor
+            expected = max(1e-3, effective_speed) * self._dt
             if cmd_fwd > 0.5 and expected > 1e-6 and actual_motion / expected < 0.15:
                 collided = True
 
@@ -610,19 +725,57 @@ class MeshSceneBackend(SimulatorBackend):
         # Last resort: first candidate at floor + 1.5
         return [(candidates[0][0], float(bounds[0, 1]) + 1.5, candidates[0][1])]
 
+    # ------------------------------------------------------------------
+    # Dynamic speed scaling
+    # ------------------------------------------------------------------
+
+    def _compute_speed_factor(
+        self, prev_depth: NDArray[np.float32] | None,
+    ) -> float:
+        """Compute a proximity-based speed factor in [MIN, 1.0].
+
+        Uses the front hemisphere (±45° azimuth) of the *previous*
+        step’s depth observation.  When obstacles are close the
+        factor approaches ``_MIN_SPEED_FACTOR`` so the drone
+        automatically slows.  In open space it returns 1.0.
+
+        Args:
+            prev_depth: (Az, El) normalised depth from the last step,
+                or ``None`` on the first step of an episode.
+
+        Returns:
+            Speed multiplier in ``[_MIN_SPEED_FACTOR, 1.0]``.
+        """
+        if prev_depth is None:
+            return _MIN_SPEED_FACTOR  # cautious start
+
+        az_bins = prev_depth.shape[0]
+        span = max(1, az_bins // 8)  # ±45° of 360°
+
+        # Front cone: first *span* columns + last *span* columns
+        # (azimuth 0 is forward in the equirectangular layout)
+        front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
+        min_front_depth = float(np.min(front)) if front.size > 0 else 1.0
+
+        factor = min_front_depth / _SAFE_DEPTH_THRESHOLD
+        return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))
+
+    # ------------------------------------------------------------------
+    # Action application
+    # ------------------------------------------------------------------
+
     def _apply_action(
         self, action: Action, timestamp: float, *, actor_id: int = 0,
     ) -> RobotPose:
         """Apply a normalised steering command to the current pose.
 
-        The policy outputs steering in [-1, 1].  This method scales
-        the steering by drone speed parameters to get physical
-        velocity (m/s, rad/s), then integrates by ``dt``.
+        The policy outputs steering in [-1, 1].  This method computes
+        a dynamic speed factor from the previous depth observation,
+        then scales steering → velocity → displacement.
 
-        - ``linear[0]`` = forward steering  → × ``drone_speed``
-        - ``linear[1]`` = vertical steering → × ``drone_climb_rate``
-        - ``linear[2]`` = lateral steering  → × ``drone_strafe_speed``
-        - ``angular[2]`` = yaw steering     → × ``drone_yaw_rate``
+        Speed factor = clamp(min_front_depth / safe_threshold, 0.05, 1.0).
+        All translational axes (fwd, vert, lat) are scaled; yaw is NOT
+        (the drone must always be able to turn to escape).
 
         Includes altitude-hold spring and collision avoidance.
         """
@@ -634,10 +787,12 @@ class MeshSceneBackend(SimulatorBackend):
             ang = ang[0]
 
         # Scale normalised steering [-1, 1] → physical velocity
-        fwd = float(lin[0]) * self._drone_speed
-        vert = (float(lin[1]) if len(lin) > 1 else 0.0) * self._drone_climb
-        lat = (float(lin[2]) if len(lin) > 2 else 0.0) * self._drone_strafe
-        yaw_rate = (float(ang[2]) if len(ang) > 2 else 0.0) * self._drone_yaw
+        # Forward speed is dynamic: scales with front-hemisphere proximity
+        speed_factor = self._compute_speed_factor(a.prev_depth)
+        fwd = float(lin[0]) * self._drone_max_speed * speed_factor
+        vert = (float(lin[1]) if len(lin) > 1 else 0.0) * self._drone_climb * speed_factor
+        lat = (float(lin[2]) if len(lin) > 2 else 0.0) * self._drone_strafe * speed_factor
+        yaw_rate = (float(ang[2]) if len(ang) > 2 else 0.0) * self._drone_yaw  # yaw unscaled
 
         # First-order exponential smoothing (momentum)
         sm = self._smoothing

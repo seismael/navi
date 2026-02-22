@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 
 __all__: list[str] = ["MjxBackendInfo", "MjxEnvironment"]
 
+# Dynamic speed scaling constants (shared with MeshSceneBackend)
+_SAFE_DEPTH_THRESHOLD: float = 0.3
+_MIN_SPEED_FACTOR: float = 0.05
+
 
 @dataclass(frozen=True)
 class MjxBackendInfo:
@@ -74,13 +78,24 @@ class MjxEnvironment:
         self._prev_linear[:] = 0.0
         self._prev_angular[:] = 0.0
 
-    def step_pose(self, pose: RobotPose, action: Action, timestamp: float) -> RobotPose:
+    def step_pose(
+        self,
+        pose: RobotPose,
+        action: Action,
+        timestamp: float,
+        *,
+        prev_depth: NDArray[np.float32] | None = None,
+    ) -> RobotPose:
         """Step the robot pose by one simulation tick.
 
         The action carries **normalised steering** in [-1, 1].
         This method scales by ``speed_scales`` to get velocity
         (m/s / rad/s), applies momentum smoothing, rotates to
         world frame, and integrates by ``dt``.
+
+        If *prev_depth* is provided (normalised, shape ``(Az, El)``),
+        translational speeds are scaled by a proximity factor derived
+        from the front hemisphere.  Yaw is never throttled.
 
         A first-order exponential smoothing filter simulates
         drone inertia::
@@ -104,15 +119,16 @@ class MjxEnvironment:
         )
 
         # Scale normalised steering → physical velocity
+        speed_factor = self._compute_speed_factor(prev_depth)
         linear = np.array([
-            float(raw_lin[0]) * self._speed_fwd,
-            float(raw_lin[1]) * self._speed_vert if len(raw_lin) > 1 else 0.0,
-            float(raw_lin[2]) * self._speed_lat if len(raw_lin) > 2 else 0.0,
+            float(raw_lin[0]) * self._speed_fwd * speed_factor,
+            float(raw_lin[1]) * self._speed_vert * speed_factor if len(raw_lin) > 1 else 0.0,
+            float(raw_lin[2]) * self._speed_lat * speed_factor if len(raw_lin) > 2 else 0.0,
         ], dtype=np.float32)
         angular = np.array([
             float(raw_ang[0]),
             float(raw_ang[1]) if len(raw_ang) > 1 else 0.0,
-            float(raw_ang[2]) * self._speed_yaw if len(raw_ang) > 2 else 0.0,
+            float(raw_ang[2]) * self._speed_yaw if len(raw_ang) > 2 else 0.0,  # yaw unscaled
         ], dtype=np.float32)
 
         # Apply first-order exponential smoothing (momentum)
@@ -161,3 +177,20 @@ class MjxEnvironment:
             has_mujoco = False
 
         return MjxBackendInfo(has_jax=has_jax, has_mujoco=has_mujoco, backend_name=backend_name)
+
+    @staticmethod
+    def _compute_speed_factor(
+        prev_depth: NDArray[np.float32] | None,
+    ) -> float:
+        """Proximity-based speed factor from front hemisphere depth.
+
+        See ``MeshSceneBackend._compute_speed_factor`` for details.
+        """
+        if prev_depth is None:
+            return _MIN_SPEED_FACTOR
+        az_bins = prev_depth.shape[0]
+        span = max(1, az_bins // 8)
+        front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
+        min_front = float(np.min(front)) if front.size > 0 else 1.0
+        factor = min_front / _SAFE_DEPTH_THRESHOLD
+        return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))

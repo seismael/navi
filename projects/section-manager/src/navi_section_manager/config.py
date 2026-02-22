@@ -37,9 +37,16 @@ class SectionManagerConfig:
     steps_per_decision: int = 1
 
     # Drone speed — scales normalised steering [-1, 1] from the policy
-    # into physical velocities.  These are deployment parameters;
-    # re-training is NOT required when changing speed.
-    drone_speed: float = 50.0         # max forward speed (m/s, ~180 km/h)
+    # into physical velocities.  Re-training is NOT required when
+    # changing speed.
+    #
+    # Forward speed is **dynamic**: the backend reads the front-hemisphere
+    # depth from the previous observation and scales down when close to
+    # obstacles.  ``drone_max_speed`` is the ceiling reached in open
+    # space; near walls the drone automatically crawls.
+    # Climb, strafe and yaw rates also scale with proximity (except yaw
+    # which always stays at full rate so the drone can turn to escape).
+    drone_max_speed: float = 100.0    # max forward speed (m/s, open space)
     drone_climb_rate: float = 3.0     # max vertical rate (m/s)
     drone_strafe_speed: float = 5.0   # max lateral speed (m/s)
     drone_yaw_rate: float = 3.0       # max yaw rate (rad/s, ~172°/s)
@@ -57,3 +64,9 @@ class SectionManagerConfig:
     habitat_scene: str = ""
     habitat_dataset_config: str = ""
     habitat_rgb_resolution: tuple[int, int] = (480, 640)
+
+    # Scene pool for per-episode cycling (mesh backend).
+    # When non-empty, the backend cycles through these paths on each
+    # episode reset (once per n_actors episodes).  The pool is consumed
+    # sequentially; wrap-around restarts from the beginning.
+    scene_pool: tuple[str, ...] = ()

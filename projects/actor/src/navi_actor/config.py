@@ -43,8 +43,9 @@ class ActorConfig:
     # Steering scales (4-DOF normalised directional commands).
     # The policy outputs in [-1, 1] via Tanh; these scales define the
     # range seen by the Gaussian distribution.  1.0 = fully normalised.
-    # Actual speed (m/s) is configured on the backend (drone_speed etc.)
-    # so the **same trained model** works at any flight speed.
+    # Actual speed (m/s) is configured on the backend (drone_max_speed)
+    # and further modulated by dynamic proximity scaling \u2014 the drone
+    # slows near walls and accelerates in open space automatically.
     max_forward: float = 1.0    # normalised forward steering
     max_vertical: float = 1.0   # normalised vertical steering
     max_lateral: float = 1.0    # normalised lateral steering

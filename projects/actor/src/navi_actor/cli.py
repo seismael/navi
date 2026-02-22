@@ -320,15 +320,21 @@ def train_ppo(
 @app.command("train-sequential")
 def train_sequential(
     manifest: str = typer.Option(
-        "data/scenes/sample_episodes.json",
+        "data/scenes/scene_manifest.json",
         help="Path to scene manifest JSON file",
     ),
     actors: int = typer.Option(
         2,
         help="Number of actors sharing each scene",
     ),
-    steps_per_scene: int = typer.Option(
-        100_000, help="Environment steps per scene (across all actors)",
+    total_steps: int = typer.Option(
+        500_000, help="Total environment steps (across all scenes)",
+    ),
+    shuffle: bool = typer.Option(
+        True, help="Shuffle scene order for diversity",
+    ),
+    min_scene_bytes: int = typer.Option(
+        100_000, help="Minimum scene file size in bytes (filters stubs)",
     ),
     backend: str = typer.Option("mesh", help="Simulation backend"),
     # PPO hyper-parameters
@@ -361,19 +367,26 @@ def train_sequential(
     checkpoint_every: int = typer.Option(0, help="Checkpoint interval (0 = disabled)"),
     checkpoint_dir: str = typer.Option("checkpoints", help="Checkpoint directory"),
     checkpoint: str = typer.Option("", help="Resume from checkpoint path (.pt)"),
+    # Logging
+    log_every: int = typer.Option(100, help="Steps between log messages"),
     # ZMQ ports (shared with SM)
     sm_pub: str = typer.Option("tcp://*:5559", help="SM PUB bind address"),
     sm_rep: str = typer.Option("tcp://*:5560", help="SM REP bind address"),
     actor_pub: str = typer.Option("tcp://*:5557", help="Actor PUB bind address"),
 ) -> None:
-    """Sequential multi-scene training with N actors per scene.
+    """Multi-scene PPO training with automatic scene cycling.
 
-    Loads scenes one at a time from a manifest. For each scene, launches
-    a Section-Manager backend with ``--actors N`` and an Actor/Trainer
-    that steps all N actors in round-robin. Policy weights (and optimizer
-    / RND / reward-shaper state) accumulate across scenes.
+    Loads scene paths from a manifest JSON, filters to valid files,
+    and passes the full pool to a single MeshSceneBackend.  The
+    backend automatically cycles to the next scene every time
+    ``n_actors`` natural episode completions occur (collisions
+    or horizon truncations).
+
+    The policy, optimizer, RND, and reward-shaper state accumulate
+    continuously across all scenes — no checkpoint hand-off needed.
     """
     import json
+    import random as _random
     from pathlib import Path
 
     root_logger = logging.getLogger()
@@ -391,7 +404,7 @@ def train_sequential(
     with manifest_path.open(encoding="utf-8-sig") as f:
         scene_data = json.load(f)
 
-    # Extract scene paths
+    # Extract scene paths from manifest (support multiple formats)
     scenes: list[str] = []
     raw_scenes: list[object] = []
     if isinstance(scene_data, list):
@@ -399,7 +412,6 @@ def train_sequential(
     elif isinstance(scene_data, dict) and "scenes" in scene_data:
         raw_scenes = scene_data["scenes"]
     elif isinstance(scene_data, dict) and "episodes" in scene_data:
-        # Extract unique scene_id values from episodes format
         seen: set[str] = set()
         for ep in scene_data["episodes"]:
             sid = ep.get("scene_id") or ep.get("scene")
@@ -408,7 +420,6 @@ def train_sequential(
                 scenes.append(str(sid))
     for entry in raw_scenes:
         if isinstance(entry, dict):
-            # Support both "scene" and "path" keys
             p = entry.get("scene") or entry.get("path")
             if p:
                 scenes.append(str(p))
@@ -419,21 +430,32 @@ def train_sequential(
         typer.echo("No scenes found in manifest.")
         raise typer.Exit(1)
 
-    # Filter to scenes that exist on disk
-    valid_scenes = [s for s in scenes if Path(s).exists()]
+    # Filter to existing files above minimum size (catches stubs)
+    valid_scenes: list[str] = []
+    for s in scenes:
+        p = Path(s)
+        if p.exists() and p.stat().st_size >= min_scene_bytes:
+            valid_scenes.append(s)
     skipped = len(scenes) - len(valid_scenes)
     if skipped:
-        typer.echo(f"Skipping {skipped} scenes (files not found on disk)")
+        typer.echo(f"Filtered out {skipped} scenes (missing or < {min_scene_bytes} bytes)")
     scenes = valid_scenes
 
     if not scenes:
         typer.echo("No valid scene files found.")
         raise typer.Exit(1)
 
+    if shuffle:
+        _random.shuffle(scenes)
+
     typer.echo(
-        f"Sequential training: {len(scenes)} scenes, {actors} actors/scene, "
-        f"{steps_per_scene} steps/scene, backend={backend}"
+        f"Scene pool: {len(scenes)} scenes, {actors} actors, "
+        f"{total_steps} total steps, shuffle={shuffle}, backend={backend}"
     )
+    for i, s in enumerate(scenes[:5]):
+        typer.echo(f"  [{i+1}] {Path(s).stem}")
+    if len(scenes) > 5:
+        typer.echo(f"  ... and {len(scenes) - 5} more")
 
     config = ActorConfig(
         sub_address=f"tcp://localhost:{sm_pub.split(':')[-1]}",
@@ -469,89 +491,71 @@ def train_sequential(
     from navi_section_manager.config import SectionManagerConfig  # type: ignore[import-not-found]
     from navi_section_manager.server import SectionManagerServer  # type: ignore[import-not-found]
 
-    ckpt_path_latest: str | None = checkpoint or None
+    # Build SM config with scene pool
+    sm_config = SectionManagerConfig(
+        pub_address=sm_pub,
+        rep_address=sm_rep,
+        mode="step",
+        n_actors=actors,
+        backend=backend,
+        habitat_scene=scenes[0],
+        scene_pool=tuple(scenes),
+        azimuth_bins=config.azimuth_bins,
+        elevation_bins=config.elevation_bins,
+        max_distance=30.0,
+        compute_overhead=False,
+    )
 
-    for scene_idx, scene_path in enumerate(scenes):
-        typer.echo(f"\n{'='*60}")
-        typer.echo(f"Scene {scene_idx + 1}/{len(scenes)}: {scene_path}")
-        typer.echo(f"{'='*60}")
+    # Build backend with scene pool
+    if backend == "mesh":
+        from navi_section_manager.backends.mesh_backend import MeshSceneBackend  # type: ignore[import-not-found]  # noqa: I001
+        sim_backend = MeshSceneBackend(sm_config)
+    else:
+        from navi_section_manager.backends.voxel import VoxelBackend  # type: ignore[import-not-found]  # noqa: I001
+        from navi_section_manager.generators.arena import ArenaGenerator  # type: ignore[import-not-found]
+        gen = ArenaGenerator(seed=42)
+        sim_backend = VoxelBackend(sm_config, gen)
 
-        # Build SM config + backend for this scene
-        sm_config = SectionManagerConfig(
-            pub_address=sm_pub,
-            rep_address=sm_rep,
-            mode="step",
-            n_actors=actors,
-            backend=backend,
-            habitat_scene=scene_path,
-            azimuth_bins=config.azimuth_bins,
-            elevation_bins=config.elevation_bins,
-            max_distance=30.0,
-            compute_overhead=False,
+    sm_server = SectionManagerServer(config=sm_config, backend=sim_backend)
+
+    # Start SM in a background thread
+    import threading
+    import time as _time
+    sm_thread = threading.Thread(target=sm_server.run, daemon=True)
+    sm_thread.start()
+    _time.sleep(3.0)  # allow scene loading + ZMQ bind
+
+    # Build trainer
+    trainer = PpoTrainer(config)
+
+    if checkpoint:
+        trainer.load_training_state(checkpoint)
+        typer.echo(f"Loaded checkpoint: {checkpoint}")
+
+    trainer.start()
+    try:
+        metrics = trainer.train(
+            total_steps=total_steps,
+            log_every=log_every,
+            checkpoint_every=checkpoint_every,
+            checkpoint_dir=checkpoint_dir,
         )
+    finally:
+        trainer.stop()
+        sm_server.stop()
+        sm_thread.join(timeout=5.0)
 
-        # Import and build backend
-        if backend == "mesh":
-            from navi_section_manager.backends.mesh_backend import MeshSceneBackend  # type: ignore[import-not-found]  # noqa: I001
-            sim_backend = MeshSceneBackend(sm_config)
-        else:
-            from navi_section_manager.backends.voxel import VoxelBackend  # type: ignore[import-not-found]  # noqa: I001
-            from navi_section_manager.generators.arena import ArenaGenerator  # type: ignore[import-not-found]
-            gen = ArenaGenerator(seed=42)
-            sim_backend = VoxelBackend(sm_config, gen)
-
-        sm_server = SectionManagerServer(config=sm_config, backend=sim_backend)
-
-        # Start SM in a background thread
-        import threading
-        sm_thread = threading.Thread(target=sm_server.run, daemon=True)
-        sm_thread.start()
-
-        # Small delay for ZMQ bind + PUB/SUB subscription handshake
-        import time as _time
-        _time.sleep(1.0)
-
-        # Build trainer (create fresh for correct ZMQ lifecycle)
-        trainer = PpoTrainer(config)
-
-        # Load accumulated knowledge from previous scene
-        if ckpt_path_latest:
-            trainer.load_training_state(ckpt_path_latest)
-            typer.echo(f"  Loaded checkpoint: {ckpt_path_latest}")
-
-        trainer.start()
-        try:
-            metrics = trainer.train(
-                total_steps=steps_per_scene,
-                log_every=100,
-                checkpoint_every=checkpoint_every,
-                checkpoint_dir=checkpoint_dir,
-            )
-        finally:
-            trainer.stop()
-            sm_server.stop()
-            sm_thread.join(timeout=5.0)
-
-        # Save accumulated state
-        scene_ckpt = (
-            Path(checkpoint_dir)
-            / f"policy_scene_{scene_idx:04d}.pt"
-        )
-        scene_ckpt.parent.mkdir(parents=True, exist_ok=True)
-        trainer.save_training_state(scene_ckpt)
-        ckpt_path_latest = str(scene_ckpt)
-
-        typer.echo(
-            f"  Scene {scene_idx + 1} complete | "
-            f"steps={metrics.total_steps} episodes={metrics.episodes} "
-            f"reward_ema={metrics.reward_ema:.4f} "
-            f"policy_loss={metrics.policy_loss:.4f}"
-        )
-
-        # Allow OS to release ports before next scene rebinds
-        _time.sleep(1.0)
-
-    typer.echo(f"\nAll {len(scenes)} scenes complete. Final checkpoint: {ckpt_path_latest}")
+    # Save final checkpoint
+    final_ckpt = Path(checkpoint_dir) / "policy_final.pt"
+    final_ckpt.parent.mkdir(parents=True, exist_ok=True)
+    trainer.save_training_state(final_ckpt)
+    typer.echo(
+        f"\nTraining complete | {len(scenes)} scenes | "
+        f"steps={metrics.total_steps} episodes={metrics.episodes} "
+        f"reward_ema={metrics.reward_ema:.4f} "
+        f"policy_loss={metrics.policy_loss:.4f} | "
+        f"Final checkpoint: {final_ckpt}"
+    )
 
 
 if __name__ == "__main__":

@@ -94,7 +94,7 @@ class VoxelBackend(SimulatorBackend):
         self._mjx_env = MjxEnvironment(
             dt=config.physics_dt,
             speed_scales=(
-                config.drone_speed,
+                config.drone_max_speed,
                 config.drone_climb_rate,
                 config.drone_strafe_speed,
                 config.drone_yaw_rate,
@@ -172,7 +172,7 @@ class VoxelBackend(SimulatorBackend):
         previous_pose = a.pose
         new_pose = self._apply_action(action, now, actor_id=actor_id)
 
-        # Collision detection
+        # Collision detection (compensate for dynamic speed factor)
         proposed_motion = float(np.sqrt(
             (new_pose.x - previous_pose.x) ** 2
             + (new_pose.z - previous_pose.z) ** 2
@@ -182,7 +182,9 @@ class VoxelBackend(SimulatorBackend):
             if action.linear_velocity.ndim == 2
             else float(action.linear_velocity[0])
         )
-        expected_motion = max(1e-3, abs(linear_cmd) * self._mjx_env.dt)
+        speed_factor = self._mjx_env._compute_speed_factor(a.prev_depth)
+        effective_speed = abs(linear_cmd) * self._mjx_env._speed_fwd * speed_factor
+        expected_motion = max(1e-3, effective_speed) * self._mjx_env.dt
         collided = linear_cmd > 0.5 and expected_motion > 1e-6 and proposed_motion / expected_motion < 0.15
 
         a.pose = new_pose
@@ -365,7 +367,9 @@ class VoxelBackend(SimulatorBackend):
     ) -> RobotPose:
         """Apply a velocity-based action to the current pose."""
         a = self._actors[actor_id]
-        stepped_pose = self._mjx_env.step_pose(a.pose, action, timestamp)
+        stepped_pose = self._mjx_env.step_pose(
+            a.pose, action, timestamp, prev_depth=a.prev_depth,
+        )
         proposed_x = stepped_pose.x
         proposed_y = stepped_pose.y
         proposed_z = stepped_pose.z

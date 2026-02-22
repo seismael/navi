@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import torch
 from torch import Tensor, nn
 
 __all__: list[str] = ["Mamba2TemporalCore"]
@@ -27,21 +28,45 @@ class _GRUFallback(nn.Module):  # type: ignore[misc]
         self.gru = nn.GRU(d_model, d_model, batch_first=True)
 
     def forward(
-        self, x: Tensor, hidden: Tensor | None = None,
+        self,
+        x: Tensor,
+        hidden: Tensor | None = None,
+        dones: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """Run GRU forward.
+        """Run GRU forward with optional per-step hidden-state resets.
 
         Args:
             x: (B, T, D) input sequence.
             hidden: (1, B, D) hidden state or None.
+            dones: (B, T) boolean mask.  When ``dones[b, t]`` is True the
+                hidden state for batch element *b* is zeroed **before**
+                processing step *t+1*.  This prevents the GRU from
+                carrying memory across episode boundaries inside a
+                BPTT chunk.
 
         Returns:
             output: (B, T, D) outputs.
             new_hidden: (1, B, D) final hidden state.
 
         """
-        out, h_n = self.gru(x, hidden)
-        return out, h_n
+        if dones is None or not dones.any():
+            # Fast path — no episode boundaries in this chunk.
+            out, h_n = self.gru(x, hidden)
+            return out, h_n
+
+        # Slow path — step through time and reset hidden at episode ends.
+        batch, seq_len, d_model = x.shape
+        h = hidden  # (1, B, D) or None
+        outputs: list[Tensor] = []
+        for t in range(seq_len):
+            out_t, h = self.gru(x[:, t : t + 1, :], h)  # (B, 1, D)
+            outputs.append(out_t)
+            # Zero hidden for batch elements whose episode ended at step t
+            if t < seq_len - 1 and dones[:, t].any():
+                assert h is not None
+                mask = dones[:, t].unsqueeze(0).unsqueeze(-1)  # (1, B, 1)
+                h = h * (~mask).float()
+        return torch.cat(outputs, dim=1), h  # type: ignore[return-value]
 
 
 class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
@@ -84,7 +109,10 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
         self.norm = nn.LayerNorm(d_model)
 
     def forward(
-        self, z_seq: Tensor, hidden: Tensor | None = None,
+        self,
+        z_seq: Tensor,
+        hidden: Tensor | None = None,
+        dones: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
         """Process a sequence of spatial embeddings through the temporal core.
 
@@ -94,6 +122,7 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
                 - GRU: (1, B, D) tensor.
                 - Mamba2: None (stateless in training; uses internal cache for
                   inference).
+            dones: (B, T) boolean mask for episode-boundary hidden resets.
 
         Returns:
             output: (B, T, D) temporal representations.
@@ -108,7 +137,7 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
             return out, None
 
         # GRU fallback
-        out, new_h = self.core(z_seq, hidden)
+        out, new_h = self.core(z_seq, hidden, dones)
         out = self.norm(out + z_seq)  # residual + norm
         return out, new_h
 

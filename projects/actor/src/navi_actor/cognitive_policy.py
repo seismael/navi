@@ -169,6 +169,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         obs_seq: Tensor,
         actions_seq: Tensor,
         hidden: Tensor | None = None,
+        dones: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
         """Evaluate a full sequence for BPTT training.
 
@@ -176,6 +177,9 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             obs_seq: (B, T, 2, Az, El) observation sequence.
             actions_seq: (B, T, 4) action sequence.
             hidden: initial hidden state.
+            dones: (B, T) boolean episode-boundary mask.  When set, the
+                temporal core resets its hidden state at episode ends
+                within a BPTT chunk.
 
         Returns:
             log_probs: (B*T,) log probabilities.
@@ -191,8 +195,10 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         z_flat = self.encoder(flat_obs)
         z_seq = z_flat.reshape(batch, seq_len, -1)
 
-        # Temporal core: full sequence
-        features_seq, new_hidden = self.temporal_core.forward(z_seq, hidden)
+        # Temporal core: full sequence with dones mask
+        features_seq, new_hidden = self.temporal_core.forward(
+            z_seq, hidden, dones=dones,
+        )
         flat_features = features_seq.reshape(batch * seq_len, -1)
         flat_actions = actions_seq.reshape(batch * seq_len, -1)
 

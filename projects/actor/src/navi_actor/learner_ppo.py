@@ -238,8 +238,33 @@ class PpoLearner:
                         n_seqs, seq_len, *obs.shape[1:]
                     )
                     acts_seq = acts[:usable].reshape(n_seqs, seq_len, -1)
+
+                    # Stack chunk-start hidden states → (1, n_seqs, D)
+                    # and build dones mask → (n_seqs, seq_len)
+                    h0: Tensor | None = None
+                    dones_mask: Tensor | None = None
+                    if mb.hidden_states:
+                        # Filter out None entries (episode starts)
+                        first_h = next(
+                            (h for h in mb.hidden_states if h is not None),
+                            None,
+                        )
+                        if first_h is not None:
+                            stacked = [
+                                h if h is not None
+                                else torch.zeros_like(first_h)
+                                for h in mb.hidden_states
+                            ]
+                            # Each h is (1, 1, D) → cat → (1, n_seqs, D)
+                            h0 = torch.cat(stacked, dim=1).to(device)
+                        # else: all None → leave h0 = None
+                    if mb.dones is not None:
+                        dones_mask = mb.dones.to(device)
+
                     new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
-                        obs_seq, acts_seq
+                        obs_seq, acts_seq,
+                        hidden=h0,
+                        dones=dones_mask,
                     )
                     # Handle remainder (if any) with single-step evaluate
                     if usable < total:

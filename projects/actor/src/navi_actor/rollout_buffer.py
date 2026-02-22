@@ -171,6 +171,7 @@ class TrajectoryBuffer:
         advantages: Tensor  # (B,)
         returns: Tensor  # (B,)
         hidden_states: list[Tensor | None] = field(default_factory=list)
+        dones: Tensor | None = None  # (n_seqs, seq_len) for BPTT
 
     def sample_minibatches(
         self,
@@ -207,6 +208,9 @@ class TrajectoryBuffer:
         old_v = torch.tensor(
             [tr.value for tr in self._transitions], dtype=torch.float32
         )
+        dones_flat = torch.tensor(
+            [tr.done for tr in self._transitions], dtype=torch.bool
+        )
         advs = self._advantages
         rets = self._returns
 
@@ -219,10 +223,21 @@ class TrajectoryBuffer:
             starts = list(range(0, n - seq_len + 1, seq_len))
             perm = torch.randperm(len(starts)).tolist()
             for i in range(0, len(perm), max(1, batch_size // seq_len)):
+                selected: list[int] = perm[
+                    i : i + max(1, batch_size // seq_len)
+                ]
                 chunk_indices_list: list[int] = []
-                for j in perm[i : i + max(1, batch_size // seq_len)]:
+                chunk_hidden: list[Tensor | None] = []
+                chunk_dones: list[Tensor] = []
+                for j in selected:
                     s = starts[j]
                     chunk_indices_list.extend(range(s, s + seq_len))
+                    # Hidden state at the START of this chunk
+                    chunk_hidden.append(
+                        self._transitions[s].hidden_state
+                    )
+                    # Done flags for each step in this chunk
+                    chunk_dones.append(dones_flat[s : s + seq_len])
                 idx = torch.tensor(chunk_indices_list, dtype=torch.long)
                 yield TrajectoryBuffer.MiniBatch(
                     observations=obs[idx],
@@ -231,6 +246,8 @@ class TrajectoryBuffer:
                     old_values=old_v[idx],
                     advantages=advs[idx],
                     returns=rets[idx],
+                    hidden_states=chunk_hidden,
+                    dones=torch.stack(chunk_dones),  # (n_seqs, seq_len)
                 )
         else:
             # Random shuffle
