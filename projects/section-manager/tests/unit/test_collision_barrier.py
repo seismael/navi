@@ -1,4 +1,4 @@
-"""Tests for Section Manager collision standoff barrier."""
+"""Tests for Section Manager collision standoff barrier via VoxelBackend."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import time
 
 import numpy as np
 
-from navi_contracts import Action, StepRequest
+from navi_contracts import Action
+from navi_section_manager.backends.voxel import VoxelBackend
 from navi_section_manager.config import SectionManagerConfig
 from navi_section_manager.generators.base import AbstractWorldGenerator
-from navi_section_manager.server import SectionManagerServer
 
 
 class _SingleObstacleGenerator(AbstractWorldGenerator):
@@ -43,8 +43,8 @@ class TestCollisionBarrier:
             collision_probe_radius=2.0,
         )
         generator = _SingleObstacleGenerator(chunk_size=config.chunk_size)
-        server = SectionManagerServer(config=config, generator=generator)
-        server._window.shift(server.pose.x, server.pose.y, server.pose.z, generator.generate_chunk)
+        backend = VoxelBackend(config, generator)
+        backend.reset(episode_id=0)
 
         action = Action(
             env_ids=np.array([0], dtype=np.int32),
@@ -54,10 +54,10 @@ class TestCollisionBarrier:
             step_id=1,
             timestamp=time.time(),
         )
-        server.step(StepRequest(action=action, step_id=1, timestamp=time.time()))
+        backend.step(action, step_id=1)
 
         obstacle = np.array([4.0, 2.0, 2.0], dtype=np.float32)
-        pose = np.array([server.pose.x, server.pose.y, server.pose.z], dtype=np.float32)
+        pose = np.array([backend.pose.x, backend.pose.y, backend.pose.z], dtype=np.float32)
         distance = float(np.linalg.norm(pose - obstacle))
         assert distance >= config.barrier_distance - 1e-6
 
@@ -70,8 +70,8 @@ class TestCollisionBarrier:
             collision_probe_radius=2.0,
         )
         generator = _SingleObstacleGenerator(chunk_size=config.chunk_size)
-        server = SectionManagerServer(config=config, generator=generator)
-        server._window.shift(server.pose.x, server.pose.y, server.pose.z, generator.generate_chunk)
+        backend = VoxelBackend(config, generator)
+        backend.reset(episode_id=0)
 
         action = Action(
             env_ids=np.array([0], dtype=np.int32),
@@ -81,6 +81,6 @@ class TestCollisionBarrier:
             step_id=2,
             timestamp=time.time(),
         )
-        server.step(StepRequest(action=action, step_id=2, timestamp=time.time()))
+        backend.step(action, step_id=2)
 
-        assert server.pose.z > 2.5
+        assert backend.pose.z > 2.5

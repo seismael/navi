@@ -8,6 +8,9 @@ param(
     [string]$ActorPolicyCheckpoint = "",
     [string]$AuditorSub = "tcp://localhost:5559,tcp://localhost:5557",
     [string]$AuditorOutput = "session.zarr",
+    [string]$Backend = "voxel",
+    [string]$HabitatScene = "",
+    [string]$HabitatDatasetConfig = "",
     [switch]$NoPreKill
 )
 
@@ -51,6 +54,8 @@ function Start-BackgroundUv {
         New-Item -ItemType Directory -Path $logDir | Out-Null
     }
 
+    # Force unbuffered Python output so logs appear in real time
+    $env:PYTHONUNBUFFERED = "1"
     return Start-Process -FilePath "uv" -ArgumentList $UvArgs -WorkingDirectory $RepoRoot -RedirectStandardOutput $StdOutFile -RedirectStandardError $StdErrFile -PassThru
 }
 
@@ -70,8 +75,32 @@ $sectionArgs = @(
     "--mode", "step",
     "--pub", $SectionManagerPub,
     "--rep", $SectionManagerRep,
-    "--generator", "arena"
+    "--backend", $Backend
 )
+
+if ($Backend -eq "voxel") {
+    $sectionArgs += @("--generator", "arena")
+}
+elseif ($Backend -eq "habitat") {
+    if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
+        throw "HabitatScene is required when Backend=habitat"
+    }
+    $sectionArgs += @("--habitat-scene", $HabitatScene)
+    if (-not [string]::IsNullOrWhiteSpace($HabitatDatasetConfig)) {
+        $sectionArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
+    }
+}
+elseif ($Backend -eq "mesh") {
+    if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
+        throw "HabitatScene is required when Backend=mesh (path to .glb/.obj scene)"
+    }
+    $sectionArgs += @("--habitat-scene", $HabitatScene)
+    # Full resolution — Embree-accelerated raycaster (embreex) handles 256x128 fast
+    $sectionArgs += @("--max-distance", "15")
+    if (-not [string]::IsNullOrWhiteSpace($HabitatDatasetConfig)) {
+        $sectionArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
+    }
+}
 
 $actorArgs = @(
     "run",
@@ -118,7 +147,7 @@ try {
     Write-Host "  $actorLogOut"
     Write-Host "  $actorLogErr"
 
-    & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560"
+    & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560" $(if (-not [string]::IsNullOrWhiteSpace($HabitatScene)) { "--scene"; $HabitatScene })
 }
 finally {
     foreach ($proc in @($actorProc, $sectionProc)) {

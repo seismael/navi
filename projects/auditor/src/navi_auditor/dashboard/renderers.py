@@ -26,6 +26,7 @@ __all__: list[str] = [
     "render_bev_occupancy",
     "render_first_person",
     "render_forward_polar",
+    "turbo_color_bgr",
     "zoom_overhead",
 ]
 
@@ -60,6 +61,58 @@ _TITLE_TEXT_COLOR = (235, 235, 235)
 _GUIDE_COLOR = (90, 90, 90)
 _TRAIL_COLOR = (60, 220, 220)
 _HEADING_COLOR = (0, 255, 255)
+
+# ── Turbo LUT (256 entries, BGR) ──────────────────────────────────────
+_TURBO_LUT: np.ndarray | None = None
+
+
+def _turbo_lut() -> np.ndarray:
+    """Return (or lazily build) a 256x1x3 BGR uint8 Turbo lookup table.
+
+    Turbo is Google's perceptually-uniform rainbow colormap designed
+    specifically for depth/distance data.  Near = warm red/yellow,
+    far = cool blue/indigo.
+    """
+    global _TURBO_LUT
+    if _TURBO_LUT is not None:
+        return _TURBO_LUT
+
+    # 12-point Turbo control curve (RGB 0-1)
+    control_rgb = np.array([
+        [0.190, 0.072, 0.232],  # 0 — dark indigo (far)
+        [0.120, 0.240, 0.640],  # 1 — deep blue
+        [0.140, 0.460, 0.860],  # 2 — vivid blue
+        [0.130, 0.660, 0.900],  # 3 — cyan
+        [0.180, 0.820, 0.720],  # 4 — teal-green
+        [0.360, 0.910, 0.440],  # 5 — lime-green
+        [0.580, 0.950, 0.240],  # 6 — yellow-green
+        [0.790, 0.930, 0.150],  # 7 — yellow
+        [0.950, 0.820, 0.120],  # 8 — amber
+        [0.990, 0.620, 0.100],  # 9 — orange
+        [0.950, 0.370, 0.080],  # 10 — red-orange
+        [0.840, 0.160, 0.080],  # 11 — deep red (near)
+    ], dtype=np.float32)
+    x_ctrl = np.linspace(0.0, 255.0, len(control_rgb))
+    x_full = np.arange(256, dtype=np.float32)
+    r = np.interp(x_full, x_ctrl, control_rgb[:, 0])
+    g = np.interp(x_full, x_ctrl, control_rgb[:, 1])
+    b = np.interp(x_full, x_ctrl, control_rgb[:, 2])
+    bgr = np.stack([b, g, r], axis=-1)
+    _TURBO_LUT = (bgr * 255.0).astype(np.uint8).reshape(256, 1, 3)
+    return _TURBO_LUT
+
+
+def turbo_color_bgr(depth_norm: float) -> tuple[int, int, int]:
+    """Map normalised depth [0, 1] to a BGR Turbo colour.
+
+    0 = near (warm red), 1 = far (cool blue).
+    """
+    lut = _turbo_lut()
+    # Invert so 0 (near) → high index (red), 1 (far) → low index (blue)
+    idx = int(np.clip((1.0 - depth_norm) * 255.0, 0, 255))
+    b, g, r = int(lut[idx, 0, 0]), int(lut[idx, 0, 1]), int(lut[idx, 0, 2])
+    return (b, g, r)
+
 
 # ── Viridis LUT (256 entries, BGR) ───────────────────────────────────
 _VIRIDIS_LUT: np.ndarray | None = None
@@ -113,11 +166,15 @@ def depth_to_viridis(
     depth: np.ndarray,
     valid: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Convert 2-D float32 depth to Viridis-coloured BGR with fog-of-war."""
+    """Convert 2-D float32 depth to Viridis-coloured BGR with fog-of-war.
+
+    Uses percentile-based contrast stretch so close-range indoor scenes
+    still show clear depth variation instead of a single-colour heatmap.
+    """
     if valid is not None and np.any(valid):
         valid_vals = depth[valid]
-        lo = float(np.min(valid_vals))
-        hi = float(np.max(valid_vals))
+        lo = float(np.percentile(valid_vals, 1))
+        hi = float(np.percentile(valid_vals, 99))
     else:
         lo, hi = 0.0, 1.0
 
@@ -235,102 +292,109 @@ def render_first_person(
     height: int,
     pitch: float = 0.0,
 ) -> tuple[np.ndarray, float]:
-    """Dense first-person projection via inverse remap.
+    """Dense depth-fill first-person view via equirect-to-rectilinear remap.
 
-    Uses ``cv2.remap()`` to sample a semantic-coloured + depth-shaded
-    panorama at every output pixel — producing a fully filled, humanly
-    readable environment view instead of sparse dots.
+    Uses ``cv2.remap`` to bilinearly sample the equirectangular depth
+    data for every output pixel, producing a fully-filled perspective
+    projection with Turbo depth colouring.  Invalid pixels fall through
+    to a sky/floor gradient background.
 
     Parameters
     ----------
     depth
         ``(az_bins, el_bins)`` normalised [0, 1] depth.
     semantic
-        ``(az_bins, el_bins)`` integer semantic class IDs.
+        ``(az_bins, el_bins)`` integer semantic class IDs (reserved).
     valid
         ``(az_bins, el_bins)`` boolean validity mask.
     width, height
         Output image dimensions in pixels.
     pitch
-        Robot pitch in radians (positive = look up).  Shifts the
-        horizon line for a tilt-aware view.
+        Robot pitch in radians (positive = look up).
 
     Returns
     -------
     ``(bgr_image, center_distance_m)``
     """
+    _ = semantic  # reserved for future semantic overlay
     az_bins, el_bins = depth.shape
-
-    # Quantise pitch to centidegrees for cache key stability
-    pitch_q = int(round(np.rad2deg(pitch) * 100.0))
-
-    # Focal length & horizon (also used for HUD elements)
-    f = width / (2.0 * np.tan(np.deg2rad(MAIN_FOV_DEG) / 2.0))
-    horizon_y = int(np.clip(height * 0.54 + pitch * f, 0, height - 1))
-
-    # ── background gradient (visible only where sensor has no data) ──
-    img = _make_bg_gradient(width, height, horizon_y)
+    colorbar_w = 28
+    view_w = width - colorbar_w
 
     if az_bins == 0 or el_bins == 0:
+        img = np.full((height, width, 3), 8, dtype=np.uint8)
         return img, VIEW_RANGE_M
 
-    # ── build semantic-coloured + depth-shaded panorama ──────────────
-    # panorama shape: (el_bins, az_bins, 3) — note transposed for remap
-    sem_lut = _semantic_color_lut()
-    sem_clamped = np.clip(semantic, 0, _MAX_SEMANTIC_ID - 1)
-    pano_base = sem_lut[sem_clamped].astype(np.float32)  # (az, el, 3)
+    # Pitch quantisation for remap cache (centidegrees)
+    pitch_q = int(round(float(np.rad2deg(pitch)) * 100.0))
+    flen = view_w / (2.0 * np.tan(np.deg2rad(MAIN_FOV_DEG) / 2.0))
+    horizon_y = int(np.clip(height * 0.54 + pitch * flen, 0, height - 1))
 
-    # Depth shading: closer = brighter, farther = darker
-    d_norm = np.clip(depth, 0.0, 1.0)
-    shade = np.maximum(0.25, 1.0 - d_norm * 0.75)  # [0.25 .. 1.0]
-    pano_shaded = (pano_base * shade[:, :, np.newaxis]).astype(np.uint8)
+    # ── Background: sky / floor gradient ─────────────────────────────
+    img = _make_bg_gradient(width, height, horizon_y)
 
-    # Transpose to (el, az, 3) — cv2.remap treats dim-0 as rows (el)
-    pano_img = np.ascontiguousarray(pano_shaded.transpose(1, 0, 2))
-    valid_f32 = valid.astype(np.float32).T  # (el, az) for remap
+    # ── Inverse-projection remap tables ──────────────────────────────
+    map_x, map_y = _build_remap_tables(view_w, height, az_bins, el_bins, pitch_q)
 
-    # ── inverse-project every screen pixel to panorama coords ────────
-    map_x, map_y = _build_remap_tables(width, height, az_bins, el_bins, pitch_q)
+    # Source images transposed to (el, az) so remap X→az col, Y→el row
+    depth_src = depth.T.astype(np.float32)
+    valid_src = valid.T.astype(np.float32)
 
-    remapped = cv2.remap(
-        pano_img, map_x, map_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
+    depth_proj = cv2.remap(
+        depth_src, map_x, map_y, cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=1.0,
     )
-    valid_remapped = cv2.remap(
-        valid_f32, map_x, map_y,
-        interpolation=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0.0,
+    valid_proj = cv2.remap(
+        valid_src, map_x, map_y, cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=0.0,
     )
+    vis_mask = valid_proj > 0.5
 
-    # ── composite: remapped data over gradient background ────────────
-    hit_mask = valid_remapped > 0.5
-    img[hit_mask] = remapped[hit_mask]
+    # ── Turbo colormap with local contrast stretch ─────────────────
+    lut = _turbo_lut()
+    depth_clamped = np.clip(depth_proj, 0.0, 1.0)
 
-    # Fog-of-war on pixels that mapped to valid panorama coords but
-    # had no sensor hit (in-FOV but occluded/out-of-range)
-    in_fov = (
-        (map_x >= 0) & (map_x < az_bins)
-        & (map_y >= 0) & (map_y < el_bins)
-    )
-    fog_mask = in_fov & (~hit_mask)
-    _apply_fog_of_war(img, fog_mask)
+    # Auto-range: stretch actual valid depth range across full LUT
+    # so close-range indoor scenes still show clear depth variation
+    if np.any(vis_mask):
+        valid_depths = depth_clamped[vis_mask]
+        d_lo = float(np.percentile(valid_depths, 1))
+        d_hi = float(np.percentile(valid_depths, 99))
+        d_span = max(d_hi - d_lo, 0.01)
+        depth_stretched = np.clip((depth_clamped - d_lo) / d_span, 0.0, 1.0)
+    else:
+        depth_stretched = depth_clamped
 
-    # Light blur for anti-aliasing at bin boundaries
-    img = cv2.GaussianBlur(img, (3, 3), 0.6)
+    turbo_idx = np.clip(
+        (1.0 - depth_stretched) * 255.0, 0, 255,
+    ).astype(np.uint8)
+    depth_colored = lut[turbo_idx, 0, :]  # (height, view_w, 3)
 
-    # ── HUD overlays ────────────────────────────────────────────────
-    # Horizon line
-    cv2.line(img, (0, horizon_y), (width - 1, horizon_y), (60, 60, 60), 1)
+    # Composite depth onto gradient (view area only)
+    view_region = img[:, :view_w]
+    view_region[vis_mask] = depth_colored[vis_mask]
 
-    # Floor grid perspective lines
-    for i in range(1, 7):
-        y_line = int(horizon_y + (height - horizon_y) * (i / 7.0))
-        cv2.line(img, (0, y_line), (width - 1, y_line), (35, 45, 55), 1)
+    # ── Subtle grid overlay ──────────────────────────────────────────
+    cv2.line(img, (0, horizon_y), (view_w - 1, horizon_y), (55, 55, 55), 1)
+    cv2.line(img, (view_w // 2, 0), (view_w // 2, height - 1), (40, 40, 40), 1)
 
-    # Centre distance
+    for i in range(1, 8):
+        y_up = int(horizon_y - (horizon_y * i / 8.0))
+        y_dn = int(horizon_y + ((height - horizon_y) * i / 8.0))
+        if 0 <= y_up < height:
+            cv2.line(img, (0, y_up), (view_w - 1, y_up), (28, 28, 28), 1)
+        if 0 <= y_dn < height:
+            cv2.line(img, (0, y_dn), (view_w - 1, y_dn), (28, 28, 28), 1)
+
+    for i in range(1, 12):
+        x_line = int(view_w * i / 12.0)
+        cv2.line(img, (x_line, 0), (x_line, height - 1), (28, 28, 28), 1)
+
+    # ── Colorbar + crosshair ─────────────────────────────────────────
+    _draw_lidar_colorbar(img, view_w, 0, colorbar_w, height)
+    _draw_lidar_crosshair(img, view_w // 2, horizon_y)
+
+    # Centre distance readout
     center_col = az_bins // 2
     center_band = valid[max(0, center_col - 2): min(az_bins, center_col + 3), :]
     center_depth = depth[max(0, center_col - 2): min(az_bins, center_col + 3), :]
@@ -339,22 +403,97 @@ def render_first_person(
     else:
         center_m = VIEW_RANGE_M
 
-    # Green crosshair at viewport centre
-    cx_fp = width // 2
-    cy_fp = height // 2
-    cv2.line(img, (cx_fp - 12, cy_fp), (cx_fp + 12, cy_fp), (0, 255, 0), 1)
-    cv2.line(img, (cx_fp, cy_fp - 12), (cx_fp, cy_fp + 12), (0, 255, 0), 1)
+    dist_label = f"{center_m:.1f}m"
+    cv2.putText(
+        img, dist_label,
+        (view_w // 2 + 16, horizon_y - 6),
+        _HUD_FONT, 0.55, (0, 255, 0), 1, cv2.LINE_AA,
+    )
 
-    # Pitch indicator text
-    pitch_deg = np.rad2deg(pitch)
+    pitch_deg = float(np.rad2deg(pitch))
     if abs(pitch_deg) > 0.5:
         label = f"pitch {pitch_deg:+.1f}\xb0"
         cv2.putText(
-            img, label, (cx_fp - 40, 24),
-            _HUD_FONT, 0.45, _HEADING_COLOR, 1,
+            img, label, (view_w // 2 - 40, 24),
+            _HUD_FONT, 0.45, _HEADING_COLOR, 1, cv2.LINE_AA,
         )
 
     return img, center_m
+
+
+def _draw_lidar_colorbar(
+    img: np.ndarray,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+) -> None:
+    """Draw a vertical Turbo colorbar with distance labels on the right edge."""
+    lut = _turbo_lut()
+    bar_margin = 4
+    bar_x = x + bar_margin
+    bar_w = w - bar_margin * 2
+    bar_top = y + 30
+    bar_bot = y + h - 30
+    bar_h = max(1, bar_bot - bar_top)
+
+    # Draw the gradient bar
+    for row in range(bar_h):
+        t = row / max(bar_h - 1, 1)
+        # Top of bar = near (red), bottom = far (blue)
+        idx = int(np.clip((1.0 - t) * 255.0, 0, 255))
+        color = (int(lut[idx, 0, 0]), int(lut[idx, 0, 1]), int(lut[idx, 0, 2]))
+        cv2.line(
+            img,
+            (bar_x, bar_top + row),
+            (bar_x + bar_w, bar_top + row),
+            color, 1,
+        )
+
+    # Border
+    cv2.rectangle(
+        img, (bar_x, bar_top), (bar_x + bar_w, bar_bot),
+        (80, 80, 80), 1,
+    )
+
+    # Distance labels at key positions
+    labels = [(0.0, "0m"), (0.2, "2m"), (0.5, "5m"), (1.0, "10m")]
+    for frac, label in labels:
+        row_y = int(bar_top + frac * (bar_h - 1))
+        # Tick mark
+        cv2.line(img, (bar_x - 2, row_y), (bar_x, row_y), (140, 140, 140), 1)
+        # Label text
+        cv2.putText(
+            img, label,
+            (bar_x - 2, row_y - 3) if frac == 0.0 else (bar_x - 2, row_y + 4),
+            _HUD_FONT, 0.30, (160, 160, 160), 1, cv2.LINE_AA,
+        )
+
+    # Title
+    cv2.putText(
+        img, "DIST",
+        (bar_x, bar_top - 8),
+        _HUD_FONT, 0.35, (160, 160, 160), 1, cv2.LINE_AA,
+    )
+
+
+def _draw_lidar_crosshair(
+    img: np.ndarray,
+    cx: int,
+    cy: int,
+) -> None:
+    """Draw a bright green targeting crosshair at the viewport centre."""
+    gap = 6
+    arm = 16
+    color = (0, 255, 0)
+    # Horizontal arms with gap
+    cv2.line(img, (cx - arm, cy), (cx - gap, cy), color, 1, cv2.LINE_AA)
+    cv2.line(img, (cx + gap, cy), (cx + arm, cy), color, 1, cv2.LINE_AA)
+    # Vertical arms with gap
+    cv2.line(img, (cx, cy - arm), (cx, cy - gap), color, 1, cv2.LINE_AA)
+    cv2.line(img, (cx, cy + gap), (cx, cy + arm), color, 1, cv2.LINE_AA)
+    # Centre dot
+    cv2.circle(img, (cx, cy), 2, color, -1, cv2.LINE_AA)
 
 
 def distance_color(distance_m: float) -> tuple[int, int, int]:
@@ -380,12 +519,18 @@ def render_forward_polar(
     h: int,
     scan_history: list[np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Render forward 180-degree scan as a smoothed polar plot."""
+    """Render forward 180° scan as a continuous Turbo-filled polar plot.
+
+    Each pixel is rasterised through polar-coordinate transform and
+    coloured by depth using the Turbo colormap, producing a smooth,
+    professional-grade radar-style display.
+    """
     panel = np.full((h, w, 3), 18, dtype=np.uint8)
     az_bins = depth.shape[0]
     if az_bins == 0:
         return panel
 
+    # ── per-azimuth minimum distance (with smoothing) ───────────────
     min_d = np.full((az_bins,), VIEW_RANGE_M, dtype=np.float32)
     for i in range(az_bins):
         v = valid[i]
@@ -406,32 +551,110 @@ def render_forward_polar(
 
     cx = w // 2
     cy = h - 12
-    radius = int(min(w, h) * 0.45)
+    max_r = int(min(w, h) * 0.45)
 
-    for ring_m in (1.0, 2.0, 5.0, 10.0):
-        rr = int(radius * min(1.0, ring_m / VIEW_RANGE_M))
-        cv2.ellipse(panel, (cx, cy), (rr, rr), 0, 180, 360, (90, 90, 90), 1)
-
-    for deg in range(-90, 91, 15):
+    # ── Radial guide lines (every 30°) ────────────────────────────
+    for deg in range(-90, 91, 30):
         theta = np.deg2rad(deg)
-        x2 = int(cx + radius * np.sin(theta))
-        y2 = int(cy - radius * np.cos(theta))
-        cv2.line(panel, (cx, cy), (x2, y2), (60, 60, 60), 1)
+        x2 = int(cx + max_r * np.sin(theta))
+        y2 = int(cy - max_r * np.cos(theta))
+        cv2.line(panel, (cx, cy), (x2, y2), (35, 35, 35), 1, cv2.LINE_AA)
 
-    angles = np.linspace(-np.pi / 2.0, np.pi / 2.0, az_bins)
-    for i in range(1, az_bins):
-        for scan_idx in (i - 1, i):
-            dist = float(min_d[scan_idx])
-            rr = int(radius * min(1.0, dist / VIEW_RANGE_M))
-            th = angles[scan_idx]
-            x = int(cx + rr * np.sin(th))
-            y = int(cy - rr * np.cos(th))
-            cv2.line(panel, (cx, cy), (x, y), distance_color(dist), 2)
+    # ── Pixel-space polar rasterisation ───────────────────────────
+    ys, xs = np.mgrid[0:h, 0:w]
+    dx = (xs - cx).astype(np.float32)
+    dy = (cy - ys).astype(np.float32)  # +Y = up (toward forward)
+    pixel_dist = np.sqrt(dx * dx + dy * dy)
+    pixel_angle = np.arctan2(dx, dy)  # [-pi, pi], 0=forward
 
-    cv2.circle(panel, (cx, cy), 5, (0, 255, 255), thickness=-1)
-    cv2.arrowedLine(
-        panel, (cx, cy), (cx, cy - 24), (0, 255, 255), 2, tipLength=0.4,
+    # Map pixel angle → azimuth bin index (continuous float)
+    az_lo = -np.pi / 2.0
+    az_hi = np.pi / 2.0
+    bin_idx_f = (pixel_angle - az_lo) / (az_hi - az_lo) * (az_bins - 1)
+    bin_idx = np.clip(bin_idx_f, 0, az_bins - 1)
+
+    # Interpolate scan distance at each pixel's azimuth
+    bin_lo = np.floor(bin_idx).astype(np.int32)
+    bin_hi = np.clip(bin_lo + 1, 0, az_bins - 1)
+    frac = bin_idx - bin_lo.astype(np.float32)
+    scan_dist = min_d[bin_lo] * (1.0 - frac) + min_d[bin_hi] * frac
+
+    # Pixel radius corresponding to scan distance
+    scan_r_px = (scan_dist / VIEW_RANGE_M) * max_r
+
+    # Fill mask: inside scan boundary AND within 180° forward arc
+    in_arc = (pixel_angle >= az_lo) & (pixel_angle <= az_hi) & (dy >= -4)
+    fill_mask = in_arc & (pixel_dist <= scan_r_px) & (pixel_dist > 6)
+
+    # Depth at each filled pixel (normalised 0-1)
+    filled_depth = np.where(
+        fill_mask,
+        np.clip(pixel_dist / np.maximum(scan_r_px, 1.0), 0.0, 1.0),
+        0.0,
     )
+    # Map to actual distance for Turbo colouring
+    filled_dist_m = filled_depth * scan_dist
+    depth_norm = np.clip(filled_dist_m / VIEW_RANGE_M, 0.0, 1.0)
+
+    # Turbo LUT colouring
+    lut = _turbo_lut()
+    turbo_idx = np.clip((1.0 - depth_norm) * 255.0, 0, 255).astype(np.uint8)
+    colored = lut[turbo_idx, 0, :]  # (h, w, 3)
+
+    # Subtle radial darkening for depth perception
+    darken = np.clip(
+        1.0 - 0.25 * (pixel_dist / max(max_r, 1)), 0.4, 1.0,
+    ).astype(np.float32)
+    colored_dark = (colored.astype(np.float32) * darken[:, :, np.newaxis]).astype(
+        np.uint8,
+    )
+    panel[fill_mask] = colored_dark[fill_mask]
+
+    # ── Scan boundary polyline (white, anti-aliased) ───────────────
+    boundary_angles = np.linspace(-np.pi / 2.0, np.pi / 2.0, az_bins)
+    boundary_pts: list[tuple[int, int]] = []
+    for k in range(az_bins):
+        rd = float(min_d[k] / VIEW_RANGE_M) * max_r
+        bx = int(cx + rd * np.sin(boundary_angles[k]))
+        by = int(cy - rd * np.cos(boundary_angles[k]))
+        boundary_pts.append((bx, by))
+    if len(boundary_pts) >= 2:
+        pts_arr = np.array(boundary_pts, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(panel, [pts_arr], False, (220, 220, 220), 1, cv2.LINE_AA)
+
+    # ── Range rings with metric labels ────────────────────────────
+    ring_specs = [
+        (1.0, "1m"), (2.0, "2m"), (5.0, "5m"), (10.0, "10m"),
+    ]
+    for ring_m, ring_label in ring_specs:
+        rr = int(max_r * min(1.0, ring_m / VIEW_RANGE_M))
+        cv2.ellipse(
+            panel, (cx, cy), (rr, rr), 0, 180, 360,
+            (80, 80, 80), 1, cv2.LINE_AA,
+        )
+        # Label on right side of ring
+        lx = cx + rr + 3
+        ly = cy + 4
+        if lx < w - 20:
+            cv2.putText(
+                panel, ring_label, (lx, ly),
+                _HUD_FONT, 0.32, (140, 140, 140), 1, cv2.LINE_AA,
+            )
+
+    # ── Ego marker ───────────────────────────────────────────────
+    cv2.circle(panel, (cx, cy), 5, (0, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+    cv2.arrowedLine(
+        panel, (cx, cy), (cx, cy - 22), (0, 255, 255), 2, tipLength=0.4,
+    )
+
+    # ── Angle labels ─────────────────────────────────────────────
+    cv2.putText(panel, "FWD", (cx - 12, cy - max_r - 6),
+                _HUD_FONT, 0.38, _HEADING_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(panel, "L", (cx - max_r - 12, cy + 4),
+                _HUD_FONT, 0.38, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(panel, "R", (cx + max_r + 4, cy + 4),
+                _HUD_FONT, 0.38, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+
     return panel
 
 
@@ -531,13 +754,19 @@ def overlay_overhead_annotations(
     cv2.line(panel, (cx - 12, cy), (cx + 12, cy), _HEADING_COLOR, 1)
     cv2.line(panel, (cx, cy - 12), (cx, cy + 12), _HEADING_COLOR, 1)
 
-    # Range rings
-    for r in (
-        int(min(h, w) * 0.14),
-        int(min(h, w) * 0.28),
-        int(min(h, w) * 0.42),
-    ):
+    # Range rings with distance labels
+    ring_specs = [
+        (int(min(h, w) * 0.14), "5m"),
+        (int(min(h, w) * 0.28), "10m"),
+        (int(min(h, w) * 0.42), "15m"),
+    ]
+    for r, rlabel in ring_specs:
         cv2.circle(panel, (cx, cy), r, _GUIDE_COLOR, 1)
+        cv2.putText(
+            panel, rlabel,
+            (cx + r + 3, cy - 2),
+            _HUD_FONT, 0.32, (140, 140, 140), 1, cv2.LINE_AA,
+        )
 
     if len(pose_history) < 2:
         return
@@ -558,10 +787,10 @@ def overlay_overhead_annotations(
             trail_points.append((px, pz))
 
     for i in range(1, len(trail_points)):
-        cv2.line(panel, trail_points[i - 1], trail_points[i], _TRAIL_COLOR, 2)
+        cv2.line(panel, trail_points[i - 1], trail_points[i], _TRAIL_COLOR, 3)
 
     if trail_points:
-        cv2.circle(panel, trail_points[-1], 4, (255, 0, 255), thickness=-1)
+        cv2.circle(panel, trail_points[-1], 6, (255, 0, 255), thickness=-1)
 
     heading_len = 18
     hx_px = int(cx + heading_len)

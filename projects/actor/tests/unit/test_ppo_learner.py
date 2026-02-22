@@ -56,7 +56,7 @@ def test_legacy_train_epoch() -> None:
         step_id=0,
         timestamp=1.0,
     )
-    result = StepResult(step_id=0, done=False, truncated=False, reward=1.0, episode_return=1.0, timestamp=1.0)
+    result = StepResult(step_id=0, env_id=0, done=False, truncated=False, reward=1.0, episode_return=1.0, timestamp=1.0)
     buf.append(Transition(observation=obs, action=action, result=result))
     metrics = learner.train_epoch(buf)
     assert metrics["reward_mean"] == 1.0

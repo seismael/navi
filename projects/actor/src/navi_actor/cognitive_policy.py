@@ -1,4 +1,12 @@
-"""Cognitive Mamba Policy — end-to-end neural policy for PPO training."""
+"""Cognitive Mamba Policy — end-to-end neural policy for PPO training.
+
+**This module is sacred.**  The cognitive pipeline
+(FoveatedEncoder → Mamba2TemporalCore → EpisodicMemory → ActorCriticHeads)
+is never modified to accommodate new data sources or sensor types.
+External data connects only through ``DatasetAdapter`` instances in
+``section-manager/backends/`` that transform raw observations *to*
+the engine's canonical ``(B, 2, Az, El)`` DistanceMatrix input.
+"""
 
 from __future__ import annotations
 
@@ -88,7 +96,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         self,
         obs_tensor: Tensor,
         hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
         """Full forward pass: encode → temporal core → actor-critic.
 
         Args:
@@ -100,6 +108,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             log_probs: (B,) log probabilities.
             values: (B,) state-value estimates.
             new_hidden: updated hidden state.
+            z_t: (B, D) spatial embedding (for RND / episodic memory).
 
         """
         z_t = self.encoder(obs_tensor)
@@ -108,7 +117,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         features, new_hidden = self.temporal_core.forward_step(z_t, hidden)
 
         actions, log_probs, values = self.heads.sample(features)
-        return actions, log_probs, values, new_hidden
+        return actions, log_probs, values, new_hidden, z_t
 
     def encode(self, obs_tensor: Tensor) -> Tensor:
         """Extract spatial embedding z_t without temporal processing.
@@ -129,7 +138,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         obs_tensor: Tensor,
         actions: Tensor,
         hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
         """Evaluate actions under current policy (for PPO loss computation).
 
         Args:
@@ -142,6 +151,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             values: (B,) state-value estimates.
             entropy: scalar entropy.
             new_hidden: updated hidden state.
+            z_t: (B, D) spatial embedding (for RND distillation).
 
         """
         z_t = self.encoder(obs_tensor)
@@ -150,14 +160,14 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         log_probs = self.heads.log_prob(features, actions)
         _, values = self.heads(features)
         entropy = self.heads.entropy()
-        return log_probs, values, entropy, new_hidden
+        return log_probs, values, entropy, new_hidden, z_t
 
     def evaluate_sequence(
         self,
         obs_seq: Tensor,
         actions_seq: Tensor,
         hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
         """Evaluate a full sequence for BPTT training.
 
         Args:
@@ -170,12 +180,14 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             values: (B*T,) value estimates.
             entropy: scalar entropy.
             new_hidden: final hidden state.
+            z_t: (B*T, D) spatial embeddings (for RND distillation).
 
         """
         batch, seq_len = obs_seq.shape[:2]
         # Encode all frames
         flat_obs = obs_seq.reshape(batch * seq_len, *obs_seq.shape[2:])
-        z_seq = self.encoder(flat_obs).reshape(batch, seq_len, -1)
+        z_flat = self.encoder(flat_obs)
+        z_seq = z_flat.reshape(batch, seq_len, -1)
 
         # Temporal core: full sequence
         features_seq, new_hidden = self.temporal_core.forward(z_seq, hidden)
@@ -185,7 +197,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         log_probs = self.heads.log_prob(flat_features, flat_actions)
         _, values = self.heads(flat_features)
         entropy = self.heads.entropy()
-        return log_probs, values, entropy, new_hidden
+        return log_probs, values, entropy, new_hidden, z_flat
 
     @torch.no_grad()  # type: ignore[misc]
     def act(
@@ -208,7 +220,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         """
         self.eval()
         obs_tensor = self._obs_to_tensor(obs)
-        actions, _, _, new_hidden = self.forward(obs_tensor, hidden)
+        actions, _, _, new_hidden, _ = self.forward(obs_tensor, hidden)
         action_list: list[float] = actions.squeeze(0).cpu().tolist()
         return action_list, new_hidden
 

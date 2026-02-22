@@ -123,7 +123,7 @@ class LearnedSphericalPolicy:
 class ShallowPolicy:
     """Small policy that maps distance matrices to batched actions."""
 
-    def __init__(self, policy_id: str = "brain-v2-shallow", gain: float = 0.5) -> None:
+    def __init__(self, policy_id: str = "brain-v2-shallow", gain: float = 1.8) -> None:
         self._policy_id = policy_id
         self._gain = gain
 
@@ -138,7 +138,7 @@ class ShallowPolicy:
         valid = observation.valid_mask
         batch = depth.shape[0]
 
-        forward = np.full((batch,), 0.2, dtype=np.float32)
+        forward = np.full((batch,), 1.2, dtype=np.float32)
         yaw = np.zeros((batch,), dtype=np.float32)
 
         left_sector = depth[:, : depth.shape[1] // 2, :]
@@ -148,10 +148,10 @@ class ShallowPolicy:
 
         left_mean = np.where(left_valid.any(axis=(1, 2)), left_sector.mean(axis=(1, 2)), 1.0)
         right_mean = np.where(right_valid.any(axis=(1, 2)), right_sector.mean(axis=(1, 2)), 1.0)
-        yaw = np.clip((right_mean - left_mean) * self._gain, -0.5, 0.5).astype(np.float32)
+        yaw = np.clip((right_mean - left_mean) * self._gain, -1.5, 1.5).astype(np.float32)
 
         occupancy = depth.mean(axis=(1, 2))
-        forward = np.where(occupancy < 0.1, 0.0, forward).astype(np.float32)
+        forward = np.where(occupancy < 0.04, 0.3, forward).astype(np.float32)
 
         linear_velocity = np.stack(
             [forward, np.zeros_like(forward), np.zeros_like(forward)],

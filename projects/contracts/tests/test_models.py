@@ -135,6 +135,7 @@ class TestStepResult:
     def test_round_trip_serialization(self) -> None:
         result = StepResult(
             step_id=99,
+            env_id=0,
             done=True,
             truncated=False,
             reward=-1.0,
@@ -170,3 +171,6 @@ class TestTelemetryEvent:
         assert restored.episode_id == event.episode_id
         assert restored.env_id == event.env_id
         np.testing.assert_array_equal(restored.payload, event.payload)
+
+
+

@@ -63,14 +63,23 @@ def dashboard(
         "tcp://localhost:5560",
         help="Section Manager REP address for Tab-toggle manual stepping",
     ),
+    actors: int = typer.Option(
+        1, help="Number of actors (adds per-actor tabs when > 1)",
+    ),
     hz: float = typer.Option(30.0, help="Dashboard + teleop tick rate"),
     linear_speed: float = typer.Option(1.5, help="Max horizontal linear speed"),
     yaw_rate: float = typer.Option(1.5, help="Max yaw rate"),
+    scene: str = typer.Option(
+        "",
+        help="Path to .glb/.obj mesh for 3D environment view",
+    ),
 ) -> None:
     """Run live high-performance RL training visualiser (PyQtGraph)."""
     typer.echo("Initialising Ghost-Matrix RL Dashboard...")
-    typer.echo("  Tab=toggle manual/AI  WASD/arrows=move  +/-=zoom  ESC=quit")
+    typer.echo(f"  Actors: {actors}")
+    typer.echo("  Tab=toggle manual/AI  WASD/arrows=move  ESC=quit")
 
+    scene_path = scene if scene else None
     dashboard_runner = MatrixViewer(
         matrix_sub=matrix_sub,
         actor_sub=actor_sub,
@@ -78,6 +87,8 @@ def dashboard(
         hz=hz,
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,
+        scene_path=scene_path,
+        n_actors=actors,
     )
     dashboard_runner.run()
 

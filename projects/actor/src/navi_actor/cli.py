@@ -30,10 +30,16 @@ def run(
         "",
         help="Checkpoint path (.npz for learned, .pt for cognitive)",
     ),
-    azimuth_bins: int = typer.Option(64, help="Expected distance-matrix azimuth resolution"),
-    elevation_bins: int = typer.Option(32, help="Expected distance-matrix elevation resolution"),
+    azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
+    elevation_bins: int = typer.Option(128, help="Expected distance-matrix elevation resolution"),
 ) -> None:
     """Start the Actor service."""
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+    else:
+        root_logger.setLevel(logging.INFO)
+
     config = ActorConfig(
         sub_address=sub,
         pub_address=pub,
@@ -221,14 +227,14 @@ def train_ppo(
     gae_lambda: float = typer.Option(0.95, help="GAE lambda"),
     entropy_coeff: float = typer.Option(0.01, help="Entropy bonus coefficient"),
     # Reward shaping
-    collision_penalty: float = typer.Option(-10.0, help="Collision termination penalty"),
+    collision_penalty: float = typer.Option(0.0, help="Collision termination penalty (backend supplies its own)"),
     existential_tax: float = typer.Option(-0.01, help="Per-step existence cost"),
     velocity_weight: float = typer.Option(0.1, help="Forward-velocity heuristic weight"),
     # RND curiosity
     intrinsic_coeff_init: float = typer.Option(1.0, help="Initial RND intrinsic coefficient"),
     intrinsic_coeff_final: float = typer.Option(0.01, help="Final RND intrinsic coefficient"),
     intrinsic_anneal_steps: int = typer.Option(500_000, help="Steps to anneal intrinsic coeff"),
-    rnd_learning_rate: float = typer.Option(1e-3, help="RND predictor learning rate"),
+    rnd_learning_rate: float = typer.Option(3e-5, help="RND predictor learning rate"),
     # Episodic memory
     memory_capacity: int = typer.Option(10_000, help="Episodic memory max entries"),
     memory_exclusion_window: int = typer.Option(50, help="Exclude recent N steps from query"),
@@ -279,12 +285,7 @@ def train_ppo(
     trainer = PpoTrainer(config)
 
     if checkpoint:
-        from navi_actor.cognitive_policy import CognitiveMambaPolicy
-
-        trainer._policy = CognitiveMambaPolicy.load_checkpoint(
-            checkpoint,
-            embedding_dim=embedding_dim,
-        ).to(trainer._device)
+        trainer.load_training_state(checkpoint)
         typer.echo(f"Resumed from checkpoint: {checkpoint}")
 
     trainer.start()
@@ -312,6 +313,233 @@ def train_ppo(
         f"loop_detections={metrics.loop_detections} "
         f"beta_final={metrics.beta_final:.4f}"
     )
+
+
+@app.command("train-sequential")
+def train_sequential(
+    manifest: str = typer.Option(
+        "data/scenes/sample_episodes.json",
+        help="Path to scene manifest JSON file",
+    ),
+    actors: int = typer.Option(
+        2,
+        help="Number of actors sharing each scene",
+    ),
+    steps_per_scene: int = typer.Option(
+        10_000, help="Environment steps per scene (across all actors)",
+    ),
+    backend: str = typer.Option("mesh", help="Simulation backend"),
+    # PPO hyper-parameters
+    learning_rate: float = typer.Option(3e-4, help="Adam learning rate"),
+    embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
+    rollout_length: int = typer.Option(512, help="Steps per rollout"),
+    ppo_epochs: int = typer.Option(4, help="PPO epochs per update"),
+    minibatch_size: int = typer.Option(64, help="Minibatch size"),
+    bptt_len: int = typer.Option(32, help="BPTT sequence length (0 = random)"),
+    clip_ratio: float = typer.Option(0.2, help="PPO clip ratio"),
+    gamma: float = typer.Option(0.99, help="Discount factor"),
+    gae_lambda: float = typer.Option(0.95, help="GAE lambda"),
+    entropy_coeff: float = typer.Option(0.01, help="Entropy bonus coefficient"),
+    # Reward shaping
+    collision_penalty: float = typer.Option(0.0, help="Collision penalty (backend supplies its own)"),
+    existential_tax: float = typer.Option(-0.01, help="Per-step existence cost"),
+    velocity_weight: float = typer.Option(0.1, help="Forward-velocity weight"),
+    # RND curiosity
+    intrinsic_coeff_init: float = typer.Option(1.0, help="Initial RND coefficient"),
+    intrinsic_coeff_final: float = typer.Option(0.01, help="Final RND coefficient"),
+    intrinsic_anneal_steps: int = typer.Option(500_000, help="RND anneal steps"),
+    rnd_learning_rate: float = typer.Option(3e-5, help="RND predictor learning rate"),
+    # Episodic memory
+    memory_capacity: int = typer.Option(10_000, help="Episodic memory capacity"),
+    memory_exclusion_window: int = typer.Option(50, help="Exclude recent N steps from query"),
+    loop_threshold: float = typer.Option(0.85, help="Loop similarity threshold"),
+    loop_penalty_coeff: float = typer.Option(0.5, help="Loop penalty coefficient"),
+    # Checkpointing
+    checkpoint_every: int = typer.Option(0, help="Checkpoint interval (0 = disabled)"),
+    checkpoint_dir: str = typer.Option("checkpoints", help="Checkpoint directory"),
+    checkpoint: str = typer.Option("", help="Resume from checkpoint path (.pt)"),
+    # ZMQ ports (shared with SM)
+    sm_pub: str = typer.Option("tcp://*:5559", help="SM PUB bind address"),
+    sm_rep: str = typer.Option("tcp://*:5560", help="SM REP bind address"),
+    actor_pub: str = typer.Option("tcp://*:5557", help="Actor PUB bind address"),
+) -> None:
+    """Sequential multi-scene training with N actors per scene.
+
+    Loads scenes one at a time from a manifest. For each scene, launches
+    a Section-Manager backend with ``--actors N`` and an Actor/Trainer
+    that steps all N actors in round-robin. Policy weights (and optimizer
+    / RND / reward-shaper state) accumulate across scenes.
+    """
+    import json
+    from pathlib import Path
+
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+    else:
+        root_logger.setLevel(logging.INFO)
+
+    # Load scene manifest
+    manifest_path = Path(manifest)
+    if not manifest_path.exists():
+        typer.echo(f"Manifest not found: {manifest_path}")
+        raise typer.Exit(1)
+
+    with manifest_path.open(encoding="utf-8-sig") as f:
+        scene_data = json.load(f)
+
+    # Extract scene paths
+    scenes: list[str] = []
+    raw_scenes: list[object] = []
+    if isinstance(scene_data, list):
+        raw_scenes = scene_data
+    elif isinstance(scene_data, dict) and "scenes" in scene_data:
+        raw_scenes = scene_data["scenes"]
+    for entry in raw_scenes:
+        if isinstance(entry, dict):
+            # Support both "scene" and "path" keys
+            p = entry.get("scene") or entry.get("path")
+            if p:
+                scenes.append(str(p))
+        elif isinstance(entry, str):
+            scenes.append(entry)
+
+    if not scenes:
+        typer.echo("No scenes found in manifest.")
+        raise typer.Exit(1)
+
+    # Filter to scenes that exist on disk
+    valid_scenes = [s for s in scenes if Path(s).exists()]
+    skipped = len(scenes) - len(valid_scenes)
+    if skipped:
+        typer.echo(f"Skipping {skipped} scenes (files not found on disk)")
+    scenes = valid_scenes
+
+    if not scenes:
+        typer.echo("No valid scene files found.")
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"Sequential training: {len(scenes)} scenes, {actors} actors/scene, "
+        f"{steps_per_scene} steps/scene, backend={backend}"
+    )
+
+    config = ActorConfig(
+        sub_address=f"tcp://localhost:{sm_pub.split(':')[-1]}",
+        pub_address=actor_pub,
+        mode="step",
+        step_endpoint=f"tcp://localhost:{sm_rep.split(':')[-1]}",
+        n_actors=actors,
+        embedding_dim=embedding_dim,
+        learning_rate=learning_rate,
+        rollout_length=rollout_length,
+        ppo_epochs=ppo_epochs,
+        minibatch_size=minibatch_size,
+        bptt_len=bptt_len,
+        clip_ratio=clip_ratio,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        entropy_coeff=entropy_coeff,
+        collision_penalty=collision_penalty,
+        existential_tax=existential_tax,
+        velocity_weight=velocity_weight,
+        intrinsic_coeff_init=intrinsic_coeff_init,
+        intrinsic_coeff_final=intrinsic_coeff_final,
+        intrinsic_anneal_steps=intrinsic_anneal_steps,
+        rnd_learning_rate=rnd_learning_rate,
+        memory_capacity=memory_capacity,
+        memory_exclusion_window=memory_exclusion_window,
+        loop_threshold=loop_threshold,
+        loop_penalty_coeff=loop_penalty_coeff,
+    )
+
+    from navi_actor.training.ppo_trainer import PpoTrainer
+    from navi_section_manager.config import SectionManagerConfig  # type: ignore[import-not-found]
+    from navi_section_manager.server import SectionManagerServer  # type: ignore[import-not-found]
+
+    ckpt_path_latest: str | None = checkpoint or None
+
+    for scene_idx, scene_path in enumerate(scenes):
+        typer.echo(f"\n{'='*60}")
+        typer.echo(f"Scene {scene_idx + 1}/{len(scenes)}: {scene_path}")
+        typer.echo(f"{'='*60}")
+
+        # Build SM config + backend for this scene
+        sm_config = SectionManagerConfig(
+            pub_address=sm_pub,
+            rep_address=sm_rep,
+            mode="step",
+            n_actors=actors,
+            backend=backend,
+            habitat_scene=scene_path,
+            azimuth_bins=config.azimuth_bins,
+            elevation_bins=config.elevation_bins,
+            max_distance=30.0,
+            compute_overhead=False,
+        )
+
+        # Import and build backend
+        if backend == "mesh":
+            from navi_section_manager.backends.mesh_backend import MeshSceneBackend  # type: ignore[import-not-found]  # noqa: I001
+            sim_backend = MeshSceneBackend(sm_config)
+        else:
+            from navi_section_manager.backends.voxel import VoxelBackend  # type: ignore[import-not-found]  # noqa: I001
+            from navi_section_manager.generators.arena import ArenaGenerator  # type: ignore[import-not-found]
+            gen = ArenaGenerator(seed=42)
+            sim_backend = VoxelBackend(sm_config, gen)
+
+        sm_server = SectionManagerServer(config=sm_config, backend=sim_backend)
+
+        # Start SM in a background thread
+        import threading
+        sm_thread = threading.Thread(target=sm_server.run, daemon=True)
+        sm_thread.start()
+
+        # Small delay for ZMQ bind + PUB/SUB subscription handshake
+        import time as _time
+        _time.sleep(1.0)
+
+        # Build trainer (create fresh for correct ZMQ lifecycle)
+        trainer = PpoTrainer(config)
+
+        # Load accumulated knowledge from previous scene
+        if ckpt_path_latest:
+            trainer.load_training_state(ckpt_path_latest)
+            typer.echo(f"  Loaded checkpoint: {ckpt_path_latest}")
+
+        trainer.start()
+        try:
+            metrics = trainer.train(
+                total_steps=steps_per_scene,
+                log_every=100,
+                checkpoint_every=checkpoint_every,
+                checkpoint_dir=checkpoint_dir,
+            )
+        finally:
+            trainer.stop()
+            sm_server.stop()
+            sm_thread.join(timeout=5.0)
+
+        # Save accumulated state
+        scene_ckpt = (
+            Path(checkpoint_dir)
+            / f"policy_scene_{scene_idx:04d}.pt"
+        )
+        scene_ckpt.parent.mkdir(parents=True, exist_ok=True)
+        trainer.save_training_state(scene_ckpt)
+        ckpt_path_latest = str(scene_ckpt)
+
+        typer.echo(
+            f"  Scene {scene_idx + 1} complete | "
+            f"steps={metrics.total_steps} episodes={metrics.episodes} "
+            f"reward_ema={metrics.reward_ema:.4f} "
+            f"policy_loss={metrics.policy_loss:.4f}"
+        )
+
+        # Allow OS to release ports before next scene rebinds
+        _time.sleep(1.0)
+
+    typer.echo(f"\nAll {len(scenes)} scenes complete. Final checkpoint: {ckpt_path_latest}")
 
 
 if __name__ == "__main__":

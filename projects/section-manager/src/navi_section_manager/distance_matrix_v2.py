@@ -77,12 +77,18 @@ class DistanceMatrixBuilder:
         pz = pz[in_bounds]
         sem = np.rint(voxels[in_bounds, 4]).astype(np.int32)
 
-        # Paint voxels by semantic colour
+        # Paint voxels by semantic colour (2x2 filled blocks for visibility)
         for sid, colour in _SEMANTIC_COLORS.items():
             mask = sem == sid
             if np.any(mask):
-                # pz is image row, px is image column
-                img[pz[mask], px[mask]] = colour
+                mpx = px[mask]
+                mpz = pz[mask]
+                # Draw 2x2 block for each point
+                for dx in range(2):
+                    for dz in range(2):
+                        cpx = np.clip(mpx + dx, 0, size - 1)
+                        cpz = np.clip(mpz + dz, 0, size - 1)
+                        img[cpz, cpx] = colour
 
         # Draw robot position — bright magenta dot (clearly distinct
         # from floor green and wall grey).

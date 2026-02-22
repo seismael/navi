@@ -77,6 +77,7 @@ class PPOTransition:
     value: float
     reward: float
     done: bool
+    truncated: bool = False
     hidden_state: Tensor | None = None
 
 
@@ -133,9 +134,22 @@ class TrajectoryBuffer:
 
         for t in reversed(range(n)):
             tr = self._transitions[t]
-            mask = 0.0 if tr.done else 1.0
-            delta = tr.reward + self.gamma * prev_value * mask - tr.value
-            last_gae = delta + self.gamma * self.gae_lambda * mask * last_gae
+
+            if tr.truncated and not tr.done:
+                # Time-limit: episode was artificially ended.  Bootstrap
+                # from V(s_T) as a proxy for V(s_{T+1}).  The GAE trace
+                # is cut so advantages from the next episode don't leak.
+                delta = tr.reward + self.gamma * tr.value - tr.value
+                last_gae = delta
+            elif tr.done:
+                # True termination (collision): future value is 0.
+                delta = tr.reward - tr.value
+                last_gae = delta
+            else:
+                # Normal mid-episode step: full GAE recursion.
+                delta = tr.reward + self.gamma * prev_value - tr.value
+                last_gae = delta + self.gamma * self.gae_lambda * last_gae
+
             advantages[t] = last_gae
             prev_value = tr.value
 

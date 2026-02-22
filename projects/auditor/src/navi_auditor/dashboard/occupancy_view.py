@@ -1,0 +1,292 @@
+"""Live 2D occupancy map for Ghost-Matrix dashboard.
+
+Accumulates depth-ray observations into a world-space occupancy grid,
+producing a SLAM-style top-down view showing obstacles (coloured by
+depth), explored free-space, and unexplored regions.  The drone
+position, heading, and trajectory trail are overlaid.
+
+Works with any environment — no mesh file required.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+
+import cv2
+import numpy as np
+
+__all__: list[str] = ["OccupancyMap"]
+
+# ── Grid defaults ────────────────────────────────────────────────────
+_CELL_M: float = 0.15  # metres per cell
+_EXTENT_M: float = 60.0  # total grid extent (±30 m from origin)
+_VIEW_RADIUS_M: float = 18.0  # visible radius around drone
+_MAX_TRAIL: int = 2000  # retained trail positions
+
+# ── Palette (BGR) ────────────────────────────────────────────────────
+_COL_UNEXPLORED = np.array([13, 13, 18], dtype=np.uint8)
+_COL_FREE = np.array([30, 32, 35], dtype=np.uint8)
+_DRONE_BGR = (0, 140, 255)  # bright orange
+_HEADING_BGR = (200, 255, 0)  # cyan-green
+_TRAIL_NEW = np.array([220, 220, 40], dtype=np.float32)  # bright cyan
+_TRAIL_OLD = np.array([40, 45, 25], dtype=np.float32)  # dim
+
+_HUD_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+class OccupancyMap:
+    """Accumulating world-space 2D occupancy grid with rendering.
+
+    Call :meth:`update` every tick with depth data and pose, then
+    :meth:`render` to produce a BGR image for ``ImagePanel.set_image``.
+    """
+
+    def __init__(
+        self,
+        cell_size: float = _CELL_M,
+        grid_extent: float = _EXTENT_M,
+        max_distance: float = 15.0,
+    ) -> None:
+        self._cell = cell_size
+        self._n = int(grid_extent / cell_size)
+        self._half = grid_extent / 2.0
+        self._max_dist = max_distance
+
+        # 0 = unexplored, 1 = free, 2 = occupied
+        self._occ = np.zeros((self._n, self._n), dtype=np.uint8)
+        self._depth_m = np.full(
+            (self._n, self._n), np.nan, dtype=np.float32,
+        )
+
+        self._trail: deque[tuple[float, float, float]] = deque(
+            maxlen=_MAX_TRAIL,
+        )
+        self._last_episode: int = -1
+
+        # Grid origin (bottom-left corner in world coords)
+        self._ox: float = -self._half
+        self._oz: float = -self._half
+
+    # ── coordinate helpers ───────────────────────────────────────────
+
+    def _w2g(
+        self,
+        wx: np.ndarray,
+        wz: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """World (X, Z) → grid (col, row)."""
+        gx = ((wx - self._ox) / self._cell).astype(np.int32)
+        gz = ((wz - self._oz) / self._cell).astype(np.int32)
+        return gx, gz
+
+    def _in_bounds(
+        self,
+        gx: np.ndarray,
+        gz: np.ndarray,
+    ) -> np.ndarray:
+        """Return boolean mask for grid indices that are within bounds."""
+        return (gx >= 0) & (gx < self._n) & (gz >= 0) & (gz < self._n)
+
+    # ── per-tick grid update ─────────────────────────────────────────
+
+    def update(
+        self,
+        depth_2d: np.ndarray,
+        valid_2d: np.ndarray,
+        x: float,
+        z: float,
+        yaw: float,
+        episode_id: int = 0,
+    ) -> None:
+        """Project depth rays into world space and update occupancy.
+
+        Parameters
+        ----------
+        depth_2d
+            ``(Az, El)`` normalised depth ``[0, 1]``.
+        valid_2d
+            ``(Az, El)`` boolean mask.
+        x, z
+            Drone world position (Y-up sim coords, using XZ plane).
+        yaw
+            Heading in radians.
+        episode_id
+            Current episode — grid resets when this changes.
+        """
+        if episode_id != self._last_episode and self._last_episode >= 0:
+            self.reset()
+        self._last_episode = episode_id
+
+        az_bins = depth_2d.shape[0]
+        if az_bins == 0:
+            return
+
+        self._trail.append((x, z, yaw))
+
+        # ── per-azimuth minimum valid depth ──────────────────────────
+        local_angles = np.linspace(
+            -np.pi, np.pi, az_bins, endpoint=False, dtype=np.float32,
+        )
+        world_angles = local_angles + yaw
+
+        min_d_m = np.full(az_bins, np.nan, dtype=np.float32)
+        for i in range(az_bins):
+            v = valid_2d[i]
+            if np.any(v):
+                min_d_m[i] = float(np.min(depth_2d[i][v])) * self._max_dist
+
+        has_hit = ~np.isnan(min_d_m)
+        if not np.any(has_hit):
+            return
+
+        # ── obstacle endpoints ───────────────────────────────────────
+        d = min_d_m[has_hit]
+        a = world_angles[has_hit]
+        hit_x = x + d * np.cos(a)
+        hit_z = z + d * np.sin(a)
+
+        ogx, ogz = self._w2g(hit_x, hit_z)
+        mask_ok = self._in_bounds(ogx, ogz)
+        gx_ok = ogx[mask_ok]
+        gz_ok = ogz[mask_ok]
+        self._occ[gz_ok, gx_ok] = 2
+        self._depth_m[gz_ok, gx_ok] = d[mask_ok]
+
+        # ── free-space ray marching (subsampled) ─────────────────────
+        step = self._cell * 2.0
+        subsample = max(1, az_bins // 64)  # ≤64 rays for free-space
+        for idx in range(0, len(d), subsample):
+            if not mask_ok[idx]:
+                continue
+            ray_d = d[idx]
+            n_steps = max(1, int(ray_d / step))
+            ts = np.linspace(0.0, 0.92, n_steps, dtype=np.float32)
+            rx = x + ray_d * np.cos(a[idx]) * ts
+            rz = z + ray_d * np.sin(a[idx]) * ts
+            rgx, rgz = self._w2g(rx, rz)
+            rm = self._in_bounds(rgx, rgz)
+            rgx_m = rgx[rm]
+            rgz_m = rgz[rm]
+            free_cells = self._occ[rgz_m, rgx_m] == 0
+            self._occ[rgz_m[free_cells], rgx_m[free_cells]] = 1
+
+    # ── rendering ────────────────────────────────────────────────────
+
+    def render(self, width: int, height: int) -> np.ndarray:
+        """Produce a BGR image of the occupancy map centred on the drone.
+
+        Parameters
+        ----------
+        width, height
+            Output image size in pixels.
+
+        Returns
+        -------
+        BGR ``uint8`` array ``(height, width, 3)``.
+        """
+        if not self._trail:
+            return np.full((height, width, 3), 13, dtype=np.uint8)
+
+        cx, cz, _cyaw = self._trail[-1]
+
+        # ── extract view window around drone ─────────────────────────
+        vr = _VIEW_RADIUS_M
+        gx_lo = max(0, int((cx - vr - self._ox) / self._cell))
+        gx_hi = min(self._n, int((cx + vr - self._ox) / self._cell) + 1)
+        gz_lo = max(0, int((cz - vr - self._oz) / self._cell))
+        gz_hi = min(self._n, int((cz + vr - self._oz) / self._cell) + 1)
+
+        v_occ = self._occ[gz_lo:gz_hi, gx_lo:gx_hi]
+        v_dep = self._depth_m[gz_lo:gz_hi, gx_lo:gx_hi]
+
+        if v_occ.size == 0:
+            return np.full((height, width, 3), 13, dtype=np.uint8)
+
+        vh, vw = v_occ.shape
+
+        # ── colour grid cells ────────────────────────────────────────
+        img = np.tile(_COL_UNEXPLORED, (vh, vw, 1)).copy()
+        img[v_occ == 1] = _COL_FREE
+
+        occ_mask = v_occ == 2
+        if np.any(occ_mask):
+            d_norm = np.clip(v_dep[occ_mask] / self._max_dist, 0.0, 1.0)
+            gray = (d_norm * 255.0).astype(np.uint8)
+            colored = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
+            img[occ_mask] = colored.reshape(-1, 3)
+
+        # ── resize to output ─────────────────────────────────────────
+        out = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)
+
+        # ── pixel-space conversion helper ────────────────────────────
+        sx = width / max(vw, 1)
+        sz = height / max(vh, 1)
+
+        def _w2px(wx: float, wz: float) -> tuple[int, int]:
+            px = int(((wx - self._ox) / self._cell - gx_lo) * sx)
+            py = int(((wz - self._oz) / self._cell - gz_lo) * sz)
+            return px, py
+
+        # ── trajectory trail ─────────────────────────────────────────
+        trail_list = list(self._trail)
+        n_trail = len(trail_list)
+        if n_trail >= 2:
+            for i in range(1, n_trail):
+                t = i / max(n_trail - 1, 1)
+                c = (_TRAIL_OLD * (1.0 - t) + _TRAIL_NEW * t).astype(int)
+                bgr_t = (int(c[0]), int(c[1]), int(c[2]))
+                p1 = _w2px(trail_list[i - 1][0], trail_list[i - 1][1])
+                p2 = _w2px(trail_list[i][0], trail_list[i][1])
+                cv2.line(out, p1, p2, bgr_t, 1, cv2.LINE_AA)
+
+        # ── drone marker ─────────────────────────────────────────────
+        dpx, dpy = _w2px(cx, cz)
+        cv2.circle(out, (dpx, dpy), 8, _DRONE_BGR, -1, cv2.LINE_AA)
+        cv2.circle(out, (dpx, dpy), 9, (0, 80, 160), 1, cv2.LINE_AA)
+
+        # ── heading arrow ────────────────────────────────────────────
+        cyaw = self._trail[-1][2]
+        arrow_len = 22
+        hx = int(dpx + arrow_len * np.cos(cyaw))
+        hy = int(dpy + arrow_len * np.sin(cyaw))
+        cv2.arrowedLine(
+            out, (dpx, dpy), (hx, hy),
+            _HEADING_BGR, 2, cv2.LINE_AA, tipLength=0.35,
+        )
+
+        # ── range rings ──────────────────────────────────────────────
+        ring_color = (50, 52, 55)
+        label_color = (100, 105, 110)
+        for r_m in (2.0, 5.0, 10.0, 15.0):
+            r_px = int(r_m / self._cell * sx)
+            if r_px < 8 or r_px > width:
+                continue
+            cv2.circle(out, (dpx, dpy), r_px, ring_color, 1, cv2.LINE_AA)
+            lx = min(dpx + r_px + 3, width - 25)
+            cv2.putText(
+                out, f"{int(r_m)}m", (lx, dpy - 3),
+                _HUD_FONT, 0.30, label_color, 1, cv2.LINE_AA,
+            )
+
+        # ── HUD title ────────────────────────────────────────────────
+        cv2.putText(
+            out, "LIVE MAP", (8, 18),
+            _HUD_FONT, 0.45, (180, 180, 180), 1, cv2.LINE_AA,
+        )
+
+        # Explored-area fraction
+        total = max(1, int(np.sum(self._occ > 0)))
+        cv2.putText(
+            out, f"cells: {total}", (8, height - 10),
+            _HUD_FONT, 0.32, (120, 120, 120), 1, cv2.LINE_AA,
+        )
+
+        return out
+
+    # ── lifecycle ────────────────────────────────────────────────────
+
+    def reset(self) -> None:
+        """Clear all accumulated data (called on episode boundary)."""
+        self._occ[:] = 0
+        self._depth_m[:] = np.nan
+        self._trail.clear()

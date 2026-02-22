@@ -1,4 +1,4 @@
-"""Integration test for the Section Manager step cycle."""
+"""Integration test for the Section Manager step cycle via VoxelBackend."""
 
 from __future__ import annotations
 
@@ -6,17 +6,18 @@ import time
 
 import numpy as np
 
-from navi_contracts import Action, StepRequest
+from navi_contracts import Action
+from navi_section_manager.backends.voxel import VoxelBackend
 from navi_section_manager.config import SectionManagerConfig
+from navi_section_manager.generators.arena import ArenaGenerator
 from navi_section_manager.generators.maze import MazeGenerator
-from navi_section_manager.server import SectionManagerServer
 
 
 class TestStepCycle:
-    """Integration test: exercise the full step() code path without ZMQ."""
+    """Integration test: exercise the full VoxelBackend step code path."""
 
     def test_single_step(self) -> None:
-        """One step should produce a valid StepResult and internal observation path."""
+        """One step should produce a valid StepResult and DistanceMatrix."""
         config = SectionManagerConfig(
             mode="step",
             generator="maze",
@@ -26,15 +27,11 @@ class TestStepCycle:
             lookahead_margin=2,
         )
         gen = MazeGenerator(seed=config.seed, chunk_size=config.chunk_size)
-        server = SectionManagerServer(config=config, generator=gen)
+        backend = VoxelBackend(config, gen)
 
-        # Manually initialise the window (bypasses ZMQ start)
-        server._window.shift(
-            server._pose.x,
-            server._pose.y,
-            server._pose.z,
-            gen.generate_chunk,
-        )
+        # Reset initialises the window
+        obs = backend.reset(episode_id=0)
+        assert obs.step_id == 0
 
         action = Action(
             env_ids=np.array([0], dtype=np.int32),
@@ -44,34 +41,30 @@ class TestStepCycle:
             step_id=1,
             timestamp=time.time(),
         )
-        request = StepRequest(action=action, step_id=1, timestamp=time.time())
-        result = server.step(request)
+        dm, result = backend.step(action, step_id=1)
 
         assert result.step_id == 1
         assert result.done is False
         assert result.truncated is False
         assert isinstance(result.reward, float)
+        assert dm.step_id == 1
 
     def test_multiple_steps_advance_pose(self) -> None:
         """Multiple steps should move the robot forward."""
         config = SectionManagerConfig(
             mode="step",
-            generator="maze",
+            generator="arena",
             seed=42,
-            chunk_size=4,
+            chunk_size=16,
             window_radius=1,
             lookahead_margin=2,
+            barrier_distance=0.0,
         )
-        gen = MazeGenerator(seed=config.seed, chunk_size=config.chunk_size)
-        server = SectionManagerServer(config=config, generator=gen)
-        server._window.shift(
-            server._pose.x,
-            server._pose.y,
-            server._pose.z,
-            gen.generate_chunk,
-        )
+        gen = ArenaGenerator(seed=config.seed, chunk_size=config.chunk_size)
+        backend = VoxelBackend(config, gen)
+        backend.reset(episode_id=0)
 
-        initial_x = server.pose.x
+        initial_x = backend.pose.x
         action = Action(
             env_ids=np.array([0], dtype=np.int32),
             linear_velocity=np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
@@ -82,10 +75,9 @@ class TestStepCycle:
         )
 
         for i in range(5):
-            req = StepRequest(action=action, step_id=i, timestamp=time.time())
-            server.step(req)
+            backend.step(action, step_id=i)
 
-        assert server.pose.x > initial_x
+        assert backend.pose.x > initial_x
 
     def test_step_produces_valid_wedge_shape(self) -> None:
         """A large step should change pose and keep simulation state consistent."""
@@ -98,13 +90,8 @@ class TestStepCycle:
             lookahead_margin=2,
         )
         gen = MazeGenerator(seed=config.seed, chunk_size=config.chunk_size)
-        server = SectionManagerServer(config=config, generator=gen)
-        server._window.shift(
-            server._pose.x,
-            server._pose.y,
-            server._pose.z,
-            gen.generate_chunk,
-        )
+        backend = VoxelBackend(config, gen)
+        backend.reset(episode_id=0)
 
         # Big step to guarantee entering new chunks
         action = Action(
@@ -115,9 +102,7 @@ class TestStepCycle:
             step_id=0,
             timestamp=time.time(),
         )
-        req = StepRequest(action=action, step_id=0, timestamp=time.time())
-        server.step(req)
+        backend.step(action, step_id=0)
 
-        # Result is a StepResult — check that the internal window produced
-        # correct-shaped data by inspecting the server's grid
-        assert server.pose.x != config.seed  # pose changed
+        # Pose changed
+        assert backend.pose.x != config.seed

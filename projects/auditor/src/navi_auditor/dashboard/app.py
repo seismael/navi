@@ -13,10 +13,10 @@ from __future__ import annotations
 import time
 
 import cv2
-import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from navi_auditor.dashboard.occupancy_view import OccupancyMap
 from navi_auditor.dashboard.panels import (
     ImagePanel,
     RollingPlot,
@@ -27,12 +27,7 @@ from navi_auditor.dashboard.renderers import (
     add_orientation_guides,
     compute_nav_metrics,
     depth_to_viridis,
-    draw_semantic_legend,
-    overlay_overhead_annotations,
-    render_bev_occupancy,
     render_first_person,
-    render_forward_polar,
-    zoom_overhead,
 )
 from navi_auditor.stream_engine import StreamEngine
 
@@ -69,17 +64,23 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         hz: float = 30.0,
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
+        scene_path: str | None = None,
+        n_actors: int = 1,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Ghost-Matrix RL Auditor")
         self.resize(1920, 1080)
         self.setStyleSheet("QMainWindow { background: #0d0d1a; }")
 
+        self._n_actors = max(1, n_actors)
+        self._active_actor: int = 0
+
         # Stream engine
         self._engine = StreamEngine(
             matrix_sub=matrix_sub,
             actor_sub=actor_sub,
             step_endpoint=step_endpoint,
+            n_actors=self._n_actors,
         )
 
         # Teleop state
@@ -88,8 +89,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._manual_mode = False
         self._fwd = 0.0
         self._yaw = 0.0
-        self._overhead_zoom = 1.0
-        self._scan_history: list[np.ndarray] = []
+        self._scene_path = scene_path
 
         # ── build UI ─────────────────────────────────────────────────
         self._status_bar = StatusBar()
@@ -105,7 +105,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
     # ── layout construction ──────────────────────────────────────────
 
     def _build_layout(self) -> None:
-        """Build the main window layout with dockable panels."""
+        """Build the main window layout: 2x2 viewports left, stacked charts right."""
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main_layout = QtWidgets.QVBoxLayout(central)
@@ -115,93 +115,191 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Top status bar
         main_layout.addWidget(self._status_bar)
 
-        # Body: splitter with left (viewport) and right (panels + plots)
+        # Actor tab bar (only visible when n_actors > 1)
+        if self._n_actors > 1:
+            self._actor_tab_bar = QtWidgets.QTabBar()
+            self._actor_tab_bar.setStyleSheet(
+                "QTabBar::tab { background: #1a1a2e; color: #aaa; "
+                "padding: 6px 18px; margin: 1px; border-radius: 4px; } "
+                "QTabBar::tab:selected { background: #2e86de; color: #fff; }"
+            )
+            for i in range(self._n_actors):
+                self._actor_tab_bar.addTab(f"Actor {i}")
+            self._actor_tab_bar.currentChanged.connect(self._on_actor_tab_changed)
+            main_layout.addWidget(self._actor_tab_bar)
+
+        # Body: splitter with left (2x2 viewports) and right (chart stack)
         body = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         main_layout.addWidget(body, stretch=1)
 
-        # Left: First-Person Viewport (~70%)
+        # ── Left: 2x2 viewport grid (~67%) ───────────────────────────
+        viewport_container = QtWidgets.QWidget()
+        viewport_grid = QtWidgets.QGridLayout(viewport_container)
+        viewport_grid.setContentsMargins(2, 2, 2, 2)
+        viewport_grid.setSpacing(2)
+
+        # Top-left: First Person View
         self._fp_panel = ImagePanel(title="FIRST PERSON")
         self._fp_arrow = self._fp_panel.add_action_arrow()
-        body.addWidget(self._fp_panel)
+        viewport_grid.addWidget(self._fp_panel, 0, 0)
 
-        # Right: vertical splitter with spatial panels + training plots
-        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        body.addWidget(right_splitter)
+        # Top-right: Live 2D Occupancy Map
+        self._occ_map = OccupancyMap(max_distance=15.0)
+        self._env_panel = ImagePanel(title="LIVE MAP")
+        viewport_grid.addWidget(self._env_panel, 0, 1)
 
-        # Right-top: tabbed spatial panels
-        self._spatial_tabs = QtWidgets.QTabWidget()
-        self._spatial_tabs.setStyleSheet(
-            "QTabWidget::pane { border: 1px solid #333; background: #0d0d1a; }"
-            "QTabBar::tab { background: #1a1a2e; color: #ccc; padding: 4px 12px; }"
-            "QTabBar::tab:selected { background: #2a2a4e; color: #fff; }"
+        # Bottom-left: Raw Depth (Viridis)
+        self._depth_panel = ImagePanel(title="RAW DEPTH (Viridis)")
+        viewport_grid.addWidget(self._depth_panel, 1, 0)
+
+        # Bottom-right: Panorama 360°
+        self._pano_panel = ImagePanel(title="PANORAMA 360\u00b0")
+        viewport_grid.addWidget(self._pano_panel, 1, 1)
+
+        body.addWidget(viewport_container)
+
+        # ── Right: stacked training metric charts (~33%) ─────────────
+        chart_scroll = QtWidgets.QScrollArea()
+        chart_scroll.setWidgetResizable(True)
+        chart_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        chart_scroll.setStyleSheet(
+            "QScrollArea { border: none; background: #0d0d1a; }"
         )
 
-        self._polar_panel = ImagePanel(title="FORWARD POLAR")
-        self._overhead_panel = ImagePanel(title="OVERHEAD + HUD")
-        self._bev_panel = ImagePanel(title="BIRD'S EYE 360")
-        self._depth_panel = ImagePanel(title="RAW DEPTH (Viridis)")
-        self._pano_panel = ImagePanel(title="PANORAMA 360\u00b0")
-
-        self._spatial_tabs.addTab(self._polar_panel, "Polar")
-        self._spatial_tabs.addTab(self._overhead_panel, "Overhead")
-        self._spatial_tabs.addTab(self._bev_panel, "Bird's Eye")
-        self._spatial_tabs.addTab(self._depth_panel, "Raw Depth")
-        self._spatial_tabs.addTab(self._pano_panel, "Panorama")
-        right_splitter.addWidget(self._spatial_tabs)
-
-        # Right-bottom: training plots in a 3x3 grid
-        plot_container = QtWidgets.QWidget()
-        plot_layout = QtWidgets.QGridLayout(plot_container)
-        plot_layout.setContentsMargins(2, 2, 2, 2)
-        plot_layout.setSpacing(2)
+        chart_container = QtWidgets.QWidget()
+        chart_layout = QtWidgets.QVBoxLayout(chart_container)
+        chart_layout.setContentsMargins(2, 2, 2, 2)
+        chart_layout.setSpacing(2)
 
         self._plot_reward = RollingPlot(title="Step Reward", color="#2e86de")
-        self._plot_collision = RollingPlot(title="Collision", color="#e74c3c")
-        self._plot_novelty = RollingPlot(title="Novelty", color="#27ae60")
-        self._plot_policy_loss = RollingPlot(title="Policy Loss", color="#f39c12")
-        self._plot_value_loss = RollingPlot(title="Value Loss", color="#e67e22")
-        self._plot_entropy = RollingPlot(title="Entropy", color="#1abc9c")
-        self._plot_intrinsic = RollingPlot(title="Intrinsic Reward", color="#9b59b6")
-        self._plot_rnd_loss = RollingPlot(title="RND Loss", color="#e74c3c")
-        self._plot_beta = RollingPlot(title="Beta (Anneal)", color="#3498db")
+        self._plot_episode_return = RollingPlot(
+            title="Episode Return", color="#8e44ad",
+        )
+        self._plot_collision = RollingPlot(title="Done / Collision", color="#e74c3c")
+        self._plot_episode_len = RollingPlot(
+            title="Episode Length", color="#1abc9c",
+        )
+        self._plot_forward = RollingPlot(title="Forward Velocity", color="#27ae60")
+        self._plot_yaw = RollingPlot(title="Yaw Rate", color="#f39c12")
+        self._plot_front_depth = RollingPlot(
+            title="Front Depth (min)", color="#3498db",
+        )
+        self._plot_mean_depth = RollingPlot(title="Mean Depth", color="#e67e22")
+        self._plot_near_fraction = RollingPlot(
+            title="Near-Object Fraction", color="#e74c3c",
+        )
 
-        plot_layout.addWidget(self._plot_reward, 0, 0)
-        plot_layout.addWidget(self._plot_collision, 0, 1)
-        plot_layout.addWidget(self._plot_novelty, 0, 2)
-        plot_layout.addWidget(self._plot_policy_loss, 1, 0)
-        plot_layout.addWidget(self._plot_value_loss, 1, 1)
-        plot_layout.addWidget(self._plot_entropy, 1, 2)
-        plot_layout.addWidget(self._plot_intrinsic, 2, 0)
-        plot_layout.addWidget(self._plot_rnd_loss, 2, 1)
-        plot_layout.addWidget(self._plot_beta, 2, 2)
-        right_splitter.addWidget(plot_container)
+        # PPO-specific training metric charts
+        self._plot_policy_loss = RollingPlot(
+            title="Policy Loss", color="#9b59b6",
+        )
+        self._plot_value_loss = RollingPlot(
+            title="Value Loss", color="#e67e22",
+        )
+        self._plot_entropy = RollingPlot(
+            title="Entropy", color="#1abc9c",
+        )
+        self._plot_kl = RollingPlot(
+            title="Approx KL", color="#e74c3c",
+        )
+        self._plot_clip_fraction = RollingPlot(
+            title="Clip Fraction", color="#f39c12",
+        )
+        self._plot_rnd_loss = RollingPlot(
+            title="RND Loss", color="#3498db",
+        )
+        self._plot_intrinsic = RollingPlot(
+            title="Intrinsic Reward", color="#2ecc71",
+        )
+        self._plot_loop_sim = RollingPlot(
+            title="Loop Similarity", color="#e74c3c",
+        )
+        self._plot_beta = RollingPlot(
+            title="Beta (intrinsic coeff)", color="#9b59b6",
+        )
+        self._plot_reward_ema = RollingPlot(
+            title="Reward EMA", color="#2e86de",
+        )
 
-        # Set default split ratios
-        body.setStretchFactor(0, 7)
-        body.setStretchFactor(1, 3)
-        right_splitter.setStretchFactor(0, 1)
-        right_splitter.setStretchFactor(1, 1)
+        chart_h = 120
+        for plot in (
+            self._plot_reward,
+            self._plot_episode_return,
+            self._plot_collision,
+            self._plot_episode_len,
+            self._plot_forward,
+            self._plot_yaw,
+            self._plot_front_depth,
+            self._plot_mean_depth,
+            self._plot_near_fraction,
+            self._plot_reward_ema,
+            self._plot_policy_loss,
+            self._plot_value_loss,
+            self._plot_entropy,
+            self._plot_kl,
+            self._plot_clip_fraction,
+            self._plot_rnd_loss,
+            self._plot_intrinsic,
+            self._plot_loop_sim,
+            self._plot_beta,
+        ):
+            plot.setMinimumHeight(chart_h)
+            plot.setMaximumHeight(chart_h * 2)
+            chart_layout.addWidget(plot)
+
+        chart_layout.addStretch()
+        chart_scroll.setWidget(chart_container)
+        body.addWidget(chart_scroll)
+
+        # Set default split ratios: 2/3 viewports, 1/3 charts
+        body.setStretchFactor(0, 2)
+        body.setStretchFactor(1, 1)
 
     def _wire_plots(self) -> None:
-        """Connect rolling plots to stream engine ring buffers."""
-        state = self._engine.state
+        """Connect rolling plots to the active actor's stream state."""
+        state = self._engine.actor_states[self._active_actor]
         self._plot_reward.set_data_from_deque(state.reward_history)
+        self._plot_episode_return.set_data_from_deque(state.episode_return_history)
         self._plot_collision.set_data_from_deque(state.collision_history)
-        self._plot_novelty.set_data_from_deque(state.novelty_history)
-        # PPO-specific plots
+        self._plot_episode_len.set_data_from_deque(state.episode_length_history)
+        self._plot_forward.set_data_from_deque(state.forward_cmd_history)
+        self._plot_yaw.set_data_from_deque(state.yaw_cmd_history)
+        self._plot_front_depth.set_data_from_deque(state.front_depth_history)
+        self._plot_mean_depth.set_data_from_deque(state.mean_depth_history)
+        self._plot_near_fraction.set_data_from_deque(state.near_fraction_history)
+        # PPO-specific metrics
+        self._plot_reward_ema.set_data_from_deque(state.ppo_reward_ema_history)
         self._plot_policy_loss.set_data_from_deque(state.ppo_policy_loss_history)
         self._plot_value_loss.set_data_from_deque(state.ppo_value_loss_history)
         self._plot_entropy.set_data_from_deque(state.ppo_entropy_history)
-        self._plot_intrinsic.set_data_from_deque(state.ppo_intrinsic_reward_history)
+        self._plot_kl.set_data_from_deque(state.ppo_kl_history)
+        self._plot_clip_fraction.set_data_from_deque(
+            state.ppo_clip_fraction_history,
+        )
         self._plot_rnd_loss.set_data_from_deque(state.ppo_rnd_loss_history)
+        self._plot_intrinsic.set_data_from_deque(
+            state.ppo_intrinsic_reward_history,
+        )
+        self._plot_loop_sim.set_data_from_deque(
+            state.ppo_loop_similarity_history,
+        )
         self._plot_beta.set_data_from_deque(state.ppo_beta_history)
+
+    # ── actor tab switching ────────────────────────────────────────────
+
+    def _on_actor_tab_changed(self, index: int) -> None:
+        """Switch the displayed actor when a tab is clicked."""
+        self._active_actor = max(0, min(index, self._n_actors - 1))
+        self._wire_plots()
 
     # ── tick / render loop ───────────────────────────────────────────
 
     def _tick(self) -> None:
         """Called every timer interval — poll ZMQ, update all panels."""
         self._engine.poll()
-        state = self._engine.state
+        state = self._engine.actor_states[self._active_actor]
 
         # Determine mode
         has_training_data = len(state.reward_history) > 0
@@ -248,11 +346,10 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             fov_depth, fov_semantic, fov_valid, 960, 720,
             pitch=dm.robot_pose.pitch,
         )
-        draw_semantic_legend(fp_img, 14, 14)
         self._fp_panel.set_image(fp_img)
 
     def _update_spatial_panels(self, dm: object) -> None:
-        """Update side spatial panels: polar, overhead, bev, raw depth, panorama."""
+        """Update 2x2 viewport panels: 3D environment, raw depth, panorama."""
         from navi_contracts import DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
@@ -267,35 +364,18 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         fov_depth = depth_2d[fov_lo:fov_hi, :]
         fov_valid = valid_2d[fov_lo:fov_hi, :]
 
-        # Polar scan
-        polar_img = render_forward_polar(
-            fov_depth, fov_valid, 320, 320,
-            scan_history=self._scan_history,
+        # Live occupancy map — accumulate + render
+        p = dm.robot_pose
+        self._occ_map.update(
+            depth_2d, valid_2d, p.x, p.z, p.yaw, dm.episode_id,
         )
-        add_orientation_guides(polar_img)
-        self._polar_panel.set_image(polar_img)
-
-        # Overhead minimap
-        overhead_bgr = dm.overhead.astype(np.uint8, copy=False)
-        if self._overhead_zoom > 1.01:
-            overhead_bgr = zoom_overhead(overhead_bgr, self._overhead_zoom)
-        overhead_bgr = cv2.convertScaleAbs(overhead_bgr, alpha=1.1, beta=45)
-        pose_list = list(self._engine.state.pose_history)
-        overlay_overhead_annotations(overhead_bgr, self._overhead_zoom, pose_list)
-        self._overhead_panel.set_image(overhead_bgr)
-
-        # Bird's Eye
-        pose_list_bev = list(self._engine.state.pose_history)
-        bev_img = render_bev_occupancy(
-            depth_2d, valid_2d, 320, 320,
-            pose_history=pose_list_bev,
-        )
-        self._bev_panel.set_image(bev_img)
+        occ_img = self._occ_map.render(480, 480)
+        self._env_panel.set_image(occ_img)
 
         # Raw depth (Viridis) — transpose to fix 180° flip
         viridis_img = depth_to_viridis(fov_depth.T, fov_valid.T)
         viridis_resized = cv2.resize(
-            viridis_img, (320, 320), interpolation=cv2.INTER_NEAREST,
+            viridis_img, (480, 360), interpolation=cv2.INTER_NEAREST,
         )
         add_orientation_guides(viridis_resized)
         self._depth_panel.set_image(viridis_resized)
@@ -303,7 +383,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Panorama 360° — full azimuth transposed
         pano_img = depth_to_viridis(depth_2d.T, valid_2d.T)
         pano_resized = cv2.resize(
-            pano_img, (640, 240), interpolation=cv2.INTER_NEAREST,
+            pano_img, (640, 360), interpolation=cv2.INTER_NEAREST,
         )
         add_orientation_guides(pano_resized)
         self._pano_panel.set_image(pano_resized)
@@ -365,13 +445,24 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
     def _refresh_plots(self) -> None:
         """Redraw all rolling training plots."""
         self._plot_reward.refresh()
+        self._plot_episode_return.refresh()
         self._plot_collision.refresh()
-        self._plot_novelty.refresh()
+        self._plot_episode_len.refresh()
+        self._plot_forward.refresh()
+        self._plot_yaw.refresh()
+        self._plot_front_depth.refresh()
+        self._plot_mean_depth.refresh()
+        self._plot_near_fraction.refresh()
+        # PPO-specific
+        self._plot_reward_ema.refresh()
         self._plot_policy_loss.refresh()
         self._plot_value_loss.refresh()
         self._plot_entropy.refresh()
-        self._plot_intrinsic.refresh()
+        self._plot_kl.refresh()
+        self._plot_clip_fraction.refresh()
         self._plot_rnd_loss.refresh()
+        self._plot_intrinsic.refresh()
+        self._plot_loop_sim.refresh()
         self._plot_beta.refresh()
 
     # ── teleop / keyboard control ────────────────────────────────────
@@ -399,14 +490,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         if key == QtCore.Qt.Key.Key_Tab:
             if self._engine.has_step_socket:
                 self._manual_mode = not self._manual_mode
-            return
-
-        # Zoom
-        if key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal):
-            self._overhead_zoom = min(6.0, self._overhead_zoom + 0.5)
-            return
-        if key == QtCore.Qt.Key.Key_Minus:
-            self._overhead_zoom = max(1.0, self._overhead_zoom - 0.5)
             return
 
         # Movement
@@ -454,6 +537,8 @@ def run_dashboard(
     hz: float = 30.0,
     linear_speed: float = 1.5,
     yaw_rate: float = 1.5,
+    scene_path: str | None = None,
+    n_actors: int = 1,
 ) -> None:
     """Launch the Ghost-Matrix RL Dashboard as a standalone application."""
     app = pg.mkQApp("Ghost-Matrix RL Auditor")
@@ -465,6 +550,8 @@ def run_dashboard(
         hz=hz,
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,
+        scene_path=scene_path,
+        n_actors=n_actors,
     )
     dashboard.show()
     app.exec()

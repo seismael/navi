@@ -122,3 +122,17 @@ def test_shape_batch() -> None:
     assert totals.shape == (n,)
     # All rewards should be positive (1.0 + tax + vel + intrinsic)
     assert (totals > 0).all()
+
+
+def test_default_collision_penalty_is_zero() -> None:
+    """Default collision_penalty should be 0.0 (backend supplies its own).
+
+    The backend already includes a collision penalty in the raw extrinsic
+    reward. The RewardShaper should not add a second penalty by default.
+    """
+    shaper = _make_shaper()  # default args
+    result = shaper.shape(raw_reward=-1.0, done=True)
+    # collision_penalty component should be 0 by default
+    assert result.collision_penalty == 0.0
+    # total should only include extrinsic + tax (no extra penalty)
+    assert abs(result.total - (-1.0 + (-0.01))) < 1e-6

@@ -37,6 +37,7 @@ def _transition(step_id: int, reward: float) -> Transition:
     )
     result = StepResult(
         step_id=step_id,
+        env_id=0,
         done=False,
         truncated=False,
         reward=reward,

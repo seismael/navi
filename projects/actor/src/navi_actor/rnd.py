@@ -42,11 +42,11 @@ class RNDModule(nn.Module):  # type: ignore[misc]
         for p in self.target.parameters():
             p.requires_grad = False
 
-        # Predictor network — trainable
+        # Predictor network — trainable (same architecture as target so it
+        # cannot perfectly replicate the target from different init weights,
+        # keeping a residual prediction error that serves as the novelty signal).
         self.predictor = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, output_dim),
         )
@@ -106,9 +106,13 @@ class RNDModule(nn.Module):  # type: ignore[misc]
         target_out, predictor_out = self.forward(z)
         raw_error = ((target_out - predictor_out) ** 2).sum(dim=-1)  # (B,)
 
-        # Update running statistics
+        # Update running statistics (Chan's parallel algorithm)
         batch_mean = raw_error.mean()
-        batch_var = raw_error.var() if raw_error.numel() > 1 else torch.zeros(1, device=z.device)
+        batch_var = (
+            raw_error.var(correction=0)
+            if raw_error.numel() > 1
+            else torch.zeros(1, device=z.device)
+        )
         batch_count = float(raw_error.numel())
 
         delta = batch_mean - self._running_mean
@@ -124,3 +128,48 @@ class RNDModule(nn.Module):  # type: ignore[misc]
         std = torch.sqrt(self._running_var + 1e-8)
         normalized: Tensor = (raw_error - self._running_mean) / std
         return normalized.clamp(-5.0, 5.0)
+
+    @torch.no_grad()  # type: ignore[misc]
+    def merge_running_stats(
+        self,
+        other_mean: Tensor,
+        other_var: Tensor,
+        other_count: Tensor,
+    ) -> None:
+        """Merge another set of running statistics into this module.
+
+        Uses Chan's parallel algorithm to combine two independent
+        running-mean/variance estimators without losing precision.
+
+        This is used by the central learner in parallel training to
+        accumulate RND running statistics from multiple workers.
+
+        Args:
+            other_mean: (1,) running mean from the other source.
+            other_var: (1,) running variance from the other source.
+            other_count: scalar sample count from the other source.
+
+        """
+        delta = other_mean - self._running_mean
+        total_count = self._count + other_count
+        self._running_mean = (
+            self._running_mean + delta * other_count / total_count
+        )
+        m_a = self._running_var * self._count
+        m_b = other_var * other_count
+        m2 = m_a + m_b + delta**2 * self._count * other_count / total_count
+        self._running_var = m2 / total_count
+        self._count = total_count
+
+    def get_running_stats(self) -> tuple[Tensor, Tensor, Tensor]:
+        """Return current running statistics for serialization.
+
+        Returns:
+            Tuple of (running_mean, running_var, count) tensors.
+
+        """
+        return (
+            self._running_mean.clone(),
+            self._running_var.clone(),
+            self._count.clone(),
+        )

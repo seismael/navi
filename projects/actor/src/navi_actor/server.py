@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import time
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -25,6 +27,14 @@ from navi_contracts import (
 
 if TYPE_CHECKING:
     from navi_actor.config import ActorConfig
+
+_log = logging.getLogger(__name__)
+
+# Telemetry decimation: publish every Nth step (keeps training loop fast)
+_TELEMETRY_EVERY_N: int = 10
+
+# Step-rate logging interval in seconds
+_RATE_LOG_INTERVAL: float = 10.0
 
 
 class _RuntimePolicyProtocol(Protocol):
@@ -53,6 +63,9 @@ class ActorServer:
     Supports both stateless (_RuntimePolicyProtocol) and stateful
     (_StatefulPolicyProtocol) policies. Stateful policies maintain
     a hidden state that is reset on episode boundaries.
+
+    Telemetry is decimated to every Nth step so the training loop
+    spends minimal time on dashboard observability.
     """
 
     def __init__(
@@ -66,7 +79,7 @@ class ActorServer:
         if policy is not None:
             self._policy = policy
         else:
-            self._policy = ShallowPolicy(policy_id="brain-v2-shallow", gain=0.5)
+            self._policy = ShallowPolicy(policy_id="brain-v2-shallow")
 
         self._stateful = _is_stateful(self._policy)
         self._hidden_state: Any = None  # recurrent hidden state
@@ -75,6 +88,10 @@ class ActorServer:
         self._sub_socket: zmq.Socket[bytes] | None = None
         self._pub_socket: zmq.Socket[bytes] | None = None
         self._step_socket: zmq.Socket[bytes] | None = None
+
+        # Step-rate tracking
+        self._rate_t0: float = 0.0
+        self._rate_steps: int = 0
 
     def start(self) -> None:
         """Bind PUB socket, connect SUB socket, optionally connect REQ."""
@@ -93,6 +110,9 @@ class ActorServer:
             step_socket = self._context.socket(zmq.REQ)
             step_socket.connect(cfg.step_endpoint)
             self._step_socket = step_socket
+
+        self._rate_t0 = time.monotonic()
+        self._rate_steps = 0
 
     def infer(self, update: DistanceMatrix) -> Action:
         """Compute Action from DistanceMatrix using the active policy.
@@ -148,7 +168,18 @@ class ActorServer:
         return reply
 
     def run(self) -> None:
-        """Run the main subscribe-infer-publish loop."""
+        """Run the main subscribe-infer-publish loop.
+
+        The step loop is kept as tight as possible:
+        1. recv DistanceMatrix (blocks until next observation)
+        2. infer action (policy.act — sub-ms for ShallowPolicy)
+        3. publish Action on PUB (for dashboard)
+        4. send StepRequest on REQ → wait for StepResult on REP
+        5. every Nth step, publish decimated telemetry on PUB
+
+        Telemetry is decimated (every Nth step) so the per-step cost
+        of dashboard observability is near zero.
+        """
         self.start()
         assert self._sub_socket is not None
         assert self._pub_socket is not None
@@ -156,55 +187,79 @@ class ActorServer:
             while True:
                 _topic, data = self._sub_socket.recv_multipart()
                 msg = deserialize(data)
-                if isinstance(msg, DistanceMatrix):
-                    action = self.infer(msg)
-                    payload = serialize(action)
-                    self._pub_socket.send_multipart(
-                        [
-                            TOPIC_ACTION.encode("utf-8"),
-                            payload,
-                        ]
-                    )
-                    self._publish_telemetry(
-                        event_type="actor.action_published",
-                        step_id=action.step_id,
-                        payload=np.array(
-                            [
-                                float(action.linear_velocity[0, 0]),
-                                float(action.linear_velocity[0, 1]),
-                                float(action.linear_velocity[0, 2]),
-                                float(action.angular_velocity[0, 2]),
-                            ],
-                            dtype=np.float32,
-                        ),
-                    )
-                    # Publish spherical features for live inference monitoring
-                    features = extract_spherical_features(msg)
-                    self._publish_telemetry(
-                        event_type="actor.inference.features",
-                        step_id=action.step_id,
-                        payload=features,
-                    )
-                    if self._config.mode == "step" and self._step_socket is not None:
-                        result = self.step(action)
-                        # Reset hidden state on episode boundaries
-                        if self._stateful and (result.done or result.truncated):
-                            self._hidden_state = None
+                if not isinstance(msg, DistanceMatrix):
+                    continue
+
+                action = self.infer(msg)
+
+                # Publish Action on PUB (lightweight, dashboard needs it)
+                self._pub_socket.send_multipart(
+                    [
+                        TOPIC_ACTION.encode("utf-8"),
+                        serialize(action),
+                    ],
+                    flags=zmq.NOBLOCK,
+                )
+
+                # ── Step mode: REQ/REP with Section Manager ──────────
+                if self._config.mode == "step" and self._step_socket is not None:
+                    result = self.step(action)
+                    # Reset hidden state on episode boundaries
+                    if self._stateful and (result.done or result.truncated):
+                        self._hidden_state = None
+
+                    # ── Decimated telemetry (every Nth step) ─────────
+                    if self._step_counter % _TELEMETRY_EVERY_N == 0:
                         self._publish_telemetry(
-                            event_type="actor.step_result",
-                            step_id=result.step_id,
-                            payload=np.array(
+                            "actor.action_published",
+                            action.step_id,
+                            np.array(
                                 [
-                                    result.reward,
-                                    result.episode_return,
-                                    float(result.done),
-                                    float(result.truncated),
+                                    float(action.linear_velocity[0, 0]),
+                                    float(action.linear_velocity[0, 1]),
+                                    float(action.linear_velocity[0, 2]),
+                                    float(action.angular_velocity[0, 2]),
                                 ],
                                 dtype=np.float32,
                             ),
                         )
-                    else:
-                        self._step_counter += 1
+                        # Compute features only when publishing
+                        features = extract_spherical_features(msg)
+                        self._publish_telemetry(
+                            "actor.inference.features",
+                            action.step_id,
+                            features,
+                        )
+                    # Always publish step_result (reward chart needs it)
+                    self._publish_telemetry(
+                        "actor.step_result",
+                        result.step_id,
+                        np.array(
+                            [
+                                result.reward,
+                                result.episode_return,
+                                float(result.done),
+                                float(result.truncated),
+                            ],
+                            dtype=np.float32,
+                        ),
+                    )
+                else:
+                    self._step_counter += 1
+
+                # ── Step-rate logging ────────────────────────────────
+                self._rate_steps += 1
+                now = time.monotonic()
+                elapsed = now - self._rate_t0
+                if elapsed >= _RATE_LOG_INTERVAL:
+                    rate = self._rate_steps / elapsed
+                    _log.info(
+                        "step_rate=%.1f steps/s  (steps=%d, window=%.1fs)",
+                        rate, self._rate_steps, elapsed,
+                    )
+                    self._rate_t0 = now
+                    self._rate_steps = 0
+
         except KeyboardInterrupt:
             pass
         finally:
@@ -217,11 +272,14 @@ class ActorServer:
                 sock.close()
         self._context.term()
 
-    def _publish_telemetry(self, event_type: str, step_id: int, payload: np.ndarray) -> None:
-        """Publish a TelemetryEvent on the actor PUB socket."""
+    # ── Telemetry helpers ────────────────────────────────────────────
+
+    def _publish_telemetry(
+        self, event_type: str, step_id: int, payload: np.ndarray,
+    ) -> None:
+        """Serialize and publish a single telemetry event (non-blocking)."""
         if self._pub_socket is None:
             return
-
         event = TelemetryEvent(
             event_type=event_type,
             episode_id=0,
@@ -230,12 +288,11 @@ class ActorServer:
             payload=payload.astype(np.float32, copy=False),
             timestamp=time.time(),
         )
-        self._pub_socket.send_multipart(
-            [
-                TOPIC_TELEMETRY_EVENT.encode("utf-8"),
-                serialize(event),
-            ]
-        )
+        with contextlib.suppress(zmq.Again):
+            self._pub_socket.send_multipart(
+                [TOPIC_TELEMETRY_EVENT.encode("utf-8"), serialize(event)],
+                flags=zmq.NOBLOCK,
+            )
 
 
 def _is_stateful(policy: object) -> bool:

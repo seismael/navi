@@ -53,3 +53,6 @@ projects/*/artifacts/
 
 # Local data captures
 *.zarr/
+*checkpoints*
+*data*
+*artifacts*

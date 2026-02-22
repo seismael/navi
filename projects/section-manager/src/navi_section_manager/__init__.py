@@ -4,10 +4,12 @@ from __future__ import annotations
 
 __all__: list[str] = [
     "AbstractWorldGenerator",
+    "DatasetAdapter",
     "DistanceMatrixBuilder",
     "DistancePruner",
     "FileGenerator",
     "FrustumLoader",
+    "HabitatAdapter",
     "LookAheadBuffer",
     "MazeGenerator",
     "MjxBackendInfo",
@@ -17,10 +19,12 @@ __all__: list[str] = [
     "RaycastEngine",
     "SectionManagerConfig",
     "SectionManagerServer",
+    "SimulatorBackend",
     "SlidingWindow",
     "PlyCompileConfig",
     "PlyCompileResult",
     "PlyWorldCompiler",
+    "VoxelBackend",
     "WorldCompileConfig",
     "WorldCompileResult",
     "WorldModelCompiler",
@@ -28,6 +32,10 @@ __all__: list[str] = [
     "WedgeResult",
 ]
 
+from navi_section_manager.backends.adapter import DatasetAdapter
+from navi_section_manager.backends.base import SimulatorBackend
+from navi_section_manager.backends.habitat_adapter import HabitatAdapter
+from navi_section_manager.backends.voxel import VoxelBackend
 from navi_section_manager.config import SectionManagerConfig
 from navi_section_manager.distance_matrix_v2 import DistanceMatrixBuilder
 from navi_section_manager.frustum import FrustumLoader

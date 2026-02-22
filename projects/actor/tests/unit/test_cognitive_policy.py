@@ -19,25 +19,27 @@ def _make_policy() -> CognitiveMambaPolicy:
 
 
 def test_forward_shapes() -> None:
-    """forward() should return (B,4), (B,), (B,), hidden."""
+    """forward() should return (B,4), (B,), (B,), hidden, (B,D)."""
     policy = _make_policy()
     obs = torch.randn(2, 2, 64, 32)
-    actions, log_probs, values, hidden = policy.forward(obs)
+    actions, log_probs, values, hidden, z_t = policy.forward(obs)
     assert actions.shape == (2, 4)
     assert log_probs.shape == (2,)
     assert values.shape == (2,)
+    assert z_t.shape == (2, 128)
     # With temporal core active, hidden may be a Tensor (GRU) or None (Mamba2)
 
 
 def test_evaluate_shapes() -> None:
-    """evaluate() should return log_probs, values, entropy, hidden."""
+    """evaluate() should return log_probs, values, entropy, hidden, z_t."""
     policy = _make_policy()
     obs = torch.randn(2, 2, 64, 32)
     acts = torch.randn(2, 4)
-    lp, val, ent, hidden = policy.evaluate(obs, acts)
+    lp, val, ent, hidden, z_t = policy.evaluate(obs, acts)
     assert lp.shape == (2,)
     assert val.shape == (2,)
     assert ent.dim() == 0
+    assert z_t.shape == (2, 128)
 
 
 def test_act_returns_list() -> None:
@@ -63,10 +65,11 @@ def test_evaluate_sequence_shapes() -> None:
     policy = _make_policy()
     obs_seq = torch.randn(2, 4, 2, 64, 32)  # (B, T, C, Az, El)
     acts_seq = torch.randn(2, 4, 4)  # (B, T, 4)
-    lp, val, ent, hidden = policy.evaluate_sequence(obs_seq, acts_seq)
+    lp, val, ent, hidden, z_t = policy.evaluate_sequence(obs_seq, acts_seq)
     assert lp.shape == (8,)  # B*T
     assert val.shape == (8,)
     assert ent.dim() == 0
+    assert z_t.shape == (8, 128)
 
 
 def test_checkpoint_roundtrip() -> None:
@@ -86,7 +89,7 @@ def test_gradient_flow() -> None:
     """Gradients should propagate through the full policy."""
     policy = _make_policy()
     obs = torch.randn(2, 2, 64, 32)
-    actions, log_probs, values, _ = policy.forward(obs)
+    actions, log_probs, values, _, _ = policy.forward(obs)
     loss = log_probs.sum() + values.sum()
     loss.backward()
     # Check at least some parameters have gradients

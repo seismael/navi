@@ -17,9 +17,9 @@ class ActorConfig:
     mode: str = "async"  # "async" (PUB/SUB) or "step" (REQ/REP)
     step_endpoint: str = "tcp://localhost:5560"  # Section Manager REP address
 
-    # Observation shape
-    azimuth_bins: int = 64
-    elevation_bins: int = 32
+    # Observation shape (must match section-manager resolution)
+    azimuth_bins: int = 256
+    elevation_bins: int = 128
 
     # Cognitive architecture
     embedding_dim: int = 128
@@ -37,6 +37,9 @@ class ActorConfig:
     minibatch_size: int = 64
     bptt_len: int = 32
 
+    # Multi-actor
+    n_actors: int = 1
+
     # Action scales (4-DOF)
     max_forward: float = 1.2
     max_vertical: float = 0.8
@@ -44,14 +47,14 @@ class ActorConfig:
     max_yaw: float = 1.2
 
     # RND curiosity
-    rnd_learning_rate: float = 1e-3
+    rnd_learning_rate: float = 3e-5
 
     # Episodic memory
     memory_capacity: int = 10_000
     memory_exclusion_window: int = 50
 
     # Reward shaping
-    collision_penalty: float = -10.0
+    collision_penalty: float = 0.0
     existential_tax: float = -0.01
     velocity_weight: float = 0.1
     intrinsic_coeff_init: float = 1.0

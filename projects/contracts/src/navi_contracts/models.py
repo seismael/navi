@@ -76,6 +76,7 @@ class StepResult:
     """Step acknowledgement from Simulation Layer to Brain."""
 
     step_id: int
+    env_id: int
     done: bool
     truncated: bool
     reward: float

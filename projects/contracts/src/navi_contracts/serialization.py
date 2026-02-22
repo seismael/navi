@@ -109,6 +109,7 @@ def serialize(
         payload = {
             "_type": "StepResult",
             "step_id": model.step_id,
+            "env_id": model.env_id,
             "done": model.done,
             "truncated": model.truncated,
             "reward": model.reward,

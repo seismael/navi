@@ -92,3 +92,45 @@ def test_different_input_dim() -> None:
     target_out, pred_out = rnd.forward(z)
     assert target_out.shape == (4, 32)
     assert pred_out.shape == (4, 32)
+
+
+def test_predictor_matches_target_architecture() -> None:
+    """Predictor and target should have the same number of layers.
+
+    Equal capacity prevents the predictor from perfectly memorizing the
+    target, maintaining a residual prediction error as the novelty signal.
+    """
+    rnd = _make_rnd()
+    target_layers = [m for m in rnd.target if isinstance(m, torch.nn.Linear)]
+    pred_layers = [m for m in rnd.predictor if isinstance(m, torch.nn.Linear)]
+    assert len(target_layers) == len(pred_layers), (
+        f"Predictor ({len(pred_layers)} linear layers) should match "
+        f"target ({len(target_layers)} linear layers)"
+    )
+
+
+def test_rnd_maintains_nonzero_loss_after_training() -> None:
+    """RND loss should remain nonzero after moderate training.
+
+    With equal predictor/target capacity and different random init,
+    the predictor cannot perfectly replicate the target, ensuring a
+    persistent novelty signal.
+    """
+    rnd = _make_rnd()
+    optimizer = torch.optim.Adam(rnd.predictor.parameters(), lr=3e-5)
+
+    # Train for 200 steps on random embeddings
+    for _ in range(200):
+        z = torch.randn(32, 128)
+        loss = rnd.distillation_loss(z)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Loss should still be measurably nonzero
+    z_test = torch.randn(64, 128)
+    final_loss = rnd.distillation_loss(z_test).item()
+    assert final_loss > 0.001, (
+        f"RND loss collapsed to {final_loss:.6f} after 200 training steps; "
+        "predictor and target should have equal capacity to prevent this"
+    )

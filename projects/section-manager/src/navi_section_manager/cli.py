@@ -17,6 +17,7 @@ from navi_section_manager.server import SectionManagerServer
 from navi_section_manager.transformers import WorldCompileConfig, WorldModelCompiler
 
 if TYPE_CHECKING:
+    from navi_section_manager.backends.base import SimulatorBackend
     from navi_section_manager.generators.base import AbstractWorldGenerator
 
 __all__: list[str] = ["app"]
@@ -67,6 +68,41 @@ def _build_generator(config: SectionManagerConfig) -> AbstractWorldGenerator:
     raise typer.Exit(code=1)
 
 
+def _build_backend(config: SectionManagerConfig) -> SimulatorBackend:
+    """Create the appropriate SimulatorBackend based on config.backend."""
+    if config.backend == "habitat":
+        try:
+            from navi_section_manager.backends.habitat_backend import HabitatBackend
+        except ImportError as exc:
+            typer.echo(
+                "Error: habitat-sim is not installed. "
+                "Install it with: conda install -c aihabitat habitat-sim",
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+
+        if not config.habitat_scene:
+            typer.echo("Error: --habitat-scene is required when --backend=habitat", err=True)
+            raise typer.Exit(code=1)
+
+        return HabitatBackend(config)
+
+    if config.backend == "mesh":
+        from navi_section_manager.backends.mesh_backend import MeshSceneBackend
+
+        if not config.habitat_scene:
+            typer.echo("Error: --habitat-scene is required when --backend=mesh", err=True)
+            raise typer.Exit(code=1)
+
+        return MeshSceneBackend(config)
+
+    # Default: voxel backend
+    from navi_section_manager.backends.voxel import VoxelBackend
+
+    generator = _build_generator(config)
+    return VoxelBackend(config, generator)
+
+
 @app.command()
 def serve(
     pub: str = typer.Option("tcp://*:5559", help="ZMQ PUB bind address (DistanceMatrix v2)"),
@@ -90,6 +126,14 @@ def serve(
     azimuth_bins: int = typer.Option(256, help="Distance-matrix azimuth bins"),
     elevation_bins: int = typer.Option(128, help="Distance-matrix elevation bins"),
     max_distance: float = typer.Option(30.0, help="Distance normalization range"),
+    backend: str = typer.Option("voxel", help="Simulator backend: voxel or habitat"),
+    habitat_scene: str = typer.Option("", help="Habitat scene file (.glb)"),
+    habitat_dataset_config: str = typer.Option(
+        "", help="Habitat dataset config (.json) for PointNav episodes"
+    ),
+    habitat_rgb_height: int = typer.Option(480, help="Habitat RGB camera height"),
+    habitat_rgb_width: int = typer.Option(640, help="Habitat RGB camera width"),
+    actors: int = typer.Option(1, help="Number of actors sharing the scene"),
 ) -> None:
     """Start the Section Manager service."""
     config = SectionManagerConfig(
@@ -109,13 +153,19 @@ def serve(
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
         max_distance=max_distance,
+        n_actors=actors,
+        backend=backend,
+        habitat_scene=habitat_scene,
+        habitat_dataset_config=habitat_dataset_config,
+        habitat_rgb_resolution=(habitat_rgb_height, habitat_rgb_width),
     )
 
-    gen = _build_generator(config)
-    server = SectionManagerServer(config=config, generator=gen)
+    sim_backend = _build_backend(config)
+    server = SectionManagerServer(config=config, backend=sim_backend)
 
     typer.echo(
-        f"Section Manager starting — mode={config.mode}, "
+        f"Section Manager starting — backend={config.backend}, mode={config.mode}, "
+        f"actors={config.n_actors}, "
         f"pub={config.pub_address}, rep={config.rep_address}, "
         f"generator={config.generator}, seed={config.seed}",
     )

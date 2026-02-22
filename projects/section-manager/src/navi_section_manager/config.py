@@ -22,8 +22,23 @@ class SectionManagerConfig:
     lookahead_margin: int = 8
     seed: int = 42
     chunk_size: int = 16
-    barrier_distance: float = 0.0
+    barrier_distance: float = 1.0
     collision_probe_radius: float = 1.5
+    max_steps_per_episode: int = 1000
     azimuth_bins: int = 256
     elevation_bins: int = 128
     max_distance: float = 30.0
+
+    # Multi-actor
+    n_actors: int = 1
+
+    # Skip overhead minimap computation (never used by policy)
+    compute_overhead: bool = True
+
+    # Backend selection — "voxel" (default) or "habitat"
+    backend: str = "voxel"
+
+    # Habitat-specific settings (ignored when backend != "habitat")
+    habitat_scene: str = ""
+    habitat_dataset_config: str = ""
+    habitat_rgb_resolution: tuple[int, int] = (480, 640)

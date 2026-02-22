@@ -89,6 +89,26 @@ class StreamState:
     # Inference features
     latest_features: np.ndarray | None = None
 
+    # Universal metric histories (available in all policy modes)
+    episode_return_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    episode_length_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    front_depth_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    mean_depth_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    near_fraction_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+
+    # Episode length tracking
+    _episode_step_counter: int = 0
+
     # PPO per-step telemetry
     ppo_raw_reward_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
@@ -128,6 +148,12 @@ class StreamState:
     ppo_rnd_loss_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
+    ppo_clip_fraction_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_total_loss_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
     ppo_reward_ema_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
@@ -155,10 +181,14 @@ class StreamEngine:
         matrix_sub: str,
         actor_sub: str = "",
         step_endpoint: str = "",
+        n_actors: int = 1,
     ) -> None:
         self._ctx: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._poller = zmq.Poller()
-        self.state = StreamState()
+        self._actor_states: dict[int, StreamState] = {
+            i: StreamState() for i in range(max(1, n_actors))
+        }
+        self.state = self._actor_states[0]  # backward compat
 
         # Section-Manager PUB socket
         self._sock_matrix = self._ctx.socket(zmq.SUB)
@@ -255,64 +285,122 @@ class StreamEngine:
             msg = deserialize(data)
             self._dispatch(topic, msg)
 
+    @property
+    def actor_states(self) -> dict[int, StreamState]:
+        """Per-actor stream states keyed by actor ID."""
+        return self._actor_states
+
+    @property
+    def n_actors(self) -> int:
+        """Number of actor streams."""
+        return len(self._actor_states)
+
+    def _resolve_state(self, actor_id: int) -> StreamState:
+        """Return the StreamState for *actor_id*, falling back to 0."""
+        return self._actor_states.get(actor_id, self._actor_states[0])
+
     def _dispatch(self, topic: str, msg: object) -> None:
-        """Route a deserialized message to the appropriate state buffer."""
+        """Route a deserialized message to the appropriate per-actor state."""
         if topic == TOPIC_DISTANCE_MATRIX and isinstance(msg, DistanceMatrix):
-            self.state.latest_matrix = msg
-            self.state.last_rx_time = time.time()
+            actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
+            state = self._resolve_state(actor_id)
+            state.latest_matrix = msg
+            state.last_rx_time = time.time()
             pose = msg.robot_pose
-            self.state.pose_history.append((pose.x, pose.z, pose.yaw))
+            state.pose_history.append((pose.x, pose.z, pose.yaw))
 
         elif topic == TOPIC_ACTION and isinstance(msg, Action):
-            self.state.latest_action = msg
+            actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
+            state = self._resolve_state(actor_id)
+            state.latest_action = msg
 
         elif topic == TOPIC_TELEMETRY_EVENT and isinstance(msg, TelemetryEvent):
-            self.state.telemetry_buffer.append(msg)
-            self._route_telemetry(msg)
+            state = self._resolve_state(msg.env_id)
+            state.telemetry_buffer.append(msg)
+            self._route_telemetry(msg, state)
 
-    def _route_telemetry(self, event: TelemetryEvent) -> None:
+    def _route_telemetry(
+        self, event: TelemetryEvent, state: StreamState,
+    ) -> None:
         """Parse telemetry event type and push into typed ring buffers."""
         et = event.event_type
         p = event.payload
 
         if et == "actor.training.step" and len(p) >= 8:
-            self.state.reward_history.append(float(p[0]))
-            self.state.advantage_history.append(float(p[1]))
-            self.state.collision_history.append(float(p[2]))
-            self.state.novelty_history.append(float(p[3]))
-            self.state.forward_cmd_history.append(float(p[4]))
-            self.state.yaw_cmd_history.append(float(p[5]))
-            self.state.grad_norm_fwd_history.append(float(p[6]))
-            self.state.grad_norm_yaw_history.append(float(p[7]))
+            state.reward_history.append(float(p[0]))
+            state.advantage_history.append(float(p[1]))
+            state.collision_history.append(float(p[2]))
+            state.novelty_history.append(float(p[3]))
+            state.forward_cmd_history.append(float(p[4]))
+            state.yaw_cmd_history.append(float(p[5]))
+            state.grad_norm_fwd_history.append(float(p[6]))
+            state.grad_norm_yaw_history.append(float(p[7]))
 
         elif et == "actor.training.eval" and len(p) >= 4:
-            self.state.eval_step_history.append(event.step_id)
-            self.state.eval_reward_history.append(float(p[0]))
-            self.state.eval_collision_history.append(float(p[1]))
-            self.state.eval_novelty_history.append(float(p[2]))
-            self.state.eval_coverage_history.append(float(p[3]))
+            state.eval_step_history.append(event.step_id)
+            state.eval_reward_history.append(float(p[0]))
+            state.eval_collision_history.append(float(p[1]))
+            state.eval_novelty_history.append(float(p[2]))
+            state.eval_coverage_history.append(float(p[3]))
 
         elif et == "actor.training.ppo.step" and len(p) >= 9:
-            self.state.ppo_raw_reward_history.append(float(p[0]))
-            self.state.ppo_shaped_reward_history.append(float(p[1]))
-            self.state.ppo_intrinsic_reward_history.append(float(p[2]))
-            self.state.ppo_loop_similarity_history.append(float(p[3]))
-            self.state.ppo_loop_detected_history.append(float(p[4]))
-            self.state.ppo_beta_history.append(float(p[5]))
-            self.state.ppo_done_history.append(float(p[6]))
+            state.ppo_raw_reward_history.append(float(p[0]))
+            state.ppo_shaped_reward_history.append(float(p[1]))
+            state.ppo_intrinsic_reward_history.append(float(p[2]))
+            state.ppo_loop_similarity_history.append(float(p[3]))
+            state.ppo_loop_detected_history.append(float(p[4]))
+            state.ppo_beta_history.append(float(p[5]))
+            state.ppo_done_history.append(float(p[6]))
             # Also push to generic reward/collision for backward compat
-            self.state.reward_history.append(float(p[1]))
-            self.state.collision_history.append(float(p[6]))
-            self.state.forward_cmd_history.append(float(p[7]))
-            self.state.yaw_cmd_history.append(float(p[8]))
+            state.reward_history.append(float(p[1]))
+            state.collision_history.append(float(p[6]))
+            state.forward_cmd_history.append(float(p[7]))
+            state.yaw_cmd_history.append(float(p[8]))
 
         elif et == "actor.training.ppo.update" and len(p) >= 9:
-            self.state.ppo_reward_ema_history.append(float(p[0]))
-            self.state.ppo_policy_loss_history.append(float(p[1]))
-            self.state.ppo_value_loss_history.append(float(p[2]))
-            self.state.ppo_entropy_history.append(float(p[3]))
-            self.state.ppo_kl_history.append(float(p[4]))
-            self.state.ppo_rnd_loss_history.append(float(p[7]))
+            state.ppo_reward_ema_history.append(float(p[0]))
+            state.ppo_policy_loss_history.append(float(p[1]))
+            state.ppo_value_loss_history.append(float(p[2]))
+            state.ppo_entropy_history.append(float(p[3]))
+            state.ppo_kl_history.append(float(p[4]))
+            state.ppo_clip_fraction_history.append(float(p[5]))
+            state.ppo_total_loss_history.append(float(p[6]))
+            state.ppo_rnd_loss_history.append(float(p[7]))
+
+        elif et == "actor.training.ppo.episode" and len(p) >= 2:
+            state.episode_return_history.append(float(p[0]))
+            state.episode_length_history.append(float(p[1]))
 
         elif et == "actor.inference.features":
-            self.state.latest_features = np.asarray(p, dtype=np.float32)
+            state.latest_features = np.asarray(p, dtype=np.float32)
+            # Push individual features into time-series deques
+            if len(p) >= 17:
+                state.front_depth_history.append(float(p[0]))
+                state.mean_depth_history.append(float(p[1]))
+                state.near_fraction_history.append(float(p[16]))
+
+        elif et == "actor.step_result" and len(p) >= 4:
+            # Shallow-policy step result: [reward, episode_return, done, truncated]
+            state.reward_history.append(float(p[0]))
+            done_val = float(p[2])
+            truncated_val = float(p[3])
+            state.collision_history.append(done_val)
+            state.episode_return_history.append(float(p[1]))
+            state.ppo_raw_reward_history.append(float(p[0]))
+            state.ppo_shaped_reward_history.append(float(p[0]))
+            state.ppo_done_history.append(done_val + truncated_val)
+            # Track episode length
+            state._episode_step_counter += 1
+            if done_val > 0.5 or truncated_val > 0.5:
+                state.episode_length_history.append(
+                    float(state._episode_step_counter),
+                )
+                state._episode_step_counter = 0
+
+        elif et == "actor.action_published" and len(p) >= 4:
+            # Action published: [fwd, lateral, vertical, yaw]
+            state.forward_cmd_history.append(float(p[0]))
+            state.yaw_cmd_history.append(float(p[3]))
+
+
+

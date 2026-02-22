@@ -135,6 +135,7 @@ def test_train_triggers_periodic_checkpoint_and_eval(monkeypatch: pytest.MonkeyP
     def fake_request_step(_action: object, step_id: int) -> StepResult:
         return StepResult(
             step_id=step_id,
+            env_id=0,
             done=False,
             truncated=False,
             reward=0.0,

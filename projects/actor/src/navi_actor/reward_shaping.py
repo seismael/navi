@@ -50,7 +50,7 @@ class RewardShaper:
     def __init__(
         self,
         *,
-        collision_penalty: float = -10.0,
+        collision_penalty: float = 0.0,
         existential_tax: float = -0.01,
         velocity_weight: float = 0.1,
         intrinsic_coeff_init: float = 1.0,
