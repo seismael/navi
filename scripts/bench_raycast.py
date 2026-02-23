@@ -6,12 +6,12 @@ import time
 import numpy as np
 
 from navi_contracts import Action
-from navi_section_manager.backends.mesh_backend import MeshSceneBackend
-from navi_section_manager.config import SectionManagerConfig
+from navi_environment.backends.mesh_backend import MeshSceneBackend
+from navi_environment.config import EnvironmentConfig
 
 SCENE = r"c:\dev\projects\navi\data\scenes\sample_apartment.glb"
 
-cfg = SectionManagerConfig(
+cfg = EnvironmentConfig(
     backend="mesh", habitat_scene=SCENE, max_distance=15.0,
 )
 b = MeshSceneBackend(cfg)

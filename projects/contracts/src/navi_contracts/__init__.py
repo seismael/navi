@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from navi_contracts.models import (
     Action,
+    BatchStepRequest,
+    BatchStepResult,
     DistanceMatrix,
     RobotPose,
     StepRequest,
@@ -37,6 +39,8 @@ __all__: list[str] = [
     "TOPIC_STEP_RESULT",
     "TOPIC_TELEMETRY_EVENT",
     "Action",
+    "BatchStepRequest",
+    "BatchStepResult",
     "DeltaDepthMatrix",
     "DepthMatrix",
     "DistanceMatrix",

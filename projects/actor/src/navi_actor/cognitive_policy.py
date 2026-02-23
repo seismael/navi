@@ -4,7 +4,7 @@
 (FoveatedEncoder → Mamba2TemporalCore → EpisodicMemory → ActorCriticHeads)
 is never modified to accommodate new data sources or sensor types.
 External data connects only through ``DatasetAdapter`` instances in
-``section-manager/backends/`` that transform raw observations *to*
+``environment/backends/`` that transform raw observations *to*
 the engine's canonical ``(B, 2, Az, El)`` DistanceMatrix input.
 """
 

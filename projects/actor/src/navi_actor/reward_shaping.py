@@ -52,7 +52,7 @@ class RewardShaper:
         *,
         collision_penalty: float = 0.0,
         existential_tax: float = -0.01,
-        velocity_weight: float = 0.1,
+        velocity_weight: float = 0.0,
         intrinsic_coeff_init: float = 1.0,
         intrinsic_coeff_final: float = 0.01,
         intrinsic_anneal_steps: int = 500_000,

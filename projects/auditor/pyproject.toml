@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "navi-auditor"
 version = "0.1.0"
-description = "Layer 4: Viz & Replay — Recorder, Rewinder, and storage backends"
+description = "Layer 3: Viz & Replay — Recorder, Rewinder, and storage backends"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

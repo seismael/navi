@@ -24,6 +24,8 @@ from navi_contracts import (
     TOPIC_DISTANCE_MATRIX,
     TOPIC_TELEMETRY_EVENT,
     Action,
+    BatchStepRequest,
+    BatchStepResult,
     DistanceMatrix,
     StepRequest,
     StepResult,
@@ -334,6 +336,30 @@ class PpoTrainer:
         assert isinstance(result, StepResult)
         return result
 
+    def _request_batch_step(
+        self,
+        actions: tuple[Action, ...],
+        step_id: int,
+    ) -> BatchStepResult:
+        """Send batched step request for all actors and receive results.
+
+        A single REQ/REP round-trip replaces N sequential ones, cutting
+        ZMQ latency from O(N) to O(1) per rollout tick.
+        """
+        if self._step_socket is None:
+            msg = "Step socket not initialised."
+            raise RuntimeError(msg)
+        req = BatchStepRequest(
+            actions=actions,
+            step_id=step_id,
+            timestamp=time.time(),
+        )
+        self._step_socket.send(serialize(req))
+        reply = self._step_socket.recv()
+        result = deserialize(reply)
+        assert isinstance(result, BatchStepResult)
+        return result
+
     def _publish_action(self, action: Action) -> None:
         """Publish action to PUB socket."""
         if self._pub_socket is not None:
@@ -467,6 +493,49 @@ class PpoTrainer:
         stacked = np.stack([depth, semantic])
         return torch.from_numpy(stacked)
 
+    def _stack_hiddens(
+        self,
+        hiddens: dict[int, torch.Tensor | None],
+        n: int,
+    ) -> torch.Tensor | None:
+        """Stack per-actor hidden states into a batched tensor.
+
+        For the GRU fallback the hidden shape is ``(1, B, D)``.
+        We stack N per-actor hiddens along B to get ``(1, N, D)``.
+        If **all** actors have ``None`` hidden (e.g. first step),
+        we return ``None``.
+
+        For the Mamba2 core (stateless training), hidden is always
+        ``None``.
+        """
+        if all(h is None for h in hiddens.values()):
+            return None
+        # Determine D from the first non-None hidden
+        d_model = self._policy.encoder.embedding_dim
+        parts: list[torch.Tensor] = []
+        for i in range(n):
+            h = hiddens[i]
+            if h is None:
+                # Zero hidden for actors at episode start
+                parts.append(torch.zeros(1, 1, d_model, device=self._device))
+            else:
+                # h is (1, 1, D) from when this actor was last stepped
+                parts.append(h.to(self._device))
+        return torch.cat(parts, dim=1)  # (1, N, D)
+
+    @staticmethod
+    def _extract_hidden(
+        batched: torch.Tensor | None,
+        actor_id: int,
+    ) -> torch.Tensor | None:
+        """Extract a single actor's hidden from a batched tensor.
+
+        Returns a ``(1, 1, D)`` slice for the given actor index.
+        """
+        if batched is None:
+            return None
+        return batched[:, actor_id : actor_id + 1, :].clone()
+
     def train(
         self,
         total_steps: int,
@@ -475,11 +544,15 @@ class PpoTrainer:
         checkpoint_every: int = 0,
         checkpoint_dir: str = "checkpoints",
     ) -> PpoTrainingMetrics:
-        """Run PPO training loop with N actors in round-robin.
+        """Run PPO training loop with N actors in parallel.
 
-        Each rollout epoch steps all actors in round-robin order.
-        Per-actor buffers are concatenated for the PPO update so
-        the shared policy learns from every actor's experience.
+        Each rollout tick performs **one** batched policy forward pass for
+        all actors, sends **one** ``BatchStepRequest``, and receives
+        **one** ``BatchStepResult``.  This replaces the old sequential
+        round-robin loop and cuts ZMQ latency from O(N) to O(1) per tick.
+
+        Per-actor buffers are concatenated for the PPO update so the
+        shared policy learns from every actor's experience.
 
         Args:
             total_steps: total environment steps to collect (across all actors).
@@ -523,24 +596,20 @@ class PpoTrainer:
         episode_step_acc: dict[int, int] = {i: 0 for i in range(n)}
         hiddens: dict[int, torch.Tensor | None] = {i: None for i in range(n)}
 
-        # Get initial observation (SM publishes for actor 0 first)
-        obs_per_actor: dict[int, DistanceMatrix | None] = {
-            i: None for i in range(n)
-        }
-        # Collect initial observations for all actors (filtered by actor_id)
+        # Get initial observations via PUB/SUB (environment publishes on start)
+        obs_per_actor: dict[int, DistanceMatrix] = {}
         for i in range(n):
-            obs_per_actor[i] = self._recv_matrix(
-                timeout_ms=5000, expected_actor_id=i,
-            )
-            if obs_per_actor[i] is None:
+            obs = self._recv_matrix(timeout_ms=5000, expected_actor_id=i)
+            if obs is None:
                 msg = f"No initial observation received for actor {i}."
                 raise RuntimeError(msg)
+            obs_per_actor[i] = obs
 
         reward_ema = 0.0
         step_id = 0
 
         while step_id < total_steps:
-            # ── Collect rollout (round-robin across actors) ──
+            # ── Collect rollout (batched across all actors) ──
             for buf in self._buffers.values():
                 buf.clear()
             self._policy.eval()
@@ -549,54 +618,69 @@ class PpoTrainer:
                 if step_id >= total_steps:
                     break
 
-                # Round-robin: step every actor once per rollout tick
+                # ── 1. Stack observations from all actors ──
+                obs_tensors: list[torch.Tensor] = []
                 for actor_id in range(n):
-                    obs = obs_per_actor[actor_id]
-                    if obs is None:
-                        continue
+                    obs_tensors.append(self._obs_to_tensor(obs_per_actor[actor_id]))
+                obs_batch = torch.stack(obs_tensors).to(self._device)  # (N, 2, Az, El)
 
-                    obs_tensor = self._obs_to_tensor(obs)
-                    hidden = hiddens[actor_id]
+                # ── 2. Stack hidden states for batched temporal core ──
+                hidden_batch = self._stack_hiddens(hiddens, n)
 
-                    with torch.no_grad():
-                        obs_batch = obs_tensor.unsqueeze(0).to(self._device)
-                        actions, log_probs, values, new_hidden, z_t = (
-                            self._policy.forward(obs_batch, hidden)
-                        )
+                # ── 3. Single batched forward pass ──
+                with torch.no_grad():
+                    actions_t, log_probs_t, values_t, new_hidden_batch, z_t = (
+                        self._policy.forward(obs_batch, hidden_batch)
+                    )
+                    # actions_t: (N, 4), log_probs_t: (N,), values_t: (N,)
+                    # z_t: (N, D), new_hidden_batch: (1, N, D) or None
 
-                        z_np = z_t.squeeze(0).cpu().numpy()
+                    # RND intrinsic rewards for all actors at once
+                    intrinsic_rewards = self._rnd.intrinsic_reward(z_t)  # (N,)
 
-                        intrinsic_reward = self._rnd.intrinsic_reward(z_t).item()
+                # ── 4. Build per-actor Action objects ──
+                actions_np = actions_t.cpu().numpy()  # (N, 4)
+                z_np_all = z_t.cpu().numpy()  # (N, D)
+                now = time.time()
 
-                        memory = self._memories[actor_id]
-                        loop_sim, _, _ = memory.query(z_np)
-
-                    action_np = actions.squeeze(0).cpu().numpy()
-                    action = Action(
+                actor_actions: list[Action] = []
+                loop_sims: list[float] = []
+                for actor_id in range(n):
+                    a = actions_np[actor_id]
+                    actor_actions.append(Action(
                         env_ids=np.array([actor_id], dtype=np.int32),
                         linear_velocity=np.array(
-                            [[action_np[0], action_np[1], action_np[2]]],
-                            dtype=np.float32,
+                            [[a[0], a[1], a[2]]], dtype=np.float32,
                         ),
                         angular_velocity=np.array(
-                            [[0.0, 0.0, action_np[3]]], dtype=np.float32,
+                            [[0.0, 0.0, a[3]]], dtype=np.float32,
                         ),
                         policy_id="cognitive-mamba-ppo",
                         step_id=step_id,
-                        timestamp=time.time(),
-                    )
-                    self._publish_action(action)
+                        timestamp=now,
+                    ))
+                    # Publish action on PUB socket (for auditor)
+                    self._publish_action(actor_actions[-1])
+                    # Episodic memory query (CPU-side, per actor)
+                    loop_sim, _, _ = self._memories[actor_id].query(z_np_all[actor_id])
+                    loop_sims.append(loop_sim)
 
-                    result = self._request_step(action, step_id)
-                    next_obs = self._recv_matrix(
-                        timeout_ms=1000, expected_actor_id=actor_id,
-                    )
-                    if next_obs is None:
-                        next_obs = obs
+                # ── 5. Single batched step request ──
+                batch_result = self._request_batch_step(
+                    tuple(actor_actions), step_id,
+                )
+
+                # ── 6. Per-actor transition processing ──
+                for actor_id in range(n):
+                    result = batch_result.results[actor_id]
+                    next_obs = batch_result.observations[actor_id]
+                    action_np = actions_np[actor_id]
+                    intrinsic_reward = intrinsic_rewards[actor_id].item()
+                    loop_sim = loop_sims[actor_id]
 
                     raw_reward = float(result.reward)
-                    done = bool(getattr(result, "done", False))
-                    truncated = bool(getattr(result, "truncated", False))
+                    done = bool(result.done)
+                    truncated = bool(result.truncated)
 
                     shaped = self._reward_shaper.shape(
                         raw_reward=raw_reward,
@@ -627,17 +711,17 @@ class PpoTrainer:
                         actor_id=actor_id,
                     )
 
-                    memory.add(z_np)
+                    self._memories[actor_id].add(z_np_all[actor_id])
 
                     transition = PPOTransition(
-                        observation=obs_tensor,
-                        action=actions.squeeze(0).cpu(),
-                        log_prob=log_probs.item(),
-                        value=values.item(),
+                        observation=obs_tensors[actor_id],
+                        action=actions_t[actor_id].cpu(),
+                        log_prob=log_probs_t[actor_id].item(),
+                        value=values_t[actor_id].item(),
                         reward=shaped.total,
                         done=done,
                         truncated=truncated,
-                        hidden_state=hidden,
+                        hidden_state=self._extract_hidden(hidden_batch, actor_id),
                     )
                     self._buffers[actor_id].append(transition)
 
@@ -672,17 +756,18 @@ class PpoTrainer:
                             reward_ema, episode_count,
                         )
                         hiddens[actor_id] = None
-                        memory.reset()
+                        self._memories[actor_id].reset()
                     else:
-                        hiddens[actor_id] = new_hidden
+                        hiddens[actor_id] = self._extract_hidden(
+                            new_hidden_batch, actor_id,
+                        )
 
                     obs_per_actor[actor_id] = next_obs
-                    step_id += 1
 
-                    if step_id >= total_steps:
-                        break
+                # All N actors stepped in this tick
+                step_id += n
 
-                if log_every > 0 and step_id % log_every == 0:
+                if log_every > 0 and step_id % log_every < n:
                     _LOGGER.info(
                         "[step %d] reward_ema=%.4f episodes=%d beta=%.4f",
                         step_id, reward_ema, episode_count,
@@ -696,8 +781,6 @@ class PpoTrainer:
                 if len(buf) == 0:
                     continue
                 obs = obs_per_actor[actor_id]
-                if obs is None:
-                    continue
                 with torch.no_grad():
                     last_obs = (
                         self._obs_to_tensor(obs).unsqueeze(0).to(self._device)

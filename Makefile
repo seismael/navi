@@ -1,7 +1,7 @@
 # Navi — Cross-Project Makefile
 # Run from repository root. Each target iterates over all sub-projects.
 
-PROJECTS := contracts section-manager actor auditor
+PROJECTS := contracts environment actor auditor
 PROJECTS_DIR := projects
 
 .PHONY: sync-all test-all lint-all format-all typecheck-all check-all clean-all help

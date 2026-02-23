@@ -1,7 +1,7 @@
 """Multi-stream asynchronous ZMQ ingestion engine for the RL dashboard.
 
 Subscribes to ``distance_matrix_v2``, ``action_v2``, and
-``telemetry_event_v2`` on two independent sockets (Section-Manager PUB
+``telemetry_event_v2`` on two independent sockets (Environment PUB
 and Actor PUB), drains all queues without blocking, and maintains typed
 ring-buffer state for the rendering layer.
 """
@@ -168,7 +168,7 @@ class StreamEngine:
     """Non-blocking multi-socket ZMQ subscriber with per-topic routing.
 
     Subscribes to:
-    * ``matrix_sub`` — Section Manager PUB (``distance_matrix_v2``,
+    * ``matrix_sub`` — Environment PUB (``distance_matrix_v2``,
       ``telemetry_event_v2``)
     * ``actor_sub``  — Actor/Trainer PUB (``action_v2``,
       ``telemetry_event_v2``)
@@ -190,7 +190,7 @@ class StreamEngine:
         }
         self.state = self._actor_states[0]  # backward compat
 
-        # Section-Manager PUB socket
+        # Environment PUB socket
         self._sock_matrix = self._ctx.socket(zmq.SUB)
         self._sock_matrix.connect(matrix_sub)
         for topic in (TOPIC_DISTANCE_MATRIX, TOPIC_TELEMETRY_EVENT):
@@ -255,7 +255,7 @@ class StreamEngine:
         )
         self._step_counter += 1
         self._sock_step.send(serialize(request))
-        # Block until Section Manager replies (< 5 ms typical)
+        # Block until Environment replies (< 5 ms typical)
         _reply = self._sock_step.recv()
 
     @property

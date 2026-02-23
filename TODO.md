@@ -7,7 +7,7 @@
 
 ## 0. Training Correctness Fixes (Feb 22 2026)
 
-**Status:** COMPLETED — all fixes implemented, 210 tests pass (82 actor + 86 SM + 10 contracts + 32 auditor)
+**Status:** COMPLETED — all fixes implemented, 210 tests pass (82 actor + 86 environment + 10 contracts + 32 auditor)
 
 ### Context
 
@@ -84,7 +84,7 @@ careful mathematical validation.
 ### Requirements
 
 - Spawn `N = num_cpus - 1` independent training workers, each running a
-  separate Section Manager + Actor pair on a different scene.
+  separate Environment + Actor pair on a different scene.
 - Each worker collects rollouts independently using the shared policy weights.
 - Gradient aggregation must be mathematically sound — options include:
   - **Synchronous A2C/PPO:** All workers collect rollouts, gradients are

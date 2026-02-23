@@ -9,6 +9,8 @@ import numpy as np
 
 from navi_contracts.models import (
     Action,
+    BatchStepRequest,
+    BatchStepResult,
     DistanceMatrix,
     RobotPose,
     StepRequest,
@@ -70,8 +72,53 @@ def _default(obj: Any) -> Any:
     raise TypeError(msg)
 
 
+def _serialize_action(action: Action) -> dict[str, Any]:
+    """Serialize an Action to a plain dict (shared helper)."""
+    return {
+        "env_ids": action.env_ids,
+        "linear_velocity": action.linear_velocity,
+        "angular_velocity": action.angular_velocity,
+        "policy_id": action.policy_id,
+        "step_id": action.step_id,
+        "timestamp": action.timestamp,
+    }
+
+
+def _serialize_step_result(result: StepResult) -> dict[str, Any]:
+    """Serialize a StepResult to a plain dict (shared helper)."""
+    return {
+        "step_id": result.step_id,
+        "env_id": result.env_id,
+        "done": result.done,
+        "truncated": result.truncated,
+        "reward": result.reward,
+        "episode_return": result.episode_return,
+        "timestamp": result.timestamp,
+    }
+
+
+def _serialize_distance_matrix(dm: DistanceMatrix) -> dict[str, Any]:
+    """Serialize a DistanceMatrix to a plain dict (shared helper)."""
+    return {
+        "episode_id": dm.episode_id,
+        "env_ids": dm.env_ids,
+        "matrix_shape": list(dm.matrix_shape),
+        "depth": dm.depth,
+        "delta_depth": dm.delta_depth,
+        "semantic": dm.semantic,
+        "valid_mask": dm.valid_mask,
+        "overhead": dm.overhead,
+        "robot_pose": _robot_pose_to_dict(dm.robot_pose),
+        "step_id": dm.step_id,
+        "timestamp": dm.timestamp,
+    }
+
+
 def serialize(
-    model: DistanceMatrix | Action | RobotPose | StepRequest | StepResult | TelemetryEvent,
+    model: (
+        DistanceMatrix | Action | RobotPose | StepRequest | StepResult
+        | TelemetryEvent | BatchStepRequest | BatchStepResult
+    ),
 ) -> bytes:
     """Serialize a wire-format model to msgpack bytes."""
     if isinstance(model, RobotPose):
@@ -79,52 +126,24 @@ def serialize(
     elif isinstance(model, DistanceMatrix):
         payload = {
             "_type": "DistanceMatrix",
-            "episode_id": model.episode_id,
-            "env_ids": model.env_ids,
-            "matrix_shape": list(model.matrix_shape),
-            "depth": model.depth,
-            "delta_depth": model.delta_depth,
-            "semantic": model.semantic,
-            "valid_mask": model.valid_mask,
-            "overhead": model.overhead,
-            "robot_pose": _robot_pose_to_dict(model.robot_pose),
-            "step_id": model.step_id,
-            "timestamp": model.timestamp,
+            **_serialize_distance_matrix(model),
         }
     elif isinstance(model, StepRequest):
         payload = {
             "_type": "StepRequest",
-            "action": {
-                "env_ids": model.action.env_ids,
-                "linear_velocity": model.action.linear_velocity,
-                "angular_velocity": model.action.angular_velocity,
-                "policy_id": model.action.policy_id,
-                "step_id": model.action.step_id,
-                "timestamp": model.action.timestamp,
-            },
+            "action": _serialize_action(model.action),
             "step_id": model.step_id,
             "timestamp": model.timestamp,
         }
     elif isinstance(model, StepResult):
         payload = {
             "_type": "StepResult",
-            "step_id": model.step_id,
-            "env_id": model.env_id,
-            "done": model.done,
-            "truncated": model.truncated,
-            "reward": model.reward,
-            "episode_return": model.episode_return,
-            "timestamp": model.timestamp,
+            **_serialize_step_result(model),
         }
     elif isinstance(model, Action):
         payload = {
             "_type": "Action",
-            "env_ids": model.env_ids,
-            "linear_velocity": model.linear_velocity,
-            "angular_velocity": model.angular_velocity,
-            "policy_id": model.policy_id,
-            "step_id": model.step_id,
-            "timestamp": model.timestamp,
+            **_serialize_action(model),
         }
     elif isinstance(model, TelemetryEvent):
         payload = {
@@ -136,6 +155,21 @@ def serialize(
             "payload": model.payload,
             "timestamp": model.timestamp,
         }
+    elif isinstance(model, BatchStepRequest):
+        payload = {
+            "_type": "BatchStepRequest",
+            "actions": [_serialize_action(a) for a in model.actions],
+            "step_id": model.step_id,
+            "timestamp": model.timestamp,
+        }
+    elif isinstance(model, BatchStepResult):
+        payload = {
+            "_type": "BatchStepResult",
+            "results": [_serialize_step_result(r) for r in model.results],
+            "observations": [
+                _serialize_distance_matrix(o) for o in model.observations
+            ],
+        }
     else:
         msg = f"Unsupported model type: {type(model)}"
         raise TypeError(msg)
@@ -145,7 +179,10 @@ def serialize(
 
 def deserialize(
     data: bytes,
-) -> DistanceMatrix | Action | RobotPose | StepRequest | StepResult | TelemetryEvent:
+) -> (
+    DistanceMatrix | Action | RobotPose | StepRequest | StepResult
+    | TelemetryEvent | BatchStepRequest | BatchStepResult
+):
     """Deserialize msgpack bytes to a wire-format model."""
     raw: dict[str, Any] = msgpack.unpackb(data, ext_hook=_ext_hook)
     type_tag: str = raw.pop("_type")
@@ -166,6 +203,17 @@ def deserialize(
         return Action(**raw)
     if type_tag == "TelemetryEvent":
         return TelemetryEvent(**raw)
+    if type_tag == "BatchStepRequest":
+        raw["actions"] = tuple(Action(**a) for a in raw["actions"])
+        return BatchStepRequest(**raw)
+    if type_tag == "BatchStepResult":
+        results = tuple(StepResult(**r) for r in raw["results"])
+        observations: list[DistanceMatrix] = []
+        for obs_data in raw["observations"]:
+            obs_data["matrix_shape"] = tuple(obs_data["matrix_shape"])
+            obs_data["robot_pose"] = _robot_pose_from_dict(obs_data["robot_pose"])
+            observations.append(DistanceMatrix(**obs_data))
+        return BatchStepResult(results=results, observations=tuple(observations))
 
     msg = f"Unknown model type tag: {type_tag}"
     raise ValueError(msg)

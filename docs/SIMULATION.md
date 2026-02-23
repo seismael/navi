@@ -1,7 +1,7 @@
 # SIMULATION.md — Simulation Layer Architecture
 
-**Subsystem:** Section Manager — Simulation Layer  
-**Package:** `navi-section-manager`  
+**Subsystem:** Environment — Simulation Layer  
+**Package:** `navi-environment`  
 **Status:** Active canonical specification  
 **Policy:** See [AGENTS.md](../AGENTS.md) for implementation rules and non-negotiables
 
@@ -22,7 +22,7 @@ data flows through this layer before reaching the Brain.
 - Publish `TelemetryEvent` for pose tracking and diagnostics.
 - Support step-mode (REQ/REP) and async-mode (PUB/SUB) operation.
 
-**ZMQ server:** `SectionManagerServer` binds a PUB socket (default `tcp://*:5559`)
+**ZMQ server:** `EnvironmentServer` binds a PUB socket (default `tcp://*:5559`)
 and a REP socket (default `tcp://*:5560`). In step mode, it polls for
 `StepRequest` messages with a 500 ms idle re-publish interval to support late
 subscribers. In async mode, it subscribes to `action_v2` and steps continuously.
@@ -242,7 +242,7 @@ format for `VoxelBackend` consumption.
 **CLI:**
 
 ```bash
-uv run navi-section-manager compile-world \
+uv run navi-environment compile-world \
   --source ./worlds/city.ply \
   --source-format ply \
   --output ./worlds/city.zarr
@@ -386,7 +386,7 @@ full specification.
 
 ## 8. Configuration Reference
 
-**Module:** `config.py` — `SectionManagerConfig`
+**Module:** `config.py` — `EnvironmentConfig`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

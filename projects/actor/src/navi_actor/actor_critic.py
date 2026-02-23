@@ -25,7 +25,7 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
     intent* (forward/backward, up/down, left/right, turn).
 
     Actual velocity (m/s, rad/s) is determined by ``drone_max_speed`` and
-    related parameters on the **backend** (Section Manager config).
+    related parameters on the **backend** (Environment config).
     Speed is also **dynamic**: the backend scales it with front-hemisphere
     proximity so the drone crawls near walls and races in open space.
     This means the same trained model works at any flight speed.

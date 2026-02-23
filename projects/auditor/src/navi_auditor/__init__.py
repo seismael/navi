@@ -1,4 +1,4 @@
-"""Navi Auditor — Layer 5: Viz & Replay."""
+"""Navi Auditor — Layer 3: Viz & Replay."""
 
 from __future__ import annotations
 

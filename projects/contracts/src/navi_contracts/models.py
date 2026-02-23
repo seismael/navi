@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 __all__: list[str] = [
     "Action",
+    "BatchStepRequest",
+    "BatchStepResult",
     "DistanceMatrix",
     "RobotPose",
     "StepRequest",
@@ -82,6 +84,32 @@ class StepResult:
     reward: float
     episode_return: float
     timestamp: float
+
+
+@dataclass(frozen=True, slots=True)
+class BatchStepRequest:
+    """Batched step request: all actor actions in a single REQ message.
+
+    Replaces N sequential ``StepRequest`` round-trips with one batched
+    request containing actions for every actor.
+    """
+
+    actions: tuple[Action, ...]
+    step_id: int
+    timestamp: float
+
+
+@dataclass(frozen=True, slots=True)
+class BatchStepResult:
+    """Batched step result: all actor observations + results in one REP reply.
+
+    Returned by the environment server in response to a ``BatchStepRequest``.
+    Contains one ``StepResult`` and one ``DistanceMatrix`` per actor, in the
+    same order as the actions in the request.
+    """
+
+    results: tuple[StepResult, ...]
+    observations: tuple[DistanceMatrix, ...]
 
 
 @dataclass(frozen=True, slots=True)

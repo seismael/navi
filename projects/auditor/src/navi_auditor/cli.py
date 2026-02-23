@@ -12,7 +12,7 @@ from navi_auditor.storage.zarr_backend import ZarrBackend
 
 __all__: list[str] = ["app"]
 
-app = typer.Typer(name="navi-auditor", help="Layer 5: Viz & Replay — Auditor service")
+app = typer.Typer(name="navi-auditor", help="Layer 3: Viz & Replay — Auditor service")
 
 
 @app.command()
@@ -61,7 +61,7 @@ def dashboard(
     ),
     step_endpoint: str = typer.Option(
         "tcp://localhost:5560",
-        help="Section Manager REP address for Tab-toggle manual stepping",
+        help="Environment REP address for Tab-toggle manual stepping",
     ),
     actors: int = typer.Option(
         1, help="Number of actors (adds per-actor tabs when > 1)",

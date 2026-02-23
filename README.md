@@ -7,7 +7,7 @@ geometric simulation from temporal cognition and asynchronous observability.
 ```text
 ┌─────────────────────┐    ZMQ PUB/SUB     ┌──────────────────────┐
 │  Simulation Layer   │ ──────────────────▶ │    Brain Layer       │
-│  (section-manager)  │ ◀── REQ/REP ────── │    (actor)           │
+│  (environment)  │ ◀── REQ/REP ────── │    (actor)           │
 │  Pluggable backends │                     │  Sacred CNN+Mamba2   │
 │  Voxel · Habitat ·  │                     │  +Memory+PPO engine  │
 │  Mesh               │                     └──────────┬───────────┘
@@ -39,7 +39,7 @@ accommodate a new data source.
 | Project | Layer | Description |
 |---------|-------|-------------|
 | [`projects/contracts`](projects/contracts) | Shared | Wire-format models, serialization, ZMQ topics |
-| [`projects/section-manager`](projects/section-manager) | Simulation | Pluggable backends, raycasting, world generators |
+| [`projects/environment`](projects/environment) | Simulation | Pluggable backends, raycasting, world generators |
 | [`projects/actor`](projects/actor) | Brain | Sacred cognitive engine, PPO training, policies |
 | [`projects/auditor`](projects/auditor) | Gallery | Recording, replay, live PyQtGraph dashboard |
 
@@ -49,9 +49,9 @@ accommodate a new data source.
 
 ```bash
 # Terminal 1 — Simulation Layer
-cd projects/section-manager
+cd projects/environment
 uv sync
-uv run navi-section-manager serve --mode step --pub tcp://*:5559 --rep tcp://*:5560
+uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560
 
 # Terminal 2 — Brain Layer
 cd projects/actor
@@ -74,9 +74,8 @@ uv run navi-auditor record --sub tcp://localhost:5559,tcp://localhost:5557 --out
 # Habitat backend
 ./scripts/run-ghost-stack.ps1 -Backend habitat -HabitatScene /path/to/scene.glb
 
-# With a learned policy checkpoint
-./scripts/run-ghost-stack.ps1 -ActorPolicy learned `
-    -ActorPolicyCheckpoint "projects/actor/artifacts/policy_spherical.npz"
+# With a pre-trained checkpoint
+./scripts/run-ghost-stack.ps1 -ActorPolicyCheckpoint "checkpoints/policy_step_10000.pt"
 ```
 
 ### Compile Mesh Assets
@@ -84,8 +83,8 @@ uv run navi-auditor record --sub tcp://localhost:5559,tcp://localhost:5557 --out
 Convert `.ply`, `.obj`, or `.stl` meshes into the canonical sparse Zarr format:
 
 ```bash
-cd projects/section-manager
-uv run navi-section-manager compile-world \
+cd projects/environment
+uv run navi-environment compile-world \
     --source ../../data/scenes/world.ply --output ../../data/scenes/world.zarr
 ```
 
@@ -94,9 +93,9 @@ uv run navi-section-manager compile-world \
 ### Online PPO Training (single scene)
 
 ```bash
-# Start Section Manager in Terminal 1 (see Quick Start above), then:
+# Start Environment in Terminal 1 (see Quick Start above), then:
 cd projects/actor
-uv run navi-actor train --sub tcp://localhost:5559 \
+uv run navi-actor train-ppo --sub tcp://localhost:5559 \
     --step-endpoint tcp://localhost:5560 --steps 10000 \
     --checkpoint-every 1000 --checkpoint-dir artifacts/checkpoints
 ```
@@ -117,7 +116,7 @@ uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559
 ```
 
 The dashboard runs independently from training. Connect it to any running
-Section Manager or Actor to observe live spherical depth views and PPO metrics.
+Environment or Actor to observe live spherical depth views and PPO metrics.
 
 ## Repository Commands
 
@@ -150,6 +149,7 @@ All inter-service communication uses v2 contracts over ZeroMQ:
 | [docs/ACTOR.md](docs/ACTOR.md) | Cognitive engine specification (sacred, immutable) |
 | [docs/SIMULATION.md](docs/SIMULATION.md) | Simulation layer, backends, raycasting, world generators |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | Canonical wire format — models, serialization, ZMQ topics |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Theoretical performance baselines & throughput targets (roadmap) |
 | [AGENTS.md](AGENTS.md) | Implementation policy, non-negotiables, repository structure |
 
 ## Scripts

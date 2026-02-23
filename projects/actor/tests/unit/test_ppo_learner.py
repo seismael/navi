@@ -25,43 +25,6 @@ def _fill_buffer(n: int = 64) -> TrajectoryBuffer:
     return buf
 
 
-def test_legacy_train_epoch() -> None:
-    """Legacy train_epoch should still work with RolloutBuffer."""
-    import numpy as np
-
-    from navi_actor.rollout_buffer import RolloutBuffer, Transition
-    from navi_contracts import Action, DistanceMatrix, RobotPose, StepResult
-
-    learner = PpoLearner(gamma=0.99)
-    buf = RolloutBuffer(capacity=8)
-    pose = RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=0.0)
-    obs = DistanceMatrix(
-        episode_id=1,
-        env_ids=np.array([0], dtype=np.int32),
-        matrix_shape=(8, 4),
-        depth=np.ones((1, 8, 4), dtype=np.float32),
-        delta_depth=np.zeros((1, 8, 4), dtype=np.float32),
-        semantic=np.zeros((1, 8, 4), dtype=np.int32),
-        valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
-        overhead=np.zeros((256, 256, 3), dtype=np.uint8),
-        robot_pose=pose,
-        step_id=0,
-        timestamp=1.0,
-    )
-    action = Action(
-        env_ids=np.array([0], dtype=np.int32),
-        linear_velocity=np.array([[0.1, 0.0, 0.0]], dtype=np.float32),
-        angular_velocity=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
-        policy_id="test",
-        step_id=0,
-        timestamp=1.0,
-    )
-    result = StepResult(step_id=0, env_id=0, done=False, truncated=False, reward=1.0, episode_return=1.0, timestamp=1.0)
-    buf.append(Transition(observation=obs, action=action, result=result))
-    metrics = learner.train_epoch(buf)
-    assert metrics["reward_mean"] == 1.0
-
-
 def test_ppo_epoch_returns_metrics() -> None:
     """train_ppo_epoch should return PpoMetrics."""
     policy = CognitiveMambaPolicy(embedding_dim=128)

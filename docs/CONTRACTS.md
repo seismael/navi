@@ -121,7 +121,7 @@ Asynchronous telemetry event for logging, dashboarding, and replay.
 ```python
 @dataclass(frozen=True, slots=True)
 class TelemetryEvent:
-    event_type: str                    # e.g., "ppo.update", "section_manager.step"
+    event_type: str                    # e.g., "ppo.update", "environment.step"
     episode_id: int
     env_id: int
     step_id: int

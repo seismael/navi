@@ -142,7 +142,7 @@ class LiveDashboard:
 
     Supports **Tab-toggle teleop**: pressing Tab switches between
     OBSERVER mode (Actor drives) and MANUAL mode (WASD/arrow keys
-    send ``StepRequest`` directly to the Section Manager REP socket).
+    send ``StepRequest`` directly to the Environment REP socket).
     """
 
     def __init__(
@@ -831,7 +831,7 @@ class LiveDashboard:
             timestamp=time.time(),
         )
         self._step_socket.send(serialize(request))
-        # Block until Section Manager replies (usually < 5 ms)
+        # Block until Environment replies (usually < 5 ms)
         _reply = self._step_socket.recv()
 
     def run(self) -> None:

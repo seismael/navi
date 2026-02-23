@@ -13,7 +13,7 @@ The Actor implements a 5-stage neural pipeline that transforms raw spherical
 depth observations into continuous 4-DOF velocity commands. This pipeline is
 **sacred and immutable** — it is never modified to accommodate new data sources
 or sensor types. External data connects only through `DatasetAdapter` instances
-in `section-manager/backends/` that transform raw observations *to* the
+in `environment/backends/` that transform raw observations *to* the
 engine's canonical `(B, 2, Az, El)` input format.
 
 ```text
@@ -98,10 +98,16 @@ regions by rewarding high prediction errors in novel spatial embeddings.
 - **Target network** (frozen, randomly initialized):
   `Linear(D, 128) → ReLU → Linear(128, 64)`
 - **Predictor network** (trainable):
-  `Linear(D, 128) → ReLU → Linear(128, 128) → ReLU → Linear(128, 64)`
+  `Linear(D, 128) → ReLU → Linear(128, 64)`
 
-The predictor has an extra hidden layer to give it enough capacity to learn
-the target's mapping without trivially memorizing it.
+The predictor mirrors the target’s architecture so it cannot trivially
+replicate the target from different random initialisation — the residual
+prediction error serves as the novelty signal.
+
+> **Note:** An earlier 3-layer predictor (`128→128→128→64`) was found to
+> over-fit the target, collapsing the intrinsic reward signal. Reduced to
+> 2 layers matching the target per the Feb 2026 training correctness pass
+> (see TODO.md Issue 3).
 
 **Intrinsic reward computation:**
 
@@ -211,10 +217,10 @@ Linear(D, 64) → ReLU → Linear(64, 4) → Tanh → scale by action_scales
 
   | Dimension | Default Max |
   |-----------|-------------|
-  | Forward | 1.2 |
-  | Vertical | 0.8 |
-  | Lateral | 0.8 |
-  | Yaw | 1.2 |
+  | Forward | 1.0 |
+  | Vertical | 1.0 |
+  | Lateral | 1.0 |
+  | Yaw | 1.0 |
 
 - **Learnable `log_std`:** Per-dimension `nn.Parameter` initialized to zero
   ($\sigma_0 = 1.0$). The policy learns to reduce variance as training
@@ -252,9 +258,9 @@ $$r_{total} = r_{extrinsic} + r_{collision} + r_{tax} + r_{velocity} + \beta(t) 
 
 | Component | Formula | Default | Purpose |
 |-----------|---------|---------|---------|
-| Collision penalty | $r_{col}$ (applied on `done`) | -10.0 | Instant penalty for wall contact |
+| Collision penalty | $r_{col}$ (applied on `done`) | 0.0 | Disabled by default (see TODO.md Issue 2) |
 | Existential tax | $r_{tax}$ (per step) | -0.01 | Forces temporal efficiency |
-| Velocity bonus | $w_v \cdot (\max(0, v_{fwd}) - 0.5 \cdot |v_{ang}|)$ | $w_v = 0.1$ | Encourages forward momentum, penalizes spinning |
+| Velocity bonus | $w_v \cdot (\max(0, v_{fwd}) - 0.5 \cdot |v_{ang}|)$ | $w_v = 0.0$ | Disabled — speed is not a training signal |
 
 ### 7.2. Intrinsic Curiosity (RND)
 
@@ -321,15 +327,7 @@ Synchronous step-mode PPO with BPTT-aware sequential minibatch sampling.
 | `grad_norm` | Global gradient norm |
 | `beta` | Current RND annealing coefficient |
 
-### 8.2. OnlineSphericalTrainer — Lightweight REINFORCE
-
-**Module:** `training/online.py`
-
-A simpler REINFORCE-style policy gradient trainer for `LearnedSphericalPolicy`.
-Uses the 17-dimensional hand-crafted spherical feature vector (see §9.2) and
-trains linear weight vectors via policy gradient — no neural network overhead.
-
-### 8.3. TrajectoryBuffer
+### 8.2. TrajectoryBuffer
 
 **Module:** `rollout_buffer.py`
 
@@ -340,60 +338,13 @@ optimization begins.
 
 ---
 
-## 9. Alternative Policies
+## 9. Single Pipeline Invariant
 
-### 9.1. ShallowPolicy — Rule-Based Reactive Control
+All training modes (`train`, `train-sequential`, `train-parallel`) use a
+single end-to-end pipeline: **CognitiveMambaPolicy** (§1–§6).
 
-**Module:** `policy.py`
-
-A hand-coded depth-reactive policy that requires no training:
-
-- Splits the depth panorama into left / right azimuth sectors.
-- Computes mean depth per sector (valid bins only).
-- Steers toward the sector with greater clearance:
-  `yaw = clip((right_mean - left_mean) * gain, -1.5, 1.5)`.
-- Reduces forward speed when mean occupancy is low (close to walls).
-- Default forward velocity: 1.2, gain: 1.8.
-
-Useful for smoke testing, dashboard verification, and establishing baseline
-navigation behaviour before training.
-
-### 9.2. LearnedSphericalPolicy — Feature-Based Linear Policy
-
-**Module:** `policy.py`, `spherical_features.py`
-
-A lightweight deterministic policy driven by 17 hand-crafted spherical features
-extracted from the full 360° depth matrix:
-
-| Features 1–5 | Directional clearance |
-|--------------|----------------------|
-| Front min depth | Minimum depth in the forward azimuth band |
-| Front mean depth | Mean depth in the forward band |
-| Rear min depth | Minimum depth in the backward band |
-| Left mean depth | Mean depth in the left hemisphere |
-| Right mean depth | Mean depth in the right hemisphere |
-
-| Features 6–13 | 8-sector azimuth means |
-|---------------|----------------------|
-| Sector $k$ mean | Mean of `per_az_min` for sector $k \in [0, 7]$ |
-
-| Features 14–17 | Elevation-aware 3D control |
-|----------------|--------------------------|
-| Floor proximity | Min depth in lower elevation bins |
-| Ceiling proximity | Min depth in upper elevation bins |
-| Vertical clearance ratio | `ceil_min / floor_min` (clamped) |
-| Near-object fraction | Fraction of valid bins with depth < 0.15 |
-
-**Action computation:** Four independent linear heads with sigmoid (forward) or
-tanh (yaw, vertical, lateral) activation, scaled by configurable maximums.
-Checkpoint format: compressed NPZ with weight vectors + bias + scale parameters.
-
-### 9.3. CognitiveMambaPolicy — Full Neural Pipeline
-
-**Module:** `cognitive_policy.py`
-
-The sacred end-to-end neural policy described in §1–§6. Used for PPO training
-with the full Mamba2 temporal pipeline. Supports:
+There are no alternative policy implementations. The sacred cognitive pipeline
+is the only policy in the actor package:
 
 - `act(obs, step_id, hidden)` — inference-mode action selection.
 - `forward(obs_tensor, hidden)` — training forward pass (sample + value).
@@ -401,6 +352,12 @@ with the full Mamba2 temporal pipeline. Supports:
 - `evaluate_sequence(obs_seq, actions_seq, hidden)` — BPTT sequence evaluation.
 - `encode(obs_tensor)` — extract $z_t$ for RND / episodic memory.
 - Checkpoint save/load via `state_dict`.
+
+Feature extraction (`spherical_features.py`) provides 17 hand-crafted
+spherical features used for reward shaping diagnostics but never for
+action selection.
+
+**Module:** `cognitive_policy.py`
 
 ---
 

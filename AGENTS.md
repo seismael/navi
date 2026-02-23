@@ -17,6 +17,8 @@ Navi is a Ghost-Matrix system focused on throughput RL with strict separation of
    - `Action`
    - `StepRequest`
    - `StepResult`
+   - `BatchStepRequest`
+   - `BatchStepResult`
    - `TelemetryEvent`
 2. No other models may be added to the contracts package without explicit approval.
    Visualization types (RGB frames, camera images) are never canonical contracts.
@@ -24,6 +26,10 @@ Navi is a Ghost-Matrix system focused on throughput RL with strict separation of
 4. Inter-process communication is ZMQ only (PUB/SUB + REQ/REP).
 5. Training runtime is headless; rendering is optional and asynchronous.
 6. Services are sovereign packages; no service imports another service package.
+   **Known exception:** The actor’s `train-sequential` CLI command imports from
+   `navi_environment` to enable in-process training without ZMQ. This is an
+   acknowledged sovereignty violation scoped to a single CLI command; the core
+   actor engine never imports environment types.
 7. Code quality gates remain mandatory: `ruff`, `mypy --strict`, `pytest`.
 8. **The training engine is sacred.** The actor's cognitive pipeline
    (FoveatedEncoder → Mamba2 → EpisodicMemory → ActorCriticHeads → PPO)
@@ -45,6 +51,7 @@ navi/
 │   ├── ARCHITECTURE.md          # system layers, SDF theory, design decisions
 │   ├── ACTOR.md                 # cognitive engine specification (sacred)
 │   ├── SIMULATION.md            # simulation layer + backends + raycasting
+│   ├── PERFORMANCE.md           # theoretical baselines & throughput targets
 │   └── CONTRACTS.md             # canonical wire format specification
 ├── data/
 │   └── scenes/                  # scene assets + manifest
@@ -64,8 +71,8 @@ navi/
     │       ├── topics.py
     │       ├── serialization.py
     │       └── types.py
-    ├── section-manager/
-    │   └── src/navi_section_manager/
+    ├── environment/
+    │   └── src/navi_environment/
     │       ├── server.py            # thin ZMQ shell
     │       ├── cli.py
     │       ├── config.py
@@ -100,7 +107,6 @@ navi/
     │       ├── server.py
     │       ├── cli.py
     │       ├── config.py
-    │       ├── policy.py                # ShallowPolicy, LearnedSphericalPolicy
     │       ├── spherical_features.py    # 17-dim feature extraction
     │       ├── cognitive_policy.py      # CognitiveMambaPolicy (sacred)
     │       ├── perception.py            # FoveatedEncoder CNN
@@ -113,10 +119,7 @@ navi/
     │       ├── memory/
     │       │   └── episodic.py           # EpisodicMemory (CPU FAISS KNN)
     │       └── training/
-    │           ├── ppo_trainer.py        # PpoTrainer (PPO + RND + GAE)
-    │           ├── online.py            # OnlineSphericalTrainer (REINFORCE)
-    │           ├── loop.py              # Training loop orchestration
-    │           └── callbacks.py         # Training callbacks
+    │           └── ppo_trainer.py        # PpoTrainer (PPO + RND + GAE)
     └── auditor/
         └── src/navi_auditor/
             ├── recorder.py
@@ -158,7 +161,7 @@ No other topics may be added without explicit approval.
 ## 6) Migration Policy
 
 - This repository is in hard-cut migration mode.
-- Allowed projects for final architecture: `contracts`, `section-manager`, `actor`, `auditor`.
+- Allowed projects for final architecture: `contracts`, `environment`, `actor`, `auditor`.
 - `ingress` and `cartographer` are removed from active architecture.
 - Any new code must target v2 contracts and Ghost-Matrix flow only.
 
@@ -179,7 +182,7 @@ semantic class remapping, delta-depth computation, and env-dimension insertion
 are performed. The result is always `(1, Az, El)` arrays that slot directly into
 a `DistanceMatrix` without any changes to the engine.
 
-Adapters live in `section-manager/backends/` alongside their backend. They never
+Adapters live in `environment/backends/` alongside their backend. They never
 import from `actor` or `auditor`.
 
 ## 8) Validation Commands

@@ -1,17 +1,48 @@
+<# .SYNOPSIS
+  Launch the full Navi Ghost-Matrix stack.
+
+  Two modes:
+    1. Inference (default)  — Environment + Actor + Dashboard as 3 processes.
+    2. Training  (-Train)   — train-sequential (in-process env+actor) + Dashboard.
+
+.EXAMPLE
+  # Inference with voxel backend
+  .\run-ghost-stack.ps1 -Backend voxel
+
+  # Multi-scene PPO training with live dashboard
+  .\run-ghost-stack.ps1 -Train -Actors 4 -TotalSteps 500000
+
+  # Resume from checkpoint
+  .\run-ghost-stack.ps1 -Train -Actors 4 -TotalSteps 500000 -Checkpoint "checkpoints\policy_step_0010000.pt"
+#>
 param(
-    [string]$SectionManagerPub = "tcp://*:5559",
-    [string]$SectionManagerRep = "tcp://*:5560",
+    # ── Mode ──
+    [switch]$Train,
+
+    # ── Common ──
+    [string]$Backend = "voxel",
+    [int]$Actors = 4,
+    [string]$HabitatScene = "",
+    [string]$HabitatDatasetConfig = "",
+    [switch]$NoPreKill,
+    [switch]$NoDashboard,
+
+    # ── Training params ──
+    [string]$Manifest = "",
+    [int]$TotalSteps = 500000,
+    [int]$CheckpointEvery = 5000,
+    [string]$CheckpointDir = "checkpoints",
+    [string]$Checkpoint = "",
+    [int]$LogEvery = 100,
+    [int]$RolloutLength = 512,
+
+    # ── Inference-mode ZMQ addresses ──
+    [string]$EnvironmentPub = "tcp://*:5559",
+    [string]$EnvironmentRep = "tcp://*:5560",
     [string]$ActorSub = "tcp://localhost:5559",
     [string]$ActorPub = "tcp://*:5557",
     [string]$ActorStepEndpoint = "tcp://localhost:5560",
-    [string]$ActorPolicy = "shallow",
-    [string]$ActorPolicyCheckpoint = "",
-    [string]$AuditorSub = "tcp://localhost:5559,tcp://localhost:5557",
-    [string]$AuditorOutput = "session.zarr",
-    [string]$Backend = "voxel",
-    [string]$HabitatScene = "",
-    [string]$HabitatDatasetConfig = "",
-    [switch]$NoPreKill
+    [string]$ActorPolicyCheckpoint = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +54,7 @@ function Get-RepoRoot {
 
 function Stop-NaviProcesses {
     $patterns = @(
-        "*navi-section-manager*",
+        "*navi-environment*",
         "*navi-actor*",
         "*navi-auditor*"
     )
@@ -63,42 +94,131 @@ $repoRoot = Get-RepoRoot
 $logsDir = Join-Path $repoRoot "scripts\logs"
 
 if (-not $NoPreKill) {
+    Write-Host "Stopping stale Navi processes..."
     Stop-NaviProcesses
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds 500
 }
 
-$sectionArgs = @(
+# ═══════════════════════════════════════════════════════════════════
+# Training mode: train-sequential (in-process env+actor) + dashboard
+# ═══════════════════════════════════════════════════════════════════
+if ($Train) {
+    # Resolve manifest
+    if ([string]::IsNullOrWhiteSpace($Manifest)) {
+        $Manifest = Join-Path $repoRoot "data\scenes\scene_manifest.json"
+    }
+    if (-not (Test-Path $Manifest)) {
+        Write-Host "ERROR: Manifest not found: $Manifest"
+        exit 1
+    }
+
+    # Resolve checkpoint dir to absolute
+    if (-not [System.IO.Path]::IsPathRooted($CheckpointDir)) {
+        $CheckpointDir = Join-Path $repoRoot "projects\actor\$CheckpointDir"
+    }
+
+    $trainArgs = @(
+        "run",
+        "--project", (Join-Path $repoRoot "projects\actor"),
+        "navi-actor", "train-sequential",
+        "--manifest", $Manifest,
+        "--actors", $Actors,
+        "--total-steps", $TotalSteps,
+        "--shuffle",
+        "--backend", $Backend,
+        "--checkpoint-every", $CheckpointEvery,
+        "--checkpoint-dir", $CheckpointDir,
+        "--log-every", $LogEvery,
+        "--rollout-length", $RolloutLength
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
+        $trainArgs += @("--checkpoint", $Checkpoint)
+    }
+
+    $trainLogOut = Join-Path $logsDir "train-sequential.out.log"
+    $trainLogErr = Join-Path $logsDir "train-sequential.err.log"
+
+    $trainProc = $null
+    try {
+        Write-Host "========================================================"
+        Write-Host "  Navi Ghost-Matrix Training"
+        Write-Host "  Backend    : $Backend"
+        Write-Host "  Actors     : $Actors"
+        Write-Host "  Total Steps: $TotalSteps"
+        Write-Host "  Checkpoints: every $CheckpointEvery → $CheckpointDir"
+        Write-Host "  Dashboard  : $(if ($NoDashboard) { 'disabled' } else { 'enabled' })"
+        Write-Host "========================================================"
+
+        Write-Host "`nStarting train-sequential (background)..."
+        $trainProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $trainArgs -StdOutFile $trainLogOut -StdErrFile $trainLogErr
+        Write-Host "  PID: $($trainProc.Id)"
+        Write-Host "  Logs: $trainLogOut"
+        Write-Host "        $trainLogErr"
+
+        if (-not $NoDashboard) {
+            # Wait for ZMQ sockets to bind (env + actor start inside train-sequential)
+            Write-Host "`nWaiting for ZMQ sockets to bind..."
+            Start-Sleep -Seconds 8
+
+            Write-Host "Launching Dashboard (foreground)..."
+            Write-Host "  Tab = toggle manual/AI | WASD = move | ESC = quit"
+            & uv run --project (Join-Path $repoRoot "projects\auditor") `
+                navi-auditor dashboard `
+                --matrix-sub "tcp://localhost:5559" `
+                --actor-sub "tcp://localhost:5557" `
+                --step-endpoint "tcp://localhost:5560" `
+                --actors $Actors
+        }
+        else {
+            Write-Host "`nDashboard disabled. Training runs in background."
+            Write-Host "  Tail logs: Get-Content '$trainLogErr' -Wait"
+            Write-Host "  Stop:      Stop-Process -Id $($trainProc.Id) -Force"
+        }
+    }
+    finally {
+        if ($null -ne $trainProc -and -not $trainProc.HasExited) {
+            Write-Host "`nStopping train-sequential (PID $($trainProc.Id))..."
+            Stop-Process -Id $trainProc.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    exit 0
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# Inference mode: Environment + Actor + Dashboard as 3 processes
+# ═══════════════════════════════════════════════════════════════════
+$envArgs = @(
     "run",
-    "--project", (Join-Path $repoRoot "projects\section-manager"),
-    "navi-section-manager",
+    "--project", (Join-Path $repoRoot "projects\environment"),
+    "navi-environment",
     "serve",
     "--mode", "step",
-    "--pub", $SectionManagerPub,
-    "--rep", $SectionManagerRep,
+    "--pub", $EnvironmentPub,
+    "--rep", $EnvironmentRep,
     "--backend", $Backend
 )
 
 if ($Backend -eq "voxel") {
-    $sectionArgs += @("--generator", "arena")
+    $envArgs += @("--generator", "arena")
 }
 elseif ($Backend -eq "habitat") {
     if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
         throw "HabitatScene is required when Backend=habitat"
     }
-    $sectionArgs += @("--habitat-scene", $HabitatScene)
+    $envArgs += @("--habitat-scene", $HabitatScene)
     if (-not [string]::IsNullOrWhiteSpace($HabitatDatasetConfig)) {
-        $sectionArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
+        $envArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
     }
 }
 elseif ($Backend -eq "mesh") {
     if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
         throw "HabitatScene is required when Backend=mesh (path to .glb/.obj scene)"
     }
-    $sectionArgs += @("--habitat-scene", $HabitatScene)
-    # Full resolution — Embree-accelerated raycaster (embreex) handles 256x128 fast
-    $sectionArgs += @("--max-distance", "15")
+    $envArgs += @("--habitat-scene", $HabitatScene)
+    $envArgs += @("--max-distance", "15")
     if (-not [string]::IsNullOrWhiteSpace($HabitatDatasetConfig)) {
-        $sectionArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
+        $envArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
     }
 }
 
@@ -110,47 +230,47 @@ $actorArgs = @(
     "--sub", $ActorSub,
     "--pub", $ActorPub,
     "--mode", "step",
-    "--step-endpoint", $ActorStepEndpoint,
-    "--policy", $ActorPolicy
+    "--step-endpoint", $ActorStepEndpoint
 )
 
-if ($ActorPolicy -eq "learned") {
-    if ([string]::IsNullOrWhiteSpace($ActorPolicyCheckpoint)) {
-        throw "ActorPolicyCheckpoint is required when ActorPolicy=learned"
-    }
+if (-not [string]::IsNullOrWhiteSpace($ActorPolicyCheckpoint)) {
     $actorArgs += @("--policy-checkpoint", $ActorPolicyCheckpoint)
 }
 
-$sectionLogOut = Join-Path $logsDir "section-manager.out.log"
-$sectionLogErr = Join-Path $logsDir "section-manager.err.log"
+$envLogOut = Join-Path $logsDir "environment.out.log"
+$envLogErr = Join-Path $logsDir "environment.err.log"
 $actorLogOut = Join-Path $logsDir "actor.out.log"
 $actorLogErr = Join-Path $logsDir "actor.err.log"
 
-$sectionProc = $null
+$envProc = $null
 $actorProc = $null
 
 try {
-    Write-Host "Starting Section Manager..."
-    $sectionProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $sectionArgs -StdOutFile $sectionLogOut -StdErrFile $sectionLogErr
+    Write-Host "Starting Environment..."
+    $envProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $envArgs -StdOutFile $envLogOut -StdErrFile $envLogErr
     Start-Sleep -Milliseconds 1200
 
     Write-Host "Starting Actor..."
     $actorProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $actorArgs -StdOutFile $actorLogOut -StdErrFile $actorLogErr
     Start-Sleep -Milliseconds 1200
 
-    Write-Host "Launching Auditor dashboard (foreground)..."
-    Write-Host "Dashboard mode: Tab to toggle between AI / manual control"
-    Write-Host "Controls: WASD or arrow keys to move, ESC or Q to quit"
-    Write-Host "Logs:"
-    Write-Host "  $sectionLogOut"
-    Write-Host "  $sectionLogErr"
-    Write-Host "  $actorLogOut"
-    Write-Host "  $actorLogErr"
+    if (-not $NoDashboard) {
+        Write-Host "Launching Auditor dashboard (foreground)..."
+        Write-Host "  Tab = toggle manual/AI | WASD = move | ESC = quit"
+        Write-Host "Logs:"
+        Write-Host "  $envLogOut"
+        Write-Host "  $actorLogOut"
 
-    & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560" $(if (-not [string]::IsNullOrWhiteSpace($HabitatScene)) { "--scene"; $HabitatScene })
+        & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560" --actors $Actors $(if (-not [string]::IsNullOrWhiteSpace($HabitatScene)) { "--scene"; $HabitatScene })
+    }
+    else {
+        Write-Host "Dashboard disabled. Processes running in background."
+        Write-Host "  Env PID: $($envProc.Id)  Actor PID: $($actorProc.Id)"
+        Write-Host "  Stop: Get-CimInstance Win32_Process | Where-Object { `$_.CommandLine -like '*navi-*' } | ForEach-Object { Stop-Process -Id `$_.ProcessId -Force }"
+    }
 }
 finally {
-    foreach ($proc in @($actorProc, $sectionProc)) {
+    foreach ($proc in @($actorProc, $envProc)) {
         if ($null -ne $proc) {
             try {
                 if (-not $proc.HasExited) {

@@ -10,7 +10,7 @@ select = [
 ignore = ["S101", "E501", "TC001", "TC002", "TC003", "RUF022", "RUF023"]
 
 [lint.isort]
-known-first-party = ["navi_contracts", "navi_section_manager", "navi_actor", "navi_auditor"]
+known-first-party = ["navi_contracts", "navi_environment", "navi_actor", "navi_auditor"]
 
 [format]
 quote-style = "double"

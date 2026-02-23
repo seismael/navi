@@ -233,7 +233,7 @@ zero-copy message contracts over ZeroMQ. No layer imports another layer's
 package — they are sovereign services communicating exclusively via serialized
 wire messages.
 
-### 5.1. Simulation Layer — `section-manager`
+### 5.1. Simulation Layer — `environment`
 
 Headless mathematical execution. Evaluates the environment and produces
 canonical `DistanceMatrix v2` observations.
@@ -279,9 +279,8 @@ this engine.
 5. **ActorCriticHeads** — Gaussian policy for 4-DOF `[fwd, vert, lat, yaw]` +
    scalar value head.
 
-**Alternative policies:** `ShallowPolicy` (rule-based depth-reactive),
-`LearnedSphericalPolicy` (17 hand-crafted spherical features with linear
-sigmoid/tanh heads). See [ACTOR.md](ACTOR.md) for full detail.
+All runtime modes (smoke test, training, evaluation) use this single cognitive
+pipeline. See [ACTOR.md](ACTOR.md) for full detail.
 
 ### 5.3. Gallery Layer — `auditor`
 
@@ -301,11 +300,26 @@ training loops. Visualization types (RGB frames, camera images) exist only here
 
 ## 6. The "No Stall" Protocol
 
-### 6.1. Current: Synchronous Step-Mode
+### 6.1. Synchronous Batched Step-Mode
 
-The `SectionManagerServer` operates in **step mode** for training:
-`StepRequest` (REQ/REP) → backend `step()` → `StepResult` reply + `DistanceMatrix`
-PUB. This is a synchronous lock-step loop, simple and deterministic.
+The `EnvironmentServer` operates in **step mode** for training.  Each rollout
+tick follows a single-round-trip batched protocol:
+
+1. **Actor** stacks all $N$ actors' observations, runs **one** batched forward
+   pass `(N, 2, Az, El)` → `(N, 4)` actions.
+2. **Actor** sends a single `BatchStepRequest` containing $N$ `Action` objects.
+3. **Environment** calls `batch_step()` on the backend, stepping all actors,
+   then replies with a single `BatchStepResult` containing $N$ `StepResult`
+   + $N$ `DistanceMatrix` observations.
+4. **Actor** unpacks per-actor results, processes reward shaping + episodic
+   memory, and appends transitions to per-actor `TrajectoryBuffer`s.
+
+This replaces the former sequential round-robin design where each actor
+required its own REQ/REP round-trip, reducing ZMQ latency from $O(N)$ to
+$O(1)$ per rollout tick.
+
+Single-actor `StepRequest`/`StepResult` is still supported for backward
+compatibility and inference modes.
 
 An **async mode** is also supported for inference: the server subscribes to
 `action_v2`, applies actions continuously, and publishes distance matrices.
@@ -327,7 +341,7 @@ To guarantee that the Actor does not bottleneck the simulation engine:
      zero latency.
 
 > **Status:** Not yet implemented. The current `PpoTrainer` runs synchronous
-> step-mode PPO with a single trajectory buffer.
+> batched step-mode PPO with a single trajectory buffer per actor.
 
 ### 6.3. Execution Topology
 
@@ -367,7 +381,7 @@ types may appear in canonical contracts — ever.
   Topic-prefixed multipart frames: `[topic_bytes, payload_bytes]`.
 - **PUB/SUB topics:** `distance_matrix_v2`, `action_v2`, `telemetry_event_v2`.
 - **REQ/REP topics:** `step_request_v2` → `step_result_v2`.
-- **Default ports:** `5559` (section-manager PUB), `5560` (section-manager REP),
+- **Default ports:** `5559` (environment PUB), `5560` (environment REP),
   `5557` (actor PUB).
 
 See [CONTRACTS.md](CONTRACTS.md) for full field-by-field specifications.

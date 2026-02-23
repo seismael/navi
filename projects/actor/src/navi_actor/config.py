@@ -15,9 +15,9 @@ class ActorConfig:
     sub_address: str = "tcp://localhost:5559"
     pub_address: str = "tcp://*:5557"
     mode: str = "async"  # "async" (PUB/SUB) or "step" (REQ/REP)
-    step_endpoint: str = "tcp://localhost:5560"  # Section Manager REP address
+    step_endpoint: str = "tcp://localhost:5560"  # Environment REP address
 
-    # Observation shape (must match section-manager resolution)
+    # Observation shape (must match environment resolution)
     azimuth_bins: int = 256
     elevation_bins: int = 128
 
@@ -61,7 +61,7 @@ class ActorConfig:
     # Reward shaping
     # Note: existential_tax is applied per *decision* step.  With
     # dt=0.02 each step covers 20 ms, so at 50 Hz the per-second
-    # tax equals existential_tax × 50.
+    # tax equals existential_tax x 50.
     collision_penalty: float = 0.0
     existential_tax: float = -0.01
     velocity_weight: float = 0.0  # disabled — speed is not a training signal

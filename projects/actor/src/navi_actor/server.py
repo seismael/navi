@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 import zmq
 
-from navi_actor.policy import ShallowPolicy
 from navi_actor.spherical_features import extract_spherical_features
 from navi_contracts import (
     TOPIC_ACTION,
@@ -79,7 +78,17 @@ class ActorServer:
         if policy is not None:
             self._policy = policy
         else:
-            self._policy = ShallowPolicy(policy_id="brain-v2-shallow")
+            from navi_actor.cognitive_policy import CognitiveMambaPolicy
+
+            self._policy = CognitiveMambaPolicy(
+                embedding_dim=config.embedding_dim,
+                azimuth_bins=config.azimuth_bins,
+                elevation_bins=config.elevation_bins,
+                max_forward=config.max_forward,
+                max_vertical=config.max_vertical,
+                max_lateral=config.max_lateral,
+                max_yaw=config.max_yaw,
+            )
 
         self._stateful = _is_stateful(self._policy)
         self._hidden_state: Any = None  # recurrent hidden state
@@ -172,7 +181,7 @@ class ActorServer:
 
         The step loop is kept as tight as possible:
         1. recv DistanceMatrix (blocks until next observation)
-        2. infer action (policy.act — sub-ms for ShallowPolicy)
+        2. infer action (policy.act)
         3. publish Action on PUB (for dashboard)
         4. send StepRequest on REQ → wait for StepResult on REP
         5. every Nth step, publish decimated telemetry on PUB
@@ -201,7 +210,7 @@ class ActorServer:
                     flags=zmq.NOBLOCK,
                 )
 
-                # ── Step mode: REQ/REP with Section Manager ──────────
+                # ── Step mode: REQ/REP with Environment ──────────
                 if self._config.mode == "step" and self._step_socket is not None:
                     result = self.step(action)
                     # Reset hidden state on episode boundaries

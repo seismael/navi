@@ -41,7 +41,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
     Parameters
     ----------
     matrix_sub
-        ZMQ SUB address for Section-Manager PUB (distance_matrix_v2).
+        ZMQ SUB address for Environment PUB (distance_matrix_v2).
     actor_sub
         ZMQ SUB address for Actor/Trainer PUB (action_v2, telemetry).
     step_endpoint

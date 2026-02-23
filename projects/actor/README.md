@@ -10,7 +10,7 @@ Brain Layer for Ghost-Matrix runtime.
 **The training engine is sacred.** The cognitive pipeline
 (FoveatedEncoder → Mamba2 → EpisodicMemory → ActorCriticHeads → PPO) is never
 modified to accommodate a new data source. External data always connects through
-a `DatasetAdapter` in `section-manager/backends/` that transforms raw
+a `DatasetAdapter` in `environment/backends/` that transforms raw
 observations *to* the engine's canonical `(1, Az, El)` DistanceMatrix format.
 
 ## Cognitive Architecture
@@ -42,7 +42,7 @@ uv run navi-actor run --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step 
 
 ## Online Training (full spherical view)
 
-Run the trainer against a step-mode Section Manager stream:
+Run the trainer against a step-mode Environment stream:
 
 ```bash
 cd projects/actor

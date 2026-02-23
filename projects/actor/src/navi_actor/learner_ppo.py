@@ -5,14 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 from torch import Tensor
 
 if TYPE_CHECKING:
     from navi_actor.cognitive_policy import CognitiveMambaPolicy
     from navi_actor.rnd import RNDModule
-    from navi_actor.rollout_buffer import RolloutBuffer, TrajectoryBuffer
+    from navi_actor.rollout_buffer import TrajectoryBuffer
 
 __all__: list[str] = ["PpoLearner", "PpoMetrics", "compute_vtrace"]
 
@@ -92,19 +91,14 @@ class PpoMetrics:
 
 
 class PpoLearner:
-    """PPO learner with clipped surrogate, value clipping, and entropy bonus.
-
-    Supports both:
-    - Legacy mode: ``train_epoch(RolloutBuffer)`` → simple reward metrics
-    - Full PPO mode: ``train_ppo_epoch(policy, buffer)`` → PpoMetrics
-    """
+    """PPO learner with clipped surrogate, value clipping, and entropy bonus."""
 
     def __init__(
         self,
         gamma: float = 0.99,
         clip_ratio: float = 0.2,
         entropy_coeff: float = 0.01,
-        value_coeff: float = 0.5,
+        value_coeff: float = 0.005,
         max_grad_norm: float = 0.5,
         learning_rate: float = 3e-4,
         rnd_learning_rate: float = 3e-5,
@@ -156,25 +150,6 @@ class PpoLearner:
                 rnd.predictor.parameters(), lr=self._rnd_learning_rate
             )
         return self._rnd_optimizer
-
-    def discounted_return(self, rewards: np.ndarray) -> float:
-        """Compute scalar discounted return for one reward vector."""
-        running = 0.0
-        for reward in rewards[::-1]:
-            running = float(reward) + self._gamma * running
-        return running
-
-    def train_epoch(self, buffer: RolloutBuffer) -> dict[str, float]:
-        """Compute basic epoch metrics from buffered transitions (legacy)."""
-        rewards = buffer.rewards()
-        if rewards.size == 0:
-            return {"episodes": 0.0, "reward_mean": 0.0, "discounted_return": 0.0}
-
-        return {
-            "episodes": float(rewards.size),
-            "reward_mean": float(rewards.mean()),
-            "discounted_return": self.discounted_return(rewards),
-        }
 
     def train_ppo_epoch(
         self,

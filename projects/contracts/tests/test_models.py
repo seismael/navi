@@ -6,6 +6,8 @@ import numpy as np
 
 from navi_contracts import (
     Action,
+    BatchStepRequest,
+    BatchStepResult,
     DistanceMatrix,
     RobotPose,
     StepRequest,
@@ -173,4 +175,75 @@ class TestTelemetryEvent:
         np.testing.assert_array_equal(restored.payload, event.payload)
 
 
+def _make_obs(actor_id: int) -> DistanceMatrix:
+    """Build a minimal DistanceMatrix for testing."""
+    pose = RobotPose(x=1.0, y=2.0, z=3.0, roll=0.0, pitch=0.0, yaw=0.5, timestamp=1.0)
+    return DistanceMatrix(
+        episode_id=0,
+        env_ids=np.array([actor_id], dtype=np.int32),
+        matrix_shape=(8, 4),
+        depth=np.ones((1, 8, 4), dtype=np.float32) * 0.5,
+        delta_depth=np.zeros((1, 8, 4), dtype=np.float32),
+        semantic=np.zeros((1, 8, 4), dtype=np.int32),
+        valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
+        overhead=np.zeros((16, 16, 3), dtype=np.float32),
+        robot_pose=pose,
+        step_id=10,
+        timestamp=1.0,
+    )
 
+
+def _make_action(actor_id: int) -> Action:
+    """Build a minimal Action for testing."""
+    return Action(
+        env_ids=np.array([actor_id], dtype=np.int32),
+        linear_velocity=np.array([[0.1, 0.0, 0.0]], dtype=np.float32),
+        angular_velocity=np.array([[0.0, 0.0, 0.2]], dtype=np.float32),
+        policy_id="test",
+        step_id=10,
+        timestamp=1.0,
+    )
+
+
+class TestBatchStepRequest:
+    """Tests for the BatchStepRequest model."""
+
+    def test_round_trip_serialization(self) -> None:
+        actions = tuple(_make_action(i) for i in range(3))
+        req = BatchStepRequest(actions=actions, step_id=10, timestamp=1.0)
+        data = serialize(req)
+        restored = deserialize(data)
+        assert isinstance(restored, BatchStepRequest)
+        assert len(restored.actions) == 3
+        assert restored.step_id == 10
+        for i, action in enumerate(restored.actions):
+            assert action.env_ids[0] == i
+            np.testing.assert_array_almost_equal(
+                action.linear_velocity, actions[i].linear_velocity,
+            )
+
+
+class TestBatchStepResult:
+    """Tests for the BatchStepResult model."""
+
+    def test_round_trip_serialization(self) -> None:
+        results = tuple(
+            StepResult(
+                step_id=10, env_id=i, done=i == 1,
+                truncated=False, reward=0.5, episode_return=1.0,
+                timestamp=1.0,
+            )
+            for i in range(3)
+        )
+        observations = tuple(_make_obs(i) for i in range(3))
+        batch = BatchStepResult(results=results, observations=observations)
+        data = serialize(batch)
+        restored = deserialize(data)
+        assert isinstance(restored, BatchStepResult)
+        assert len(restored.results) == 3
+        assert len(restored.observations) == 3
+        assert restored.results[1].done is True
+        assert restored.results[0].done is False
+        for i, obs in enumerate(restored.observations):
+            assert obs.env_ids[0] == i
+            np.testing.assert_array_almost_equal(obs.depth, observations[i].depth)

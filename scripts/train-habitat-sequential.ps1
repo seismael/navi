@@ -3,7 +3,7 @@
 
   Reads a scene manifest JSON (produced by download-habitat-data.ps1),
   then for each scene:
-    1. Starts a Section Manager with --backend habitat --habitat-scene <scene>
+    1. Starts a Environment with --backend habitat --habitat-scene <scene>
     2. Runs PPO training for a configured number of steps
     3. Saves a checkpoint and resumes on the next scene
 
@@ -110,11 +110,11 @@ if ($ResumeCheckpoint) {
 Write-Host "========================================================"
 Write-Host ""
 
-# ── Helper: kill section-manager and actor ────────────────────────
+# ── Helper: kill environment and actor ────────────────────────
 function Stop-NaviProcesses {
     Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and (
-            $_.CommandLine -like "*navi-section-manager*" -or
+            $_.CommandLine -like "*navi-environment*" -or
             $_.CommandLine -like "*navi-actor*train-ppo*"
         )
     } | ForEach-Object {
@@ -139,8 +139,8 @@ function Stop-NaviProcesses {
     }
 }
 
-# ── Helper: wait for section manager to be ready ──────────────────
-function Wait-SectionManager {
+# ── Helper: wait for Environment to be ready ──────────────────
+function Wait-Environment {
     param([string]$StdOutLog, [string]$StdErrLog = "", [int]$TimeoutSeconds = 60)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
@@ -153,7 +153,7 @@ function Wait-SectionManager {
                 $sr = [IO.StreamReader]::new($fs)
                 $content = $sr.ReadToEnd()
                 $sr.Close(); $fs.Close()
-                if ($content -match "Section Manager starting") {
+                if ($content -match "Environment starting") {
                     return $true
                 }
             }
@@ -224,13 +224,13 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
     # Kill any lingering processes
     Stop-NaviProcesses
 
-    # ── Start Section Manager ──
-    $smOutLog = Join-Path $LogDir "sm_${sceneLabel}.out.log"
-    $smErrLog = Join-Path $LogDir "sm_${sceneLabel}.err.log"
-    $sectionArgs = @(
+    # ── Start Environment ──
+    $envOutLog = Join-Path $LogDir "env_${sceneLabel}.out.log"
+    $envErrLog = Join-Path $LogDir "env_${sceneLabel}.err.log"
+    $envArgs = @(
         "run",
-        "--project", (Join-Path $repoRoot "projects\section-manager"),
-        "navi-section-manager", "serve",
+        "--project", (Join-Path $repoRoot "projects\environment"),
+        "navi-environment", "serve",
         "--mode", "step",
         "--pub", "tcp://*:5559",
         "--rep", "tcp://*:5560",
@@ -238,22 +238,22 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
         "--habitat-scene", $scenePath
     )
 
-    Write-Host "  Starting Section Manager ($Backend)..."
-    $smProc = Start-Process -FilePath "uv" -ArgumentList $sectionArgs `
+    Write-Host "  Starting Environment ($Backend)..."
+    $envProc = Start-Process -FilePath "uv" -ArgumentList $envArgs `
         -WorkingDirectory $repoRoot `
-        -RedirectStandardOutput $smOutLog `
-        -RedirectStandardError $smErrLog `
+        -RedirectStandardOutput $envOutLog `
+        -RedirectStandardError $envErrLog `
         -PassThru
 
-    $ready = Wait-SectionManager -StdOutLog $smOutLog -StdErrLog $smErrLog -TimeoutSeconds 60
+    $ready = Wait-Environment -StdOutLog $envOutLog -StdErrLog $envErrLog -TimeoutSeconds 60
     if (-not $ready) {
-        Write-Host "  [ERROR] Section Manager failed to start. Check $smErrLog" -ForegroundColor Red
-        if ($null -ne $smProc -and -not $smProc.HasExited) {
-            Stop-Process -Id $smProc.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "  [ERROR] Environment failed to start. Check $envErrLog" -ForegroundColor Red
+        if ($null -ne $envProc -and -not $envProc.HasExited) {
+            Stop-Process -Id $envProc.Id -Force -ErrorAction SilentlyContinue
         }
         continue
     }
-    Write-Host "  Section Manager ready."
+    Write-Host "  Environment ready."
 
     # ── Start PPO Training ──
     $actorOutLog = Join-Path $LogDir "actor_${sceneLabel}.out.log"
@@ -316,9 +316,9 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
         Write-Host "  [WARN] No checkpoint found after training." -ForegroundColor Yellow
     }
 
-    # Shut down section manager for this scene
-    if ($null -ne $smProc -and -not $smProc.HasExited) {
-        Stop-Process -Id $smProc.Id -Force -ErrorAction SilentlyContinue
+    # Shut down Environment for this scene
+    if ($null -ne $envProc -and -not $envProc.HasExited) {
+        Stop-Process -Id $envProc.Id -Force -ErrorAction SilentlyContinue
     }
 
     $globalSteps += $stepsThisScene
