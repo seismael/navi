@@ -39,6 +39,11 @@ class TrajectoryBuffer:
     Stores a contiguous rollout of PPOTransitions and provides:
     - GAE(λ) advantage/return computation
     - Minibatch sampling with optional sequential (BPTT) chunks
+
+    Tensor data is cached lazily on the first call to
+    :meth:`sample_minibatches` and reused across subsequent PPO
+    epochs.  The cache is invalidated automatically on mutation
+    (``append``, ``clear``, ``extend_from``).
     """
 
     def __init__(self, gamma: float = 0.99, gae_lambda: float = 0.95) -> None:
@@ -49,10 +54,21 @@ class TrajectoryBuffer:
         self._returns: Tensor = torch.zeros(0)
         self._finalized: bool = False
 
+        # ── Tensor cache (eliminates repeated torch.stack) ──
+        self._t_obs: Tensor | None = None
+        self._t_actions: Tensor | None = None
+        self._t_log_probs: Tensor | None = None
+        self._t_values: Tensor | None = None
+        self._t_dones: Tensor | None = None
+        self._t_cached: bool = False
+
+    # ── Mutation (invalidates cache) ─────────────────────────────
+
     def append(self, transition: PPOTransition) -> None:
         """Append one transition. Resets finalized state."""
         self._transitions.append(transition)
         self._finalized = False
+        self._t_cached = False
 
     def clear(self) -> None:
         """Clear all buffered data."""
@@ -60,9 +76,75 @@ class TrajectoryBuffer:
         self._advantages = torch.zeros(0)
         self._returns = torch.zeros(0)
         self._finalized = False
+        self._t_cached = False
+        self._t_obs = None
+        self._t_actions = None
+        self._t_log_probs = None
+        self._t_values = None
+        self._t_dones = None
+
+    def extend_from(self, other: TrajectoryBuffer) -> None:
+        """Append all transitions from *other*, inserting a done boundary.
+
+        Marks the last transition of ``self`` as ``done=True`` so that
+        BPTT chunks never straddle two different actors' trajectories.
+        Also concatenates pre-computed advantages and returns.
+        """
+        if len(other) == 0:
+            return
+
+        # Insert synthetic done boundary
+        if len(self._transitions) > 0:
+            tail = self._transitions[-1]
+            if not tail.done:
+                self._transitions[-1] = PPOTransition(
+                    observation=tail.observation,
+                    action=tail.action,
+                    log_prob=tail.log_prob,
+                    value=tail.value,
+                    reward=tail.reward,
+                    done=True,
+                    truncated=tail.truncated,
+                    hidden_state=tail.hidden_state,
+                )
+
+        self._transitions.extend(other._transitions)
+        self._advantages = torch.cat([self._advantages, other._advantages])
+        self._returns = torch.cat([self._returns, other._returns])
+        self._t_cached = False
 
     def __len__(self) -> int:
         return len(self._transitions)
+
+    # ── Tensor cache ─────────────────────────────────────────────
+
+    def _build_tensor_cache(self) -> None:
+        """Build flat tensors from transition list (once per PPO update).
+
+        Called lazily from :meth:`sample_minibatches`.  Reused across
+        all PPO epochs without redundant ``torch.stack`` calls.
+        """
+        if self._t_cached:
+            return
+        n = len(self._transitions)
+        if n == 0:
+            return
+        self._t_obs = torch.stack(
+            [tr.observation for tr in self._transitions],
+        )
+        self._t_actions = torch.stack(
+            [tr.action for tr in self._transitions],
+        )
+        self._t_log_probs = torch.tensor(
+            [tr.log_prob for tr in self._transitions], dtype=torch.float32,
+        )
+        self._t_values = torch.tensor(
+            [tr.value for tr in self._transitions], dtype=torch.float32,
+        )
+        self._t_dones = torch.tensor(
+            [tr.done for tr in self._transitions], dtype=torch.bool,
+        )
+        self._t_cached = True
 
     def compute_returns_and_advantages(
         self,
@@ -151,18 +233,19 @@ class TrajectoryBuffer:
         if n == 0:
             return
 
-        # Build flat tensors
-        obs = torch.stack([tr.observation for tr in self._transitions])
-        acts = torch.stack([tr.action for tr in self._transitions])
-        old_lp = torch.tensor(
-            [tr.log_prob for tr in self._transitions], dtype=torch.float32
-        )
-        old_v = torch.tensor(
-            [tr.value for tr in self._transitions], dtype=torch.float32
-        )
-        dones_flat = torch.tensor(
-            [tr.done for tr in self._transitions], dtype=torch.bool
-        )
+        # Build / reuse tensor cache (no repeated torch.stack)
+        self._build_tensor_cache()
+        assert self._t_obs is not None
+        assert self._t_actions is not None
+        assert self._t_log_probs is not None
+        assert self._t_values is not None
+        assert self._t_dones is not None
+
+        obs = self._t_obs
+        acts = self._t_actions
+        old_lp = self._t_log_probs
+        old_v = self._t_values
+        dones_flat = self._t_dones
         advs = self._advantages
         rets = self._returns
 

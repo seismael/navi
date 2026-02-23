@@ -340,8 +340,12 @@ To guarantee that the Actor does not bottleneck the simulation engine:
      continues stepping environments using the latest policy weights —
      zero latency.
 
-> **Status:** Not yet implemented. The current `PpoTrainer` runs synchronous
-> batched step-mode PPO with a single trajectory buffer per actor.
+> **Status:** Implemented. `PpoTrainer` uses dual `TrajectoryBuffer` sets
+> (A/B) with an `_optimisation_worker` background thread. At rollout
+> boundaries the simulation thread swaps the active buffer pointer and
+> signals the optimisation thread — zero latency. Weight updates are
+> guarded by `threading.Lock`; PyTorch inference is lock-free.
+> Zero-wait ratio is tracked and logged at the end of each training run.
 
 ### 6.3. Execution Topology
 
@@ -476,11 +480,12 @@ Migration from CPU-based `faiss.IndexFlatIP` to `faiss.StandardGpuResources`,
 residing 100% in GPU VRAM. This eliminates PCIe bus latency stalls during
 rollout by keeping all KNN lookups on-device.
 
-### 8.6. Asynchronous Double-Buffered Training
+### 8.6. ~~Asynchronous Double-Buffered Training~~ (Implemented)
 
-Full implementation of the dual-`TrajectoryBuffer` pointer-swapping protocol
-described in §6.2, enabling true zero-wait optimization where the backward pass
-never stalls the simulation engine.
+> Implemented in `PpoTrainer._optimisation_worker()`. See §6.2 for details.
+> The dual-`TrajectoryBuffer` pointer-swapping protocol enables true
+> zero-wait optimization where the backward pass never stalls the
+> simulation engine.
 
 ---
 

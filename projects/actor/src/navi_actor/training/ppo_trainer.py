@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,7 @@ class PpoTrainingMetrics:
     intrinsic_reward_mean: float
     loop_detections: int
     beta_final: float
+    zero_wait_ratio: float = 0.0
 
 
 class PpoTrainer:
@@ -123,17 +126,55 @@ class PpoTrainer:
             learning_rate=config.learning_rate,
         )
 
-        # Per-actor trajectory buffers
-        self._buffers: dict[int, TrajectoryBuffer] = {
+        # Per-actor trajectory buffers — dual sets for async double-buffering.
+        # The simulation thread writes into ``_active_buffers`` while the
+        # optimisation thread processes the filled set.  Pointer swap
+        # happens at rollout boundaries.
+        self._buffers_a: dict[int, TrajectoryBuffer] = {
             i: TrajectoryBuffer(
                 gamma=config.gamma,
                 gae_lambda=config.gae_lambda,
             )
             for i in range(self._n_actors)
         }
+        self._buffers_b: dict[int, TrajectoryBuffer] = {
+            i: TrajectoryBuffer(
+                gamma=config.gamma,
+                gae_lambda=config.gae_lambda,
+            )
+            for i in range(self._n_actors)
+        }
+        # Active buffer set pointer (sim thread writes here)
+        self._buffers: dict[int, TrajectoryBuffer] = self._buffers_a
+
+        # ── Async double-buffering state ──
+        self._opt_event = threading.Event()     # signal opt thread to run
+        self._opt_done = threading.Event()      # opt thread signals completion
+        self._opt_done.set()                    # initially "done" (no pending work)
+        self._opt_lock = threading.Lock()       # guards weight updates
+        self._opt_thread: threading.Thread | None = None
+        self._opt_stop = threading.Event()      # signal opt thread to exit
+        # Filled buffer set waiting for optimisation
+        self._opt_buffers: dict[int, TrajectoryBuffer] | None = None
+        self._opt_obs: dict[int, DistanceMatrix] | None = None
+        self._opt_hiddens: dict[int, torch.Tensor | None] | None = None
+        # Zero-wait metric counters
+        self._sim_steps_during_opt: int = 0
+        self._total_sim_steps: int = 0
+
+        # Shared reference for opt thread to write metrics back
+        self._last_opt_metrics: PpoMetrics | None = None
 
         # Pending observations received for the wrong actor (Fix 1)
         self._pending_obs: dict[int, DistanceMatrix] = {}
+
+        # Thread pool for parallel episodic memory queries (FAISS
+        # releases the GIL so threads achieve true concurrency).
+        self._mem_pool: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=self._n_actors)
+            if self._n_actors > 1
+            else None
+        )
 
     def start(self) -> None:
         """Open ZMQ sockets for training."""
@@ -536,6 +577,115 @@ class PpoTrainer:
             return None
         return batched[:, actor_id : actor_id + 1, :].clone()
 
+    # ── Async optimisation thread ────────────────────────────────
+
+    def _optimisation_worker(
+        self,
+        ppo_epochs: int,
+        minibatch_size: int,
+        seq_len: int,
+        step_ref: list[int],
+        reward_ema_ref: list[float],
+    ) -> None:
+        """Background thread: runs PPO updates on filled buffers.
+
+        Waits for ``_opt_event``, processes the filled buffer set,
+        then signals ``_opt_done``.  The simulation thread continues
+        stepping into the alternate buffer set with zero latency.
+
+        Weight updates are guarded by ``_opt_lock`` to prevent tearing
+        during the brief ``optimizer.step()`` window.  PyTorch inference
+        (``torch.no_grad()`` forward) is thread-safe and needs no lock.
+        """
+        while not self._opt_stop.is_set():
+            # Wait for sim thread to signal a filled buffer
+            self._opt_event.wait(timeout=0.5)
+            if self._opt_stop.is_set():
+                break
+            if not self._opt_event.is_set():
+                continue
+            self._opt_event.clear()
+
+            buffers = self._opt_buffers
+            obs_per_actor = self._opt_obs
+            hiddens = self._opt_hiddens
+            if buffers is None or obs_per_actor is None or hiddens is None:
+                self._opt_done.set()
+                continue
+
+            n = self._n_actors
+
+            try:
+                # ── Bootstrap values (batched) ──
+                self._policy.eval()
+                active_ids = [
+                    aid for aid in range(n) if len(buffers[aid]) > 0
+                ]
+                if active_ids:
+                    with torch.no_grad():
+                        boot_obs = torch.stack([
+                            self._obs_to_tensor(obs_per_actor[aid])
+                            for aid in active_ids
+                        ]).to(self._device)
+                        boot_hiddens = self._stack_hiddens(
+                            {i: hiddens[active_ids[i]]
+                             for i in range(len(active_ids))},
+                            len(active_ids),
+                        )
+                        _, _, boot_vals, _, _ = self._policy.forward(
+                            boot_obs, boot_hiddens,
+                        )
+                    for k, aid in enumerate(active_ids):
+                        buffers[aid].compute_returns_and_advantages(
+                            last_value=boot_vals[k].item(),
+                        )
+
+                # ── Merge buffers ──
+                merged: TrajectoryBuffer | None = None
+                for actor_id in range(n):
+                    buf = buffers[actor_id]
+                    if len(buf) == 0:
+                        continue
+                    if merged is None:
+                        merged = buf
+                    else:
+                        merged.extend_from(buf)
+
+                # ── PPO update (under lock) ──
+                if merged is not None and len(merged) > 0:
+                    with self._opt_lock:
+                        self._policy.train()
+                        metrics = self._learner.train_ppo_epoch(
+                            self._policy,
+                            merged,
+                            ppo_epochs=ppo_epochs,
+                            minibatch_size=minibatch_size,
+                            seq_len=seq_len,
+                            rnd=self._rnd,
+                        )
+                    self._last_opt_metrics = metrics
+                    _LOGGER.info(
+                        "[PPO update @ step %d] policy_loss=%.4f "
+                        "value_loss=%.4f entropy=%.4f kl=%.4f "
+                        "clip=%.2f rnd=%.4f",
+                        step_ref[0],
+                        metrics.policy_loss,
+                        metrics.value_loss,
+                        metrics.entropy,
+                        metrics.approx_kl,
+                        metrics.clip_fraction,
+                        metrics.rnd_loss,
+                    )
+
+                # Clear the processed buffers
+                for buf in buffers.values():
+                    buf.clear()
+
+            except Exception:
+                _LOGGER.exception("Optimisation thread error")
+            finally:
+                self._opt_done.set()
+
     def train(
         self,
         total_steps: int,
@@ -608,10 +758,27 @@ class PpoTrainer:
         reward_ema = 0.0
         step_id = 0
 
+        # Mutable references for cross-thread communication
+        step_ref: list[int] = [0]
+        reward_ema_ref: list[float] = [0.0]
+
+        # Start async optimisation thread (No-Stall protocol §6.2)
+        self._opt_stop.clear()
+        self._opt_done.set()
+        self._sim_steps_during_opt = 0
+        self._total_sim_steps = 0
+        self._opt_thread = threading.Thread(
+            target=self._optimisation_worker,
+            args=(
+                ppo_epochs, minibatch_size, seq_len,
+                step_ref, reward_ema_ref,
+            ),
+            daemon=True,
+        )
+        self._opt_thread.start()
+
         while step_id < total_steps:
             # ── Collect rollout (batched across all actors) ──
-            for buf in self._buffers.values():
-                buf.clear()
             self._policy.eval()
 
             for _r in range(rollout_length):
@@ -644,7 +811,6 @@ class PpoTrainer:
                 now = time.time()
 
                 actor_actions: list[Action] = []
-                loop_sims: list[float] = []
                 for actor_id in range(n):
                     a = actions_np[actor_id]
                     actor_actions.append(Action(
@@ -661,9 +827,24 @@ class PpoTrainer:
                     ))
                     # Publish action on PUB socket (for auditor)
                     self._publish_action(actor_actions[-1])
-                    # Episodic memory query (CPU-side, per actor)
-                    loop_sim, _, _ = self._memories[actor_id].query(z_np_all[actor_id])
-                    loop_sims.append(loop_sim)
+
+                # Episodic memory queries — threaded (FAISS releases GIL)
+                loop_sims: list[float] = [0.0] * n
+                if n > 1 and self._mem_pool is not None:
+                    def _query_mem(
+                        aid: int,
+                        _z: np.ndarray = z_np_all,
+                        _sims: list[float] = loop_sims,
+                    ) -> None:
+                        sim, _, _ = self._memories[aid].query(_z[aid])
+                        _sims[aid] = sim
+                    list(self._mem_pool.map(_query_mem, range(n)))
+                else:
+                    for actor_id in range(n):
+                        sim, _, _ = self._memories[actor_id].query(
+                            z_np_all[actor_id],
+                        )
+                        loop_sims[actor_id] = sim
 
                 # ── 5. Single batched step request ──
                 batch_result = self._request_batch_step(
@@ -766,6 +947,13 @@ class PpoTrainer:
 
                 # All N actors stepped in this tick
                 step_id += n
+                step_ref[0] = step_id
+                reward_ema_ref[0] = reward_ema
+
+                # Zero-wait tracking (§6.2)
+                self._total_sim_steps += n
+                if not self._opt_done.is_set():
+                    self._sim_steps_during_opt += n
 
                 if log_every > 0 and step_id % log_every < n:
                     _LOGGER.info(
@@ -774,87 +962,71 @@ class PpoTrainer:
                         self._reward_shaper.beta,
                     )
 
-            # ── Bootstrap value for last state (each actor) ──
-            self._policy.eval()
-            for actor_id in range(n):
-                buf = self._buffers[actor_id]
-                if len(buf) == 0:
-                    continue
-                obs = obs_per_actor[actor_id]
-                with torch.no_grad():
-                    last_obs = (
-                        self._obs_to_tensor(obs).unsqueeze(0).to(self._device)
-                    )
-                    _, _, last_val, _, _ = self._policy.forward(
-                        last_obs, hiddens[actor_id],
-                    )
-                    last_value = last_val.item()
-                buf.compute_returns_and_advantages(last_value=last_value)
+            # ── Async buffer hand-off (No-Stall §6.2) ──
+            # Wait for any previous optimisation to complete
+            self._opt_done.wait()
 
-            # ── PPO update — merge all actor buffers ──
-            # Find the first non-empty buffer to use as the base.
-            # Insert a synthetic done boundary at the join so that BPTT
-            # chunks never straddle two different actors' trajectories.
-            merged: TrajectoryBuffer | None = None
-            for actor_id in range(n):
-                buf = self._buffers[actor_id]
-                if len(buf) == 0:
-                    continue
-                if merged is None:
-                    merged = buf
-                else:
-                    # Mark the last transition of the previous actor as
-                    # "done" so the GRU resets across the boundary.
-                    if len(merged) > 0:
-                        tail = merged._transitions[-1]
-                        if not tail.done:
-                            merged._transitions[-1] = PPOTransition(
-                                observation=tail.observation,
-                                action=tail.action,
-                                log_prob=tail.log_prob,
-                                value=tail.value,
-                                reward=tail.reward,
-                                done=True,
-                                truncated=tail.truncated,
-                                hidden_state=tail.hidden_state,
-                            )
-                    merged._transitions.extend(buf._transitions)
-                    merged._advantages = torch.cat(
-                        [merged._advantages, buf._advantages],
-                    )
-                    merged._returns = torch.cat(
-                        [merged._returns, buf._returns],
-                    )
-
-            if merged is not None and len(merged) > 0:
-                last_metrics = self._learner.train_ppo_epoch(
-                    self._policy,
-                    merged,
-                    ppo_epochs=ppo_epochs,
-                    minibatch_size=minibatch_size,
-                    seq_len=seq_len,
-                    rnd=self._rnd,
+            # Publish deferred telemetry from completed optimisation
+            if self._last_opt_metrics is not None:
+                last_metrics = self._last_opt_metrics
+                self._publish_update_telemetry(
+                    step_id, reward_ema, last_metrics,
                 )
 
-                _LOGGER.info(
-                    "[PPO update @ step %d] policy_loss=%.4f value_loss=%.4f "
-                    "entropy=%.4f kl=%.4f clip=%.2f rnd=%.4f",
-                    step_id,
-                    last_metrics.policy_loss,
-                    last_metrics.value_loss,
-                    last_metrics.entropy,
-                    last_metrics.approx_kl,
-                    last_metrics.clip_fraction,
-                    last_metrics.rnd_loss,
-                )
+            # Snapshot observations & hidden states for bootstrap
+            opt_obs = dict(obs_per_actor)
+            opt_hiddens = dict(hiddens)
 
-                self._publish_update_telemetry(step_id, reward_ema, last_metrics)
+            # Swap active buffer pointer
+            filled = self._buffers
+            self._buffers = (
+                self._buffers_b if filled is self._buffers_a
+                else self._buffers_a
+            )
 
-            # ── Checkpoint ──
-            if checkpoint_every > 0 and step_id % checkpoint_every == 0:
-                ckpt_path = Path(checkpoint_dir) / f"policy_step_{step_id}.pt"
-                self.save_training_state(ckpt_path)
-                _LOGGER.info("Checkpoint saved: %s", ckpt_path)
+            # Hand off filled buffers to optimisation thread
+            self._opt_buffers = filled
+            self._opt_obs = opt_obs
+            self._opt_hiddens = opt_hiddens
+            self._opt_done.clear()
+            self._opt_event.set()
+
+            # ── Checkpoint (requires opt to finish) ──
+            if checkpoint_every > 0 and step_id % checkpoint_every < n:
+                self._opt_done.wait()
+                if self._last_opt_metrics is not None:
+                    last_metrics = self._last_opt_metrics
+                with self._opt_lock:
+                    ckpt_path = (
+                        Path(checkpoint_dir) / f"policy_step_{step_id}.pt"
+                    )
+                    self.save_training_state(ckpt_path)
+                    _LOGGER.info("Checkpoint saved: %s", ckpt_path)
+
+        # ── Shutdown optimisation thread ──
+        self._opt_stop.set()
+        self._opt_event.set()
+        if self._opt_thread is not None:
+            self._opt_thread.join(timeout=30.0)
+
+        # Wait for final optimisation to complete
+        self._opt_done.wait()
+        if self._last_opt_metrics is not None:
+            last_metrics = self._last_opt_metrics
+            self._publish_update_telemetry(
+                step_id, reward_ema, last_metrics,
+            )
+
+        # Compute zero-wait ratio
+        zero_wait = (
+            self._sim_steps_during_opt / max(1, self._total_sim_steps)
+        )
+        _LOGGER.info(
+            "Zero-wait ratio: %.1f%% (%d/%d sim steps during opt)",
+            zero_wait * 100,
+            self._sim_steps_during_opt,
+            self._total_sim_steps,
+        )
 
         # ── Final checkpoint (always saved) ──
         final_ckpt = Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt"
@@ -874,4 +1046,5 @@ class PpoTrainer:
             intrinsic_reward_mean=intrinsic_sum / max(1, step_id),
             loop_detections=loop_detections,
             beta_final=self._reward_shaper.beta,
+            zero_wait_ratio=zero_wait,
         )

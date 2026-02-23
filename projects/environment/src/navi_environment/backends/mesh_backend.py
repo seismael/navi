@@ -25,10 +25,10 @@ multiplies by drone speed parameters to get physical velocity.
 Forward speed is **dynamic**: it scales with the minimum depth in
 the front hemisphere of the previous observation.
 
-- ``linear[0]``  × ``drone_max_speed × speed_factor``  → forward m/s
-- ``linear[1]``  × ``drone_climb_rate × speed_factor``  → vertical m/s
-- ``linear[2]``  × ``drone_strafe_speed × speed_factor`` → lateral m/s
-- ``angular[2]`` × ``drone_yaw_rate``                   → yaw rad/s
+- ``linear[0]``  x ``drone_max_speed x speed_factor``  -> forward m/s
+- ``linear[1]``  x ``drone_climb_rate x speed_factor``  -> vertical m/s
+- ``linear[2]``  x ``drone_strafe_speed x speed_factor`` -> lateral m/s
+- ``angular[2]`` x ``drone_yaw_rate``                   -> yaw rad/s
 
 ``speed_factor = clamp(min_front_depth / safe_threshold, 0.05, 1.0)``
 
@@ -37,7 +37,7 @@ automatically slows to 5 % of max.  Yaw is never throttled so the
 drone can always turn to escape.  Changing ``drone_max_speed`` does
 **not** require retraining.
 
-Displacement per tick = velocity × ``physics_dt`` (default 0.02 s = 50 Hz).
+Displacement per tick = velocity x ``physics_dt`` (default 0.02 s = 50 Hz).
 A first-order exponential smoothing filter simulates drone inertia.
 
 Episode management
@@ -61,6 +61,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -189,6 +190,13 @@ class MeshSceneBackend(SimulatorBackend):
 
         # Pre-compute ray directions (scene-independent)
         self._ray_dirs = self._build_ray_directions()
+
+        # Persistent thread pool for parallel actor stepping
+        self._step_pool: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=max(config.n_actors, 1))
+            if config.n_actors > 1
+            else None
+        )
 
         # Load the first scene mesh
         self._mesh: Any = None
@@ -428,7 +436,69 @@ class MeshSceneBackend(SimulatorBackend):
 
     def close(self) -> None:
         """Release resources."""
+        if self._step_pool is not None:
+            self._step_pool.shutdown(wait=False)
+            self._step_pool = None
         self._mesh = None
+
+    # ------------------------------------------------------------------
+    # Batched stepping (parallel raycasting)
+    # ------------------------------------------------------------------
+
+    def batch_step(
+        self,
+        actions: tuple[Action, ...],
+        step_id: int,
+    ) -> tuple[tuple[DistanceMatrix, ...], tuple[StepResult, ...]]:
+        """Step all actors with parallel raycasting.
+
+        Phase 1 — Sequential resets: any actor with ``needs_reset``
+        is reset synchronously because resets may trigger a scene
+        switch that mutates the shared mesh.
+
+        Phase 2 — Parallel stepping: once all resets are done,
+        ``step()`` is thread-safe per actor because trimesh raycasting
+        (the bottleneck) is read-only on the mesh and releases the
+        GIL, while all mutable state is per-actor in ``_ActorState``.
+
+        Falls back to sequential stepping when ``n_actors == 1``.
+        """
+        n = len(actions)
+
+        # Resolve actor IDs
+        actor_ids: list[int] = []
+        for idx, action in enumerate(actions):
+            aid = int(action.env_ids[0]) if len(action.env_ids) > 0 else idx
+            actor_ids.append(aid)
+
+        # Phase 1: Sequential resets (may trigger scene switch)
+        for idx in range(n):
+            a = self._actors[actor_ids[idx]]
+            if a.needs_reset:
+                a.episode_id += 1
+                self.reset(a.episode_id, actor_id=actor_ids[idx])
+
+        # Phase 2: Parallel stepping
+        if n <= 1 or self._step_pool is None:
+            # Single actor — no thread overhead
+            obs, result = self.step(actions[0], step_id, actor_id=actor_ids[0])
+            return (obs,), (result,)
+
+        observations: list[DistanceMatrix | None] = [None] * n
+        results: list[StepResult | None] = [None] * n
+
+        def _step_one(idx: int) -> None:
+            aid = actor_ids[idx]
+            obs, result = self.step(actions[idx], step_id, actor_id=aid)
+            observations[idx] = obs
+            results[idx] = result
+
+        list(self._step_pool.map(_step_one, range(n)))
+
+        return (
+            tuple(o for o in observations if o is not None),
+            tuple(r for r in results if r is not None),
+        )
 
     # ------------------------------------------------------------------
     # Ray directions
@@ -735,7 +805,7 @@ class MeshSceneBackend(SimulatorBackend):
         """Compute a proximity-based speed factor in [MIN, 1.0].
 
         Uses the front hemisphere (±45° azimuth) of the *previous*
-        step’s depth observation.  When obstacles are close the
+        step's depth observation.  When obstacles are close the
         factor approaches ``_MIN_SPEED_FACTOR`` so the drone
         automatically slows.  In open space it returns 1.0.
 

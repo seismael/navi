@@ -54,8 +54,10 @@ class EnvironmentConfig:
     # Multi-actor
     n_actors: int = 1
 
-    # Skip overhead minimap computation (never used by policy)
-    compute_overhead: bool = True
+    # Skip overhead minimap computation (never used by policy).
+    # Disabled by default — the overhead minimap is gallery-only data
+    # that is structurally banned from the training path.
+    compute_overhead: bool = False
 
     # Backend selection — "voxel" (default) or "habitat"
     backend: str = "voxel"

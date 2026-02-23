@@ -136,9 +136,9 @@ class CommandHoldAdapter(Protocol):
 
     The adapter owns:
 
-    * Rate conversion — actor decides at ~10–50 Hz; the adapter
+    * Rate conversion -- actor decides at ~10-50 Hz; the adapter
       re-sends the held command to hardware at the SDK's required
-      rate (often 50–200 Hz).
+      rate (often 50-200 Hz).
     * Safety bounds — clamping, geofence, altitude limits.
     * Smoothing — optional additional low-pass filtering beyond what
       the kinematics layer already provides.

@@ -114,7 +114,15 @@ class TestMeshSceneBackend:
         assert np.any(obs.delta_depth != 0.0)
 
     def test_overhead_minimap_shape(self) -> None:
-        b = _make_backend()
+        cfg = EnvironmentConfig(
+            backend="mesh",
+            habitat_scene=_SCENE_PATH,
+            azimuth_bins=32,
+            elevation_bins=16,
+            max_distance=15.0,
+            compute_overhead=True,
+        )
+        b = MeshSceneBackend(cfg)
         obs = b.reset(0)
         assert obs.overhead is not None
         assert obs.overhead.shape == (256, 256, 3)

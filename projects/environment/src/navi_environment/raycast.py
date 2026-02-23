@@ -26,6 +26,15 @@ class RaycastEngine:
         self._max_distance = max_distance
         self._total = azimuth_bins * elevation_bins
 
+        # Pre-allocated buffers — reset per call instead of re-creating.
+        # Eliminates per-call allocation + GC pressure at O(N x steps).
+        self._depth_buf = np.ones((azimuth_bins, elevation_bins), dtype=np.float32)
+        self._sem_buf = np.zeros((azimuth_bins, elevation_bins), dtype=np.int32)
+        self._valid_buf = np.zeros((azimuth_bins, elevation_bins), dtype=np.bool_)
+        self._depth_flat_buf = np.ones(self._total, dtype=np.float32)
+        self._sem_flat_buf = np.zeros(self._total, dtype=np.int32)
+        self._valid_flat_buf = np.zeros(self._total, dtype=np.bool_)
+
     def project(
         self,
         relative_xyz: NDArray[np.float32],
@@ -33,19 +42,21 @@ class RaycastEngine:
     ) -> tuple[NDArray[np.float32], NDArray[np.int32], NDArray[np.bool_]]:
         """Create depth/semantic/mask planes via vectorized scatter-reduce."""
         az, el = self._az, self._el
-        depth = np.ones((az, el), dtype=np.float32)
-        semantic = np.zeros((az, el), dtype=np.int32)
-        valid_mask = np.zeros((az, el), dtype=np.bool_)
+
+        # Reset pre-allocated buffers
+        self._depth_buf.fill(1.0)
+        self._sem_buf.fill(0)
+        self._valid_buf.fill(False)
 
         if relative_xyz.shape[0] == 0:
-            return depth, semantic, valid_mask
+            return self._depth_buf.copy(), self._sem_buf.copy(), self._valid_buf.copy()
 
         distances: NDArray[np.float32] = np.linalg.norm(
             relative_xyz, axis=1,
         ).astype(np.float32)
         keep = distances > 1e-6
         if not np.any(keep):
-            return depth, semantic, valid_mask
+            return self._depth_buf.copy(), self._sem_buf.copy(), self._valid_buf.copy()
 
         pts = relative_xyz[keep]
         sem = semantic_ids[keep]
@@ -71,22 +82,22 @@ class RaycastEngine:
 
         # --- scatter-reduce: nearest hit per bin (depth) ---
         flat = az_idx * el + el_idx
-        depth_flat = np.ones(self._total, dtype=np.float32)
-        np.minimum.at(depth_flat, flat, normalized)
+        self._depth_flat_buf.fill(1.0)
+        np.minimum.at(self._depth_flat_buf, flat, normalized)
 
         # --- semantic: label of closest voxel per bin ---
-        semantic_flat = np.zeros(self._total, dtype=np.int32)
+        self._sem_flat_buf.fill(0)
         order = np.argsort(normalized)
         rev = order[::-1]
-        semantic_flat[flat[rev]] = sem[rev]
-        semantic_flat[flat[order]] = sem[order]
+        self._sem_flat_buf[flat[rev]] = sem[rev]
+        self._sem_flat_buf[flat[order]] = sem[order]
 
         # --- valid mask: any bin that received a hit ---
-        valid_flat = np.zeros(self._total, dtype=np.bool_)
-        valid_flat[np.unique(flat)] = True
+        self._valid_flat_buf.fill(False)
+        self._valid_flat_buf[np.unique(flat)] = True
 
-        depth = depth_flat.reshape(az, el)
-        semantic = semantic_flat.reshape(az, el)
-        valid_mask = valid_flat.reshape(az, el)
+        np.copyto(self._depth_buf, self._depth_flat_buf.reshape(az, el))
+        np.copyto(self._sem_buf, self._sem_flat_buf.reshape(az, el))
+        np.copyto(self._valid_buf, self._valid_flat_buf.reshape(az, el))
 
-        return depth, semantic, valid_mask
+        return self._depth_buf.copy(), self._sem_buf.copy(), self._valid_buf.copy()
