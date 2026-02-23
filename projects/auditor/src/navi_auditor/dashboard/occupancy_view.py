@@ -5,17 +5,25 @@ producing a SLAM-style top-down view showing obstacles (coloured by
 depth), explored free-space, and unexplored regions.  The drone
 position, heading, and trajectory trail are overlaid.
 
+When a ``scene_path`` is provided the mesh geometry is projected onto
+the XZ ground-plane and rendered as a dim blueprint underlay beneath
+the SLAM overlay.
+
 Works with any environment — no mesh file required.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import deque
+from pathlib import Path
 
 import cv2
 import numpy as np
 
 __all__: list[str] = ["OccupancyMap"]
+
+_log = logging.getLogger(__name__)
 
 # ── Grid defaults ────────────────────────────────────────────────────
 _CELL_M: float = 0.15  # metres per cell
@@ -30,6 +38,11 @@ _DRONE_BGR = (0, 140, 255)  # bright orange
 _HEADING_BGR = (200, 255, 0)  # cyan-green
 _TRAIL_NEW = np.array([220, 220, 40], dtype=np.float32)  # bright cyan
 _TRAIL_OLD = np.array([40, 45, 25], dtype=np.float32)  # dim
+
+# ── Blueprint floor-plan palette (BGR) ───────────────────────────
+_COL_WALL_FILL = np.array([58, 48, 45], dtype=np.uint8)  # dim blue-gray
+_COL_WALL_EDGE: tuple[int, int, int] = (85, 70, 65)  # brighter outline
+_COL_FLOOR_FILL = np.array([28, 22, 20], dtype=np.uint8)  # faint tint
 
 _HUD_FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -46,6 +59,7 @@ class OccupancyMap:
         cell_size: float = _CELL_M,
         grid_extent: float = _EXTENT_M,
         max_distance: float = 15.0,
+        scene_path: str | None = None,
     ) -> None:
         self._cell = cell_size
         self._n = int(grid_extent / cell_size)
@@ -67,6 +81,14 @@ class OccupancyMap:
         self._ox: float = -self._half
         self._oz: float = -self._half
 
+        # ── Blueprint floor-plan layers (static, survive reset) ──────
+        self._wall_grid = np.zeros((self._n, self._n), dtype=np.bool_)
+        self._floor_grid = np.zeros((self._n, self._n), dtype=np.bool_)
+        self._scene_name: str = ""
+
+        if scene_path is not None:
+            self.load_scene(scene_path)
+
     # ── coordinate helpers ───────────────────────────────────────────
 
     def _w2g(
@@ -86,6 +108,98 @@ class OccupancyMap:
     ) -> np.ndarray:
         """Return boolean mask for grid indices that are within bounds."""
         return (gx >= 0) & (gx < self._n) & (gz >= 0) & (gz < self._n)
+
+    # ── scene geometry loading ────────────────────────────────────────
+
+    def load_scene(self, scene_path: str) -> None:
+        """Load a mesh scene and rasterise wall/floor faces onto the grid.
+
+        Uses the same face-normal classification as *MeshSceneBackend*:
+        ``ny > 0.7`` → floor, ``ny < -0.7`` → ceiling, else → wall.
+
+        Parameters
+        ----------
+        scene_path
+            Path to a ``.glb`` / ``.obj`` / ``.stl`` mesh file.
+        """
+        try:
+            import trimesh  # noqa: PLC0415  (conditional import)
+        except ImportError:
+            _log.warning(
+                "trimesh not installed — floor-plan underlay disabled",
+            )
+            return
+
+        try:
+            raw = trimesh.load(scene_path, force="mesh")
+            if isinstance(raw, trimesh.Scene):
+                raw = trimesh.util.concatenate(
+                    list(raw.geometry.values()),
+                )
+            mesh: trimesh.Trimesh = raw  # type: ignore[assignment]
+        except Exception:
+            _log.warning(
+                "Failed to load scene mesh: %s", scene_path, exc_info=True,
+            )
+            return
+
+        verts = np.asarray(mesh.vertices, dtype=np.float64)
+        faces = np.asarray(mesh.faces, dtype=np.int32)
+        normals = np.asarray(mesh.face_normals, dtype=np.float64)
+        ny = normals[:, 1]  # Y-up coordinate system
+
+        # Warn if mesh exceeds grid extent
+        xmin, xmax = float(verts[:, 0].min()), float(verts[:, 0].max())
+        zmin, zmax = float(verts[:, 2].min()), float(verts[:, 2].max())
+        if (
+            xmin < -self._half
+            or xmax > self._half
+            or zmin < -self._half
+            or zmax > self._half
+        ):
+            _log.warning(
+                "Scene mesh bounds (%.1f–%.1f, %.1f–%.1f) exceed grid "
+                "extent ±%.0fm — geometry will be clipped",
+                xmin, xmax, zmin, zmax, self._half,
+            )
+
+        # Classify faces
+        is_floor = ny > 0.7
+        is_wall = ~is_floor & (ny >= -0.7)  # exclude ceilings
+
+        self._wall_grid[:] = False
+        self._floor_grid[:] = False
+
+        self._rasterise_faces(verts, faces[is_floor], self._floor_grid)
+        self._rasterise_faces(verts, faces[is_wall], self._wall_grid)
+
+        self._scene_name = Path(scene_path).stem
+        _log.info(
+            "Floor-plan loaded: %s (%d wall faces, %d floor faces)",
+            self._scene_name,
+            int(is_wall.sum()),
+            int(is_floor.sum()),
+        )
+
+    def _rasterise_faces(
+        self,
+        verts: np.ndarray,
+        faces: np.ndarray,
+        target: np.ndarray,
+    ) -> None:
+        """Project triangle faces to XZ and fill them on *target* grid."""
+        if faces.size == 0:
+            return
+
+        for tri_idx in range(faces.shape[0]):
+            tri = verts[faces[tri_idx]]  # (3, 3)
+            # Project to XZ (cols 0, 2) → grid coords
+            wx = tri[:, 0]
+            wz = tri[:, 2]
+            gx = ((wx - self._ox) / self._cell).astype(np.int32)
+            gz = ((wz - self._oz) / self._cell).astype(np.int32)
+            pts = np.column_stack((gx, gz)).reshape(1, -1, 2)
+            cv2.fillPoly(target.view(np.uint8), pts, 1)  # type: ignore[arg-type]
 
     # ── per-tick grid update ─────────────────────────────────────────
 
@@ -198,6 +312,8 @@ class OccupancyMap:
 
         v_occ = self._occ[gz_lo:gz_hi, gx_lo:gx_hi]
         v_dep = self._depth_m[gz_lo:gz_hi, gx_lo:gx_hi]
+        v_wall = self._wall_grid[gz_lo:gz_hi, gx_lo:gx_hi]
+        v_floor = self._floor_grid[gz_lo:gz_hi, gx_lo:gx_hi]
 
         if v_occ.size == 0:
             return np.full((height, width, 3), 13, dtype=np.uint8)
@@ -206,6 +322,12 @@ class OccupancyMap:
 
         # ── colour grid cells ────────────────────────────────────────
         img = np.tile(_COL_UNEXPLORED, (vh, vw, 1)).copy()
+
+        # Blueprint underlay — visible in unexplored cells
+        unexplored = v_occ == 0
+        img[unexplored & v_floor] = _COL_FLOOR_FILL
+        img[unexplored & v_wall] = _COL_WALL_FILL  # walls over floor
+
         img[v_occ == 1] = _COL_FREE
 
         occ_mask = v_occ == 2
@@ -217,6 +339,17 @@ class OccupancyMap:
 
         # ── resize to output ─────────────────────────────────────────
         out = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)
+
+        # ── blueprint wall-edge overlay (visible even over SLAM) ─────
+        has_blueprint = np.any(v_wall)
+        if has_blueprint:
+            wall_resized = cv2.resize(
+                v_wall.view(np.uint8) * 255,
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            edges = cv2.Canny(wall_resized, 50, 150)
+            out[edges > 0] = _COL_WALL_EDGE
 
         # ── pixel-space conversion helper ────────────────────────────
         sx = width / max(vw, 1)
@@ -273,6 +406,11 @@ class OccupancyMap:
             out, "LIVE MAP", (8, 18),
             _HUD_FONT, 0.45, (180, 180, 180), 1, cv2.LINE_AA,
         )
+        if self._scene_name:
+            cv2.putText(
+                out, self._scene_name, (8, 34),
+                _HUD_FONT, 0.32, (100, 110, 130), 1, cv2.LINE_AA,
+            )
 
         # Explored-area fraction
         total = max(1, int(np.sum(self._occ > 0)))

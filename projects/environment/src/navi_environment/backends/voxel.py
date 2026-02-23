@@ -182,7 +182,9 @@ class VoxelBackend(SimulatorBackend):
             if action.linear_velocity.ndim == 2
             else float(action.linear_velocity[0])
         )
-        speed_factor = self._mjx_env._compute_speed_factor(a.prev_depth)
+        speed_factor = self._mjx_env._compute_speed_factor(
+            a.prev_depth, self._config.max_distance,
+        )
         effective_speed = abs(linear_cmd) * self._mjx_env._speed_fwd * speed_factor
         expected_motion = max(1e-3, effective_speed) * self._mjx_env.dt
         collided = linear_cmd > 0.5 and expected_motion > 1e-6 and proposed_motion / expected_motion < 0.15
@@ -297,17 +299,16 @@ class VoxelBackend(SimulatorBackend):
         if collided:
             reward += _COLLISION_PENALTY
 
-        # 5) Anti-circling
+        # 5) Anti-circling — penalise sustained spinning in place.
+        #    Uses *net* angular displacement (not absolute travel) so
+        #    normal steering micro-corrections don't trigger the penalty.
         a.yaw_history.append(float(new_pose.yaw))
         a.pos_history.append((float(new_pose.x), float(new_pose.z)))
         if len(a.yaw_history) > _CIRCLING_WINDOW:
             a.yaw_history = a.yaw_history[-_CIRCLING_WINDOW:]
             a.pos_history = a.pos_history[-_CIRCLING_WINDOW:]
         if len(a.yaw_history) >= _CIRCLING_WINDOW:
-            yaw_travel = sum(
-                abs(a.yaw_history[i] - a.yaw_history[i - 1])
-                for i in range(1, len(a.yaw_history))
-            )
+            net_yaw = abs(a.yaw_history[-1] - a.yaw_history[0])
             pos_travel = sum(
                 float(np.sqrt(
                     (a.pos_history[i][0] - a.pos_history[i - 1][0]) ** 2
@@ -315,7 +316,7 @@ class VoxelBackend(SimulatorBackend):
                 ))
                 for i in range(1, len(a.pos_history))
             )
-            if yaw_travel > 3.0 and pos_travel < 1.0:
+            if net_yaw > 2.0 * np.pi and pos_travel < 1.0:
                 reward += _CIRCLING_PENALTY
 
         return reward
@@ -368,7 +369,9 @@ class VoxelBackend(SimulatorBackend):
         """Apply a velocity-based action to the current pose."""
         a = self._actors[actor_id]
         stepped_pose = self._mjx_env.step_pose(
-            a.pose, action, timestamp, prev_depth=a.prev_depth,
+            a.pose, action, timestamp,
+            prev_depth=a.prev_depth,
+            max_distance=self._config.max_distance,
         )
         proposed_x = stepped_pose.x
         proposed_y = stepped_pose.y

@@ -158,6 +158,32 @@ class StreamState:
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
 
+    # Performance instrumentation ring buffers
+    perf_sps_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    perf_forward_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    perf_batch_step_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    perf_memory_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    perf_transition_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    perf_tick_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    perf_zero_wait_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    perf_opt_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+
     # Telemetry ring (raw events)
     telemetry_buffer: deque[TelemetryEvent] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
@@ -401,6 +427,16 @@ class StreamEngine:
             # Action published: [fwd, lateral, vertical, yaw]
             state.forward_cmd_history.append(float(p[0]))
             state.yaw_cmd_history.append(float(p[3]))
+
+        elif et == "actor.training.ppo.perf" and len(p) >= 8:
+            state.perf_sps_history.append(float(p[0]))
+            state.perf_forward_ms_history.append(float(p[1]))
+            state.perf_batch_step_ms_history.append(float(p[2]))
+            state.perf_memory_ms_history.append(float(p[3]))
+            state.perf_transition_ms_history.append(float(p[4]))
+            state.perf_tick_ms_history.append(float(p[5]))
+            state.perf_zero_wait_history.append(float(p[6]))
+            state.perf_opt_ms_history.append(float(p[7]))
 
 
 

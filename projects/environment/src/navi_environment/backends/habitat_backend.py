@@ -46,7 +46,8 @@ _CIRCLING_PENALTY: float = -0.5
 _CIRCLING_WINDOW: int = 20
 
 # Dynamic speed scaling constants
-_SAFE_DEPTH_THRESHOLD: float = 0.3
+# Threshold is in **metres** — depth is un-normalised before comparison.
+_SAFE_DEPTH_THRESHOLD: float = 1.5
 _MIN_SPEED_FACTOR: float = 0.05
 
 
@@ -234,8 +235,8 @@ class HabitatBackend(SimulatorBackend):
     # Dynamic speed scaling
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _compute_speed_factor(
+        self,
         prev_depth: NDArray[np.float32] | None,
     ) -> float:
         """Proximity-based speed factor from front hemisphere depth."""
@@ -245,7 +246,9 @@ class HabitatBackend(SimulatorBackend):
         span = max(1, az_bins // 8)
         front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
         min_front = float(np.min(front)) if front.size > 0 else 1.0
-        factor = min_front / _SAFE_DEPTH_THRESHOLD
+        # Un-normalise to physical metres before comparing
+        min_front_metres = min_front * self._max_distance
+        factor = min_front_metres / _SAFE_DEPTH_THRESHOLD
         return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))
 
     # ------------------------------------------------------------------

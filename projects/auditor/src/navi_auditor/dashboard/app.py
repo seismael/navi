@@ -136,8 +136,10 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         view_layout.setContentsMargins(2, 2, 2, 2)
         view_layout.setSpacing(2)
 
-        # Live 2D Occupancy Map
-        self._occ_map = OccupancyMap(max_distance=15.0)
+        # Live 2D Occupancy Map (with optional blueprint floor-plan)
+        self._occ_map = OccupancyMap(
+            max_distance=15.0, scene_path=self._scene_path,
+        )
         self._env_panel = ImagePanel(title="LIVE MAP")
         view_layout.addWidget(self._env_panel, stretch=1)
 
@@ -215,6 +217,26 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             title="Beta (intrinsic coeff)", color="#9b59b6",
         )
 
+        # ── Performance Instrumentation charts ──
+        self._plot_sps = RollingPlot(
+            title="Steps/sec (SPS)", color="#2ecc71",
+        )
+        self._plot_forward_ms = RollingPlot(
+            title="Forward Pass (ms)", color="#e74c3c",
+        )
+        self._plot_batch_step_ms = RollingPlot(
+            title="Batch Step (ms)", color="#3498db",
+        )
+        self._plot_memory_ms = RollingPlot(
+            title="Memory Query (ms)", color="#f39c12",
+        )
+        self._plot_zero_wait = RollingPlot(
+            title="Zero-Wait Ratio", color="#9b59b6",
+        )
+        self._plot_opt_ms = RollingPlot(
+            title="PPO Update (ms)", color="#e67e22",
+        )
+
         # Arrange in 2-column grid — most important charts at top
         # Row 0: headline metrics
         # Row 1-4: PPO training diagnostics
@@ -229,6 +251,9 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             (self._plot_yaw, self._plot_front_depth),
             (self._plot_mean_depth, self._plot_near_fraction),
             (self._plot_intrinsic, self._plot_loop_sim),
+            (self._plot_sps, self._plot_zero_wait),
+            (self._plot_forward_ms, self._plot_batch_step_ms),
+            (self._plot_memory_ms, self._plot_opt_ms),
             (self._plot_beta, self._plot_beta),  # placeholder, handled below
         ]
 
@@ -284,6 +309,15 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             state.ppo_loop_similarity_history,
         )
         self._plot_beta.set_data_from_deque(state.ppo_beta_history)
+        # Performance instrumentation
+        self._plot_sps.set_data_from_deque(state.perf_sps_history)
+        self._plot_forward_ms.set_data_from_deque(state.perf_forward_ms_history)
+        self._plot_batch_step_ms.set_data_from_deque(
+            state.perf_batch_step_ms_history,
+        )
+        self._plot_memory_ms.set_data_from_deque(state.perf_memory_ms_history)
+        self._plot_zero_wait.set_data_from_deque(state.perf_zero_wait_history)
+        self._plot_opt_ms.set_data_from_deque(state.perf_opt_ms_history)
 
     # ── actor tab switching ────────────────────────────────────────────
 
@@ -403,6 +437,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_intrinsic.refresh()
         self._plot_loop_sim.refresh()
         self._plot_beta.refresh()
+        # Performance instrumentation
+        self._plot_sps.refresh()
+        self._plot_forward_ms.refresh()
+        self._plot_batch_step_ms.refresh()
+        self._plot_memory_ms.refresh()
+        self._plot_zero_wait.refresh()
+        self._plot_opt_ms.refresh()
 
     # ── teleop / keyboard control ────────────────────────────────────
 

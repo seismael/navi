@@ -57,6 +57,15 @@ class PpoTrainingMetrics:
     loop_detections: int
     beta_final: float
     zero_wait_ratio: float = 0.0
+    # Performance instrumentation
+    sps_mean: float = 0.0
+    forward_pass_ms_mean: float = 0.0
+    batch_step_ms_mean: float = 0.0
+    memory_query_ms_mean: float = 0.0
+    transition_ms_mean: float = 0.0
+    tick_total_ms_mean: float = 0.0
+    ppo_update_ms_mean: float = 0.0
+    wall_clock_seconds: float = 0.0
 
 
 class PpoTrainer:
@@ -161,6 +170,11 @@ class PpoTrainer:
         # Zero-wait metric counters
         self._sim_steps_during_opt: int = 0
         self._total_sim_steps: int = 0
+
+        # Optimisation thread timing (written by opt thread, read by sim thread)
+        self._last_opt_duration_ms: float = 0.0
+        self._opt_duration_acc: float = 0.0
+        self._opt_duration_count: int = 0
 
         # Shared reference for opt thread to write metrics back
         self._last_opt_metrics: PpoMetrics | None = None
@@ -518,6 +532,47 @@ class PpoTrainer:
             serialize(event),
         ])
 
+    def _publish_perf_telemetry(
+        self,
+        *,
+        step_id: int,
+        sps: float,
+        forward_pass_ms: float,
+        batch_step_ms: float,
+        memory_query_ms: float,
+        transition_ms: float,
+        tick_total_ms: float,
+        zero_wait_ratio: float,
+        ppo_update_ms: float,
+    ) -> None:
+        """Publish per-tick performance telemetry via ZMQ."""
+        if self._pub_socket is None:
+            return
+
+        payload = np.array([
+            sps,               # [0] steps/second
+            forward_pass_ms,   # [1] policy.forward() + RND (ms)
+            batch_step_ms,     # [2] ZMQ batch_step round-trip (ms)
+            memory_query_ms,   # [3] episodic memory queries (ms)
+            transition_ms,     # [4] reward shaping + buffer append (ms)
+            tick_total_ms,     # [5] total tick wall-clock (ms)
+            zero_wait_ratio,   # [6] running zero-wait ratio
+            ppo_update_ms,     # [7] last PPO update duration (ms)
+        ], dtype=np.float32)
+
+        event = TelemetryEvent(
+            event_type="actor.training.ppo.perf",
+            episode_id=0,
+            env_id=0,
+            step_id=step_id,
+            payload=payload,
+            timestamp=time.time(),
+        )
+        self._pub_socket.send_multipart([
+            TOPIC_TELEMETRY_EVENT.encode("utf-8"),
+            serialize(event),
+        ])
+
     def _obs_to_tensor(self, obs: DistanceMatrix) -> torch.Tensor:
         """Convert DistanceMatrix to (2, Az, El) float32 tensor.
 
@@ -616,7 +671,10 @@ class PpoTrainer:
             n = self._n_actors
 
             try:
+                t_opt_start = time.perf_counter()
+
                 # ── Bootstrap values (batched) ──
+                t_boot = time.perf_counter()
                 self._policy.eval()
                 active_ids = [
                     aid for aid in range(n) if len(buffers[aid]) > 0
@@ -639,8 +697,10 @@ class PpoTrainer:
                         buffers[aid].compute_returns_and_advantages(
                             last_value=boot_vals[k].item(),
                         )
+                bootstrap_ms = (time.perf_counter() - t_boot) * 1000
 
                 # ── Merge buffers ──
+                t_merge = time.perf_counter()
                 merged: TrajectoryBuffer | None = None
                 for actor_id in range(n):
                     buf = buffers[actor_id]
@@ -650,8 +710,10 @@ class PpoTrainer:
                         merged = buf
                     else:
                         merged.extend_from(buf)
+                merge_ms = (time.perf_counter() - t_merge) * 1000
 
                 # ── PPO update (under lock) ──
+                t_ppo = time.perf_counter()
                 if merged is not None and len(merged) > 0:
                     with self._opt_lock:
                         self._policy.train()
@@ -664,17 +726,30 @@ class PpoTrainer:
                             rnd=self._rnd,
                         )
                     self._last_opt_metrics = metrics
+                ppo_update_ms = (time.perf_counter() - t_ppo) * 1000
+
+                total_opt_ms = (time.perf_counter() - t_opt_start) * 1000
+                self._last_opt_duration_ms = total_opt_ms
+                self._opt_duration_acc += total_opt_ms
+                self._opt_duration_count += 1
+
+                if merged is not None and self._last_opt_metrics is not None:
                     _LOGGER.info(
                         "[PPO update @ step %d] policy_loss=%.4f "
                         "value_loss=%.4f entropy=%.4f kl=%.4f "
-                        "clip=%.2f rnd=%.4f",
+                        "clip=%.2f rnd=%.4f | boot=%.1fms merge=%.1fms "
+                        "ppo=%.1fms total=%.1fms",
                         step_ref[0],
-                        metrics.policy_loss,
-                        metrics.value_loss,
-                        metrics.entropy,
-                        metrics.approx_kl,
-                        metrics.clip_fraction,
-                        metrics.rnd_loss,
+                        self._last_opt_metrics.policy_loss,
+                        self._last_opt_metrics.value_loss,
+                        self._last_opt_metrics.entropy,
+                        self._last_opt_metrics.approx_kl,
+                        self._last_opt_metrics.clip_fraction,
+                        self._last_opt_metrics.rnd_loss,
+                        bootstrap_ms,
+                        merge_ms,
+                        ppo_update_ms,
+                        total_opt_ms,
                     )
 
                 # Clear the processed buffers
@@ -757,6 +832,7 @@ class PpoTrainer:
 
         reward_ema = 0.0
         step_id = 0
+        last_ckpt_step = -checkpoint_every  # ensure first boundary fires
 
         # Mutable references for cross-thread communication
         step_ref: list[int] = [0]
@@ -777,6 +853,15 @@ class PpoTrainer:
         )
         self._opt_thread.start()
 
+        # ── Performance instrumentation accumulators ──
+        t_train_start = time.perf_counter()
+        acc_forward_ms = 0.0
+        acc_batch_step_ms = 0.0
+        acc_memory_ms = 0.0
+        acc_transition_ms = 0.0
+        acc_tick_ms = 0.0
+        tick_count = 0
+
         while step_id < total_steps:
             # ── Collect rollout (batched across all actors) ──
             self._policy.eval()
@@ -784,6 +869,8 @@ class PpoTrainer:
             for _r in range(rollout_length):
                 if step_id >= total_steps:
                     break
+
+                t_tick = time.perf_counter()
 
                 # ── 1. Stack observations from all actors ──
                 obs_tensors: list[torch.Tensor] = []
@@ -795,6 +882,7 @@ class PpoTrainer:
                 hidden_batch = self._stack_hiddens(hiddens, n)
 
                 # ── 3. Single batched forward pass ──
+                t_fwd = time.perf_counter()
                 with torch.no_grad():
                     actions_t, log_probs_t, values_t, new_hidden_batch, z_t = (
                         self._policy.forward(obs_batch, hidden_batch)
@@ -804,6 +892,7 @@ class PpoTrainer:
 
                     # RND intrinsic rewards for all actors at once
                     intrinsic_rewards = self._rnd.intrinsic_reward(z_t)  # (N,)
+                forward_ms = (time.perf_counter() - t_fwd) * 1000
 
                 # ── 4. Build per-actor Action objects ──
                 actions_np = actions_t.cpu().numpy()  # (N, 4)
@@ -829,6 +918,7 @@ class PpoTrainer:
                     self._publish_action(actor_actions[-1])
 
                 # Episodic memory queries — threaded (FAISS releases GIL)
+                t_mem = time.perf_counter()
                 loop_sims: list[float] = [0.0] * n
                 if n > 1 and self._mem_pool is not None:
                     def _query_mem(
@@ -845,13 +935,17 @@ class PpoTrainer:
                             z_np_all[actor_id],
                         )
                         loop_sims[actor_id] = sim
+                memory_ms = (time.perf_counter() - t_mem) * 1000
 
                 # ── 5. Single batched step request ──
+                t_step = time.perf_counter()
                 batch_result = self._request_batch_step(
                     tuple(actor_actions), step_id,
                 )
+                batch_step_ms = (time.perf_counter() - t_step) * 1000
 
                 # ── 6. Per-actor transition processing ──
+                t_trans = time.perf_counter()
                 for actor_id in range(n):
                     result = batch_result.results[actor_id]
                     next_obs = batch_result.observations[actor_id]
@@ -944,6 +1038,7 @@ class PpoTrainer:
                         )
 
                     obs_per_actor[actor_id] = next_obs
+                transition_ms = (time.perf_counter() - t_trans) * 1000
 
                 # All N actors stepped in this tick
                 step_id += n
@@ -955,11 +1050,44 @@ class PpoTrainer:
                 if not self._opt_done.is_set():
                     self._sim_steps_during_opt += n
 
+                # Tick timing accumulation
+                tick_ms = (time.perf_counter() - t_tick) * 1000
+                acc_forward_ms += forward_ms
+                acc_batch_step_ms += batch_step_ms
+                acc_memory_ms += memory_ms
+                acc_transition_ms += transition_ms
+                acc_tick_ms += tick_ms
+                tick_count += 1
+
                 if log_every > 0 and step_id % log_every < n:
+                    elapsed = time.perf_counter() - t_train_start
+                    sps = step_id / max(0.001, elapsed)
+                    zw = (
+                        self._sim_steps_during_opt
+                        / max(1, self._total_sim_steps)
+                    )
                     _LOGGER.info(
-                        "[step %d] reward_ema=%.4f episodes=%d beta=%.4f",
+                        "[step %d] reward_ema=%.4f episodes=%d beta=%.4f "
+                        "| sps=%.1f zero_wait=%.1f%% fwd=%.1fms "
+                        "step=%.1fms mem=%.1fms tick=%.1fms",
                         step_id, reward_ema, episode_count,
                         self._reward_shaper.beta,
+                        sps, zw * 100,
+                        forward_ms, batch_step_ms,
+                        memory_ms, tick_ms,
+                    )
+
+                    # Publish perf telemetry
+                    self._publish_perf_telemetry(
+                        step_id=step_id,
+                        sps=sps,
+                        forward_pass_ms=forward_ms,
+                        batch_step_ms=batch_step_ms,
+                        memory_query_ms=memory_ms,
+                        transition_ms=transition_ms,
+                        tick_total_ms=tick_ms,
+                        zero_wait_ratio=zw,
+                        ppo_update_ms=self._last_opt_duration_ms,
                     )
 
             # ── Async buffer hand-off (No-Stall §6.2) ──
@@ -992,16 +1120,19 @@ class PpoTrainer:
             self._opt_event.set()
 
             # ── Checkpoint (requires opt to finish) ──
-            if checkpoint_every > 0 and step_id % checkpoint_every < n:
+            # Use elapsed-since-last to avoid alignment issues between
+            # rollout_length*n and checkpoint_every (§6.2).
+            if checkpoint_every > 0 and step_id - last_ckpt_step >= checkpoint_every:
                 self._opt_done.wait()
                 if self._last_opt_metrics is not None:
                     last_metrics = self._last_opt_metrics
                 with self._opt_lock:
                     ckpt_path = (
-                        Path(checkpoint_dir) / f"policy_step_{step_id}.pt"
+                        Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt"
                     )
                     self.save_training_state(ckpt_path)
                     _LOGGER.info("Checkpoint saved: %s", ckpt_path)
+                last_ckpt_step = step_id
 
         # ── Shutdown optimisation thread ──
         self._opt_stop.set()
@@ -1021,11 +1152,68 @@ class PpoTrainer:
         zero_wait = (
             self._sim_steps_during_opt / max(1, self._total_sim_steps)
         )
+        wall_clock = time.perf_counter() - t_train_start
+        mean_sps = step_id / max(0.001, wall_clock)
+        mean_forward_ms = acc_forward_ms / max(1, tick_count)
+        mean_batch_step_ms = acc_batch_step_ms / max(1, tick_count)
+        mean_memory_ms = acc_memory_ms / max(1, tick_count)
+        mean_transition_ms = acc_transition_ms / max(1, tick_count)
+        mean_tick_ms = acc_tick_ms / max(1, tick_count)
+        mean_opt_ms = (
+            self._opt_duration_acc / max(1, self._opt_duration_count)
+        )
+
         _LOGGER.info(
-            "Zero-wait ratio: %.1f%% (%d/%d sim steps during opt)",
+            "══════════════════════════════════════════════════════════"
+        )
+        _LOGGER.info("  TRAINING COMPLETE — Performance Summary")
+        _LOGGER.info(
+            "══════════════════════════════════════════════════════════"
+        )
+        _LOGGER.info(
+            "  Wall clock       : %.1fs (%.1f min)", wall_clock, wall_clock / 60
+        )
+        _LOGGER.info("  Total steps      : %d", step_id)
+        _LOGGER.info("  Episodes         : %d", episode_count)
+        _LOGGER.info("  Mean SPS         : %.1f steps/sec", mean_sps)
+        _LOGGER.info(
+            "  Zero-wait ratio  : %.1f%% (%d/%d sim steps during opt)",
             zero_wait * 100,
             self._sim_steps_during_opt,
             self._total_sim_steps,
+        )
+        _LOGGER.info(
+            "──────────────────────────────────────────────────────────"
+        )
+        _LOGGER.info(
+            "  Per-tick breakdown (mean over %d ticks):", tick_count
+        )
+        _LOGGER.info(
+            "    Forward pass   : %6.2f ms  (budget: <5ms)", mean_forward_ms
+        )
+        _LOGGER.info(
+            "    Batch step     : %6.2f ms", mean_batch_step_ms
+        )
+        _LOGGER.info(
+            "    Memory query   : %6.2f ms", mean_memory_ms
+        )
+        _LOGGER.info(
+            "    Transition     : %6.2f ms", mean_transition_ms
+        )
+        _LOGGER.info(
+            "    Tick total     : %6.2f ms", mean_tick_ms
+        )
+        _LOGGER.info(
+            "──────────────────────────────────────────────────────────"
+        )
+        _LOGGER.info(
+            "  PPO update (mean over %d updates):", self._opt_duration_count
+        )
+        _LOGGER.info(
+            "    Update total   : %6.2f ms", mean_opt_ms
+        )
+        _LOGGER.info(
+            "══════════════════════════════════════════════════════════"
         )
 
         # ── Final checkpoint (always saved) ──
@@ -1047,4 +1235,12 @@ class PpoTrainer:
             loop_detections=loop_detections,
             beta_final=self._reward_shaper.beta,
             zero_wait_ratio=zero_wait,
+            sps_mean=mean_sps,
+            forward_pass_ms_mean=mean_forward_ms,
+            batch_step_ms_mean=mean_batch_step_ms,
+            memory_query_ms_mean=mean_memory_ms,
+            transition_ms_mean=mean_transition_ms,
+            tick_total_ms_mean=mean_tick_ms,
+            ppo_update_ms_mean=mean_opt_ms,
+            wall_clock_seconds=wall_clock,
         )

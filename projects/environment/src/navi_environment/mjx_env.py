@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 __all__: list[str] = ["MjxBackendInfo", "MjxEnvironment"]
 
 # Dynamic speed scaling constants (shared with MeshSceneBackend)
-_SAFE_DEPTH_THRESHOLD: float = 0.3
+# Threshold is in **metres** — depth is un-normalised before comparison.
+_SAFE_DEPTH_THRESHOLD: float = 1.5
 _MIN_SPEED_FACTOR: float = 0.05
 
 
@@ -85,6 +86,7 @@ class MjxEnvironment:
         timestamp: float,
         *,
         prev_depth: NDArray[np.float32] | None = None,
+        max_distance: float = 30.0,
     ) -> RobotPose:
         """Step the robot pose by one simulation tick.
 
@@ -119,7 +121,7 @@ class MjxEnvironment:
         )
 
         # Scale normalised steering → physical velocity
-        speed_factor = self._compute_speed_factor(prev_depth)
+        speed_factor = self._compute_speed_factor(prev_depth, max_distance)
         linear = np.array([
             float(raw_lin[0]) * self._speed_fwd * speed_factor,
             float(raw_lin[1]) * self._speed_vert * speed_factor if len(raw_lin) > 1 else 0.0,
@@ -181,10 +183,17 @@ class MjxEnvironment:
     @staticmethod
     def _compute_speed_factor(
         prev_depth: NDArray[np.float32] | None,
+        max_distance: float = 30.0,
     ) -> float:
         """Proximity-based speed factor from front hemisphere depth.
 
         See ``MeshSceneBackend._compute_speed_factor`` for details.
+
+        Args:
+            prev_depth: (Az, El) normalised depth from the last step,
+                or ``None`` on the first step of an episode.
+            max_distance: Maximum ray distance (meters) used to
+                un-normalise the depth readings.
         """
         if prev_depth is None:
             return _MIN_SPEED_FACTOR
@@ -192,5 +201,7 @@ class MjxEnvironment:
         span = max(1, az_bins // 8)
         front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
         min_front = float(np.min(front)) if front.size > 0 else 1.0
-        factor = min_front / _SAFE_DEPTH_THRESHOLD
+        # Un-normalise to physical metres before comparing
+        min_front_metres = min_front * max_distance
+        factor = min_front_metres / _SAFE_DEPTH_THRESHOLD
         return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))

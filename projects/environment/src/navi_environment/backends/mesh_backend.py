@@ -97,8 +97,9 @@ _MAX_STEPS_PER_EPISODE: int = 50_000
 _STUCK_CONSECUTIVE: int = 8
 
 # ── Drone physics ────────────────────────────────────────────────────
-_HOVER_ALTITUDE: float = 1.5
-_ALTITUDE_SPRING: float = 0.3
+_SPAWN_ALTITUDE: float = 1.5   # height above floor for spawn points (m)
+_MIN_ALTITUDE: float = 0.3     # min clearance above floor (m)
+_MAX_ALTITUDE: float = 15.0    # max height above floor (m)
 _COLLISION_CLEARANCE: float = 0.4
 _NUDGE_DISTANCE: float = 0.6
 
@@ -106,7 +107,8 @@ _NUDGE_DISTANCE: float = 0.6
 # Forward (and lateral/climb) speed scales with proximity to obstacles.
 # The front hemisphere (±45° azimuth) of the previous depth map
 # determines a speed factor in [_MIN_SPEED_FACTOR, 1.0].
-_SAFE_DEPTH_THRESHOLD: float = 0.3   # normalised depth (~9 m at max_distance=30)
+# Threshold is in **metres** — depth is un-normalised before comparison.
+_SAFE_DEPTH_THRESHOLD: float = 1.5   # physical metres
 _MIN_SPEED_FACTOR: float = 0.05      # never below 5 % of max speed
 
 # ── Semantic IDs for mesh faces ──────────────────────────────────────
@@ -219,7 +221,7 @@ class MeshSceneBackend(SimulatorBackend):
                     roll=0.0, pitch=0.0, yaw=yaw_offset,
                     timestamp=0.0,
                 ),
-                floor_y=sy - _HOVER_ALTITUDE,
+                floor_y=sy - _SPAWN_ALTITUDE,
                 spawn_position=sp,
             )
 
@@ -347,7 +349,7 @@ class MeshSceneBackend(SimulatorBackend):
         a.prev_angular = np.zeros(3, dtype=np.float32)
 
         sx, sy, sz = a.spawn_position
-        a.floor_y = sy - _HOVER_ALTITUDE
+        a.floor_y = sy - _SPAWN_ALTITUDE
         a.pose = RobotPose(
             x=sx, y=sy, z=sz,
             roll=0.0, pitch=0.0, yaw=0.0,
@@ -827,7 +829,9 @@ class MeshSceneBackend(SimulatorBackend):
         front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
         min_front_depth = float(np.min(front)) if front.size > 0 else 1.0
 
-        factor = min_front_depth / _SAFE_DEPTH_THRESHOLD
+        # Un-normalise to physical metres before comparing
+        min_front_metres = min_front_depth * self._max_distance
+        factor = min_front_metres / _SAFE_DEPTH_THRESHOLD
         return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))
 
     # ------------------------------------------------------------------
@@ -843,11 +847,11 @@ class MeshSceneBackend(SimulatorBackend):
         a dynamic speed factor from the previous depth observation,
         then scales steering → velocity → displacement.
 
-        Speed factor = clamp(min_front_depth / safe_threshold, 0.05, 1.0).
+        Speed factor = clamp(min_front_metres / safe_threshold, 0.05, 1.0).
         All translational axes (fwd, vert, lat) are scaled; yaw is NOT
         (the drone must always be able to turn to escape).
 
-        Includes altitude-hold spring and collision avoidance.
+        Includes floor/ceiling clamp and collision avoidance.
         """
         a = self._actors[actor_id]
         lin = action.linear_velocity
@@ -876,20 +880,21 @@ class MeshSceneBackend(SimulatorBackend):
         dt = self._dt
         new_yaw = a.pose.yaw + s_yaw * dt
 
-        # Body-to-world rotation (same convention as MjxEnvironment)
+        # Body-to-world rotation — forward is -Z (matches raycaster)
         cos_y = math.cos(a.pose.yaw)
         sin_y = math.sin(a.pose.yaw)
-        world_dx = (s_fwd * cos_y - s_lat * sin_y) * dt
-        world_dz = (s_fwd * sin_y + s_lat * cos_y) * dt
+        world_dx = (s_lat * cos_y + s_fwd * sin_y) * dt
+        world_dz = (-s_fwd * cos_y + s_lat * sin_y) * dt
 
-        # Altitude hold: spring towards hover altitude + command offset
-        target_y = a.floor_y + _HOVER_ALTITUDE + s_vert
-        alt_error = target_y - a.pose.y
-        world_dy = _ALTITUDE_SPRING * alt_error * dt
+        # Vertical velocity integration with floor/ceiling clamp
+        world_dy = s_vert * dt
 
         # Proposed position
         prop_x = a.pose.x + world_dx
-        prop_y = a.pose.y + world_dy
+        prop_y = max(
+            a.floor_y + _MIN_ALTITUDE,
+            min(a.floor_y + _MAX_ALTITUDE, a.pose.y + world_dy),
+        )
         prop_z = a.pose.z + world_dz
 
         # Collision avoidance probe
@@ -931,6 +936,10 @@ class MeshSceneBackend(SimulatorBackend):
         Casts 8 radial probes, finds the direction with the most
         clearance, then applies a small displacement plus a random yaw
         perturbation to break symmetry.
+
+        Non-intersections (void / mesh gaps) are treated as obstacles
+        (distance = 0) to prevent the drone from escaping through
+        openings in the mesh geometry.
         """
         best_dist = 0.0
         best_dx = 0.0
@@ -949,20 +958,31 @@ class MeshSceneBackend(SimulatorBackend):
                 d = (
                     float(np.sqrt(np.sum((locs[0] - origin[0]) ** 2)))
                     if len(locs) > 0
-                    else self._max_distance
+                    else 0.0  # void = obstacle, not safe path
                 )
             except Exception:
-                d = self._max_distance
+                d = 0.0  # failed probe = obstacle
             if d > best_dist:
                 best_dist = d
                 best_dx = ddx
                 best_dz = ddz
 
+        rng = np.random.default_rng()
+        new_yaw = pose.yaw + float(rng.uniform(-math.pi / 2, math.pi / 2))
+
+        # If all probes returned 0 (fully stuck / outside mesh),
+        # only apply the yaw perturbation — do not translate.
+        if best_dist < 1e-6:
+            _log.debug("Nudge escape: all probes blocked, yaw-only nudge")
+            return RobotPose(
+                x=pose.x, y=pose.y, z=pose.z,
+                roll=0.0, pitch=0.0, yaw=new_yaw,
+                timestamp=timestamp,
+            )
+
         nudge = min(_NUDGE_DISTANCE, best_dist * 0.5)
         new_x = pose.x + best_dx * nudge
         new_z = pose.z + best_dz * nudge
-        rng = np.random.default_rng()
-        new_yaw = pose.yaw + float(rng.uniform(-math.pi / 2, math.pi / 2))
 
         _log.debug(
             "Nudge escape: dir=(%.2f, %.2f) clearance=%.2f nudge=%.2f",
@@ -1017,17 +1037,16 @@ class MeshSceneBackend(SimulatorBackend):
         if collided:
             reward += _COLLISION_PENALTY
 
-        # 4) Anti-circling
+        # 4) Anti-circling — penalise sustained spinning in place.
+        #    Uses *net* angular displacement (not absolute travel) so
+        #    normal steering micro-corrections don't trigger the penalty.
         a.yaw_history.append(float(curr.yaw))
         a.pos_history.append((float(curr.x), float(curr.z)))
         if len(a.yaw_history) > _CIRCLING_WINDOW:
             a.yaw_history = a.yaw_history[-_CIRCLING_WINDOW:]
             a.pos_history = a.pos_history[-_CIRCLING_WINDOW:]
         if len(a.yaw_history) >= _CIRCLING_WINDOW:
-            yaw_travel = sum(
-                abs(a.yaw_history[i] - a.yaw_history[i - 1])
-                for i in range(1, len(a.yaw_history))
-            )
+            net_yaw = abs(a.yaw_history[-1] - a.yaw_history[0])
             pos_travel = sum(
                 float(math.sqrt(
                     (a.pos_history[i][0] - a.pos_history[i - 1][0]) ** 2
@@ -1035,7 +1054,7 @@ class MeshSceneBackend(SimulatorBackend):
                 ))
                 for i in range(1, len(a.pos_history))
             )
-            if yaw_travel > 3.0 and pos_travel < 1.0:
+            if net_yaw > 2.0 * math.pi and pos_travel < 1.0:
                 reward += _CIRCLING_PENALTY
 
         # 5) Proximity clear bonus — near obstacles but not colliding
