@@ -55,7 +55,7 @@ def test_gradient_flow() -> None:
     core = _make_core()
     z_seq = torch.randn(2, 4, 128, requires_grad=True)
     out, _ = core.forward(z_seq)
-    out.sum().backward()
+    (out ** 2).sum().backward()
     assert z_seq.grad is not None
     assert z_seq.grad.abs().sum() > 0
 

@@ -56,3 +56,6 @@ projects/*/artifacts/
 *checkpoints*
 *data*
 *artifacts*
+
+# Local Env
+.env

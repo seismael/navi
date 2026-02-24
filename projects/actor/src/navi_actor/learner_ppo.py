@@ -88,6 +88,8 @@ class PpoMetrics:
     clip_fraction: float
     total_loss: float
     rnd_loss: float
+    learning_rate: float
+    rnd_learning_rate: float
 
 
 class PpoLearner:
@@ -113,6 +115,24 @@ class PpoLearner:
         self._optimizer: torch.optim.Adam | None = None
         self._value_optimizer: torch.optim.Adam | None = None
         self._rnd_optimizer: torch.optim.Adam | None = None
+
+    def set_learning_rate(
+        self, lr: float, rnd_lr: float | None = None
+    ) -> None:
+        """Update the learning rate for all optimizers (annealing)."""
+        self._learning_rate = lr
+        if rnd_lr is not None:
+            self._rnd_learning_rate = rnd_lr
+
+        if self._optimizer is not None:
+            for param_group in self._optimizer.param_groups:
+                param_group["lr"] = self._learning_rate
+        if self._value_optimizer is not None:
+            for param_group in self._value_optimizer.param_groups:
+                param_group["lr"] = self._learning_rate
+        if self._rnd_optimizer is not None:
+            for param_group in self._rnd_optimizer.param_groups:
+                param_group["lr"] = self._rnd_learning_rate
 
     def _get_optimizer(self, policy: CognitiveMambaPolicy) -> torch.optim.Adam:
         """Lazily create or return the policy optimizer.
@@ -339,6 +359,8 @@ class PpoLearner:
                 clip_fraction=0.0,
                 total_loss=0.0,
                 rnd_loss=0.0,
+                learning_rate=self._learning_rate,
+                rnd_learning_rate=self._rnd_learning_rate,
             )
 
         return PpoMetrics(
@@ -349,6 +371,8 @@ class PpoLearner:
             clip_fraction=running_clip / n_updates,
             total_loss=running_total / n_updates,
             rnd_loss=running_rnd_loss / n_updates,
+            learning_rate=self._learning_rate,
+            rnd_learning_rate=self._rnd_learning_rate,
         )
 
     def train_offpolicy_batch(
@@ -525,6 +549,8 @@ class PpoLearner:
                 clip_fraction=0.0,
                 total_loss=0.0,
                 rnd_loss=0.0,
+                learning_rate=self._learning_rate,
+                rnd_learning_rate=self._rnd_learning_rate,
             )
 
         return PpoMetrics(
@@ -535,4 +561,6 @@ class PpoLearner:
             clip_fraction=running_clip / n_updates,
             total_loss=running_total / n_updates,
             rnd_loss=running_rnd_loss / n_updates,
+            learning_rate=self._learning_rate,
+            rnd_learning_rate=self._rnd_learning_rate,
         )

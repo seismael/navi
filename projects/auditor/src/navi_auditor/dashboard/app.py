@@ -70,7 +70,8 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self.resize(1920, 1080)
         self.setStyleSheet("QMainWindow { background: #0d0d1a; }")
 
-        self._n_actors = max(1, n_actors)
+        self._n_actors = max(0, n_actors)
+        self._known_actors: list[int] = list(range(self._n_actors)) if n_actors > 0 else []
         self._active_actor: int = 0
 
         # Stream engine
@@ -113,18 +114,21 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Top status bar
         main_layout.addWidget(self._status_bar)
 
-        # Actor tab bar (only visible when n_actors > 1)
-        if self._n_actors > 1:
-            self._actor_tab_bar = QtWidgets.QTabBar()
-            self._actor_tab_bar.setStyleSheet(
-                "QTabBar::tab { background: #1a1a2e; color: #aaa; "
-                "padding: 6px 18px; margin: 1px; border-radius: 4px; } "
-                "QTabBar::tab:selected { background: #2e86de; color: #fff; }"
-            )
-            for i in range(self._n_actors):
-                self._actor_tab_bar.addTab(f"Actor {i}")
-            self._actor_tab_bar.currentChanged.connect(self._on_actor_tab_changed)
-            main_layout.addWidget(self._actor_tab_bar)
+        # Actor tab bar (initially hidden if n_actors <= 1)
+        self._actor_tab_bar = QtWidgets.QTabBar()
+        self._actor_tab_bar.setStyleSheet(
+            "QTabBar::tab { background: #1a1a2e; color: #aaa; "
+            "padding: 6px 18px; margin: 1px; border-radius: 4px; } "
+            "QTabBar::tab:selected { background: #2e86de; color: #fff; }"
+        )
+        for i in self._known_actors:
+            self._actor_tab_bar.addTab(f"Actor {i}")
+        self._actor_tab_bar.currentChanged.connect(self._on_actor_tab_changed)
+
+        if len(self._known_actors) <= 1:
+            self._actor_tab_bar.hide()
+
+        main_layout.addWidget(self._actor_tab_bar)
 
         # Body: splitter with left (spatial views) and right (chart grid)
         body = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -216,6 +220,9 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_beta = RollingPlot(
             title="Beta (intrinsic coeff)", color="#9b59b6",
         )
+        self._plot_lr = RollingPlot(
+            title="Learning Rate", color="#f1c40f",
+        )
 
         # ── Performance Instrumentation charts ──
         self._plot_sps = RollingPlot(
@@ -254,17 +261,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             (self._plot_sps, self._plot_zero_wait),
             (self._plot_forward_ms, self._plot_batch_step_ms),
             (self._plot_memory_ms, self._plot_opt_ms),
-            (self._plot_beta, self._plot_beta),  # placeholder, handled below
+            (self._plot_beta, self._plot_lr),
         ]
 
         chart_h = 110
         for row, (left, right) in enumerate(chart_pairs):
-            if row == len(chart_pairs) - 1:
-                # Last row: beta spans both columns
-                self._plot_beta.setMinimumHeight(chart_h)
-                self._plot_beta.setMaximumHeight(chart_h * 2)
-                chart_grid.addWidget(self._plot_beta, row, 0, 1, 2)
-                break
             left.setMinimumHeight(chart_h)
             left.setMaximumHeight(chart_h * 2)
             right.setMinimumHeight(chart_h)
@@ -282,6 +283,9 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
     def _wire_plots(self) -> None:
         """Connect rolling plots to the active actor's stream state."""
+        if self._active_actor not in self._engine.actor_states:
+            return
+
         state = self._engine.actor_states[self._active_actor]
         self._plot_reward.set_data_from_deque(state.reward_history)
         self._plot_episode_return.set_data_from_deque(state.episode_return_history)
@@ -309,6 +313,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             state.ppo_loop_similarity_history,
         )
         self._plot_beta.set_data_from_deque(state.ppo_beta_history)
+        self._plot_lr.set_data_from_deque(state.ppo_lr_history)
         # Performance instrumentation
         self._plot_sps.set_data_from_deque(state.perf_sps_history)
         self._plot_forward_ms.set_data_from_deque(state.perf_forward_ms_history)
@@ -323,14 +328,43 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
     def _on_actor_tab_changed(self, index: int) -> None:
         """Switch the displayed actor when a tab is clicked."""
-        self._active_actor = max(0, min(index, self._n_actors - 1))
-        self._wire_plots()
+        if 0 <= index < len(self._known_actors):
+            self._active_actor = self._known_actors[index]
+            self._wire_plots()
 
     # ── tick / render loop ───────────────────────────────────────────
 
     def _tick(self) -> None:
         """Called every timer interval — poll ZMQ, update all panels."""
         self._engine.poll()
+
+        # Dynamic actor discovery
+        current_stream_actors = set(self._engine.actor_states.keys())
+        known_set = set(self._known_actors)
+        new_actors = sorted(current_stream_actors - known_set)
+
+        if new_actors:
+            for actor_id in new_actors:
+                self._actor_tab_bar.addTab(f"Actor {actor_id}")
+                self._known_actors.append(actor_id)
+
+            self._n_actors = len(self._known_actors)
+            if self._n_actors > 1:
+                self._actor_tab_bar.show()
+            elif self._n_actors == 1 and not self._known_actors:
+                # First actor arrived
+                pass
+
+        if not self._known_actors:
+            # Waiting for data...
+            self._status_bar.set_mode("WAITING")
+            return
+
+        if self._active_actor not in self._engine.actor_states:
+            # Safe fallback if active actor is somehow invalid
+            self._active_actor = self._known_actors[0] if self._known_actors else 0
+            self._wire_plots()
+
         state = self._engine.actor_states[self._active_actor]
 
         # Determine mode
@@ -348,7 +382,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         if dm is not None:
             self._update_spatial_panels(dm)
-            self._update_status(dm, action)
+            self._update_status(dm, action, state)
 
         self._refresh_plots()
         self._handle_teleop()
@@ -385,11 +419,15 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         add_orientation_guides(viridis_resized)
         self._depth_panel.set_image(viridis_resized)
 
-    def _update_status(self, dm: object, action: object) -> None:
+    def _update_status(
+        self, dm: object, action: object, state: object,
+    ) -> None:
         """Update status bar from latest data."""
+        from navi_auditor.stream_engine import StreamState
         from navi_contracts import Action, DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
+        assert isinstance(state, StreamState)
         p = dm.robot_pose
         self._status_bar.set_step(dm.step_id)
         self._status_bar.set_pose(p.x, p.y, p.z, p.yaw)
@@ -407,7 +445,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         fwd, _left, _right = compute_nav_metrics(fov_depth, fov_valid)
         self._status_bar.set_nearest_obstacle(fwd * VIEW_RANGE_M)
 
-        stale = max(0.0, time.time() - self._engine.state.last_rx_time)
+        stale = max(0.0, time.time() - state.last_rx_time)
         self._status_bar.set_stream_health(stale)
 
         if isinstance(action, Action):
@@ -437,6 +475,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_intrinsic.refresh()
         self._plot_loop_sim.refresh()
         self._plot_beta.refresh()
+        self._plot_lr.refresh()
         # Performance instrumentation
         self._plot_sps.refresh()
         self._plot_forward_ms.refresh()

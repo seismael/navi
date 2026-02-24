@@ -123,7 +123,7 @@ class OccupancyMap:
             Path to a ``.glb`` / ``.obj`` / ``.stl`` mesh file.
         """
         try:
-            import trimesh  # noqa: PLC0415  (conditional import)
+            import trimesh
         except ImportError:
             _log.warning(
                 "trimesh not installed — floor-plan underlay disabled",
@@ -158,7 +158,7 @@ class OccupancyMap:
             or zmax > self._half
         ):
             _log.warning(
-                "Scene mesh bounds (%.1f–%.1f, %.1f–%.1f) exceed grid "
+                "Scene mesh bounds (%.1f-%.1f, %.1f-%.1f) exceed grid "
                 "extent ±%.0fm — geometry will be clipped",
                 xmin, xmax, zmin, zmax, self._half,
             )

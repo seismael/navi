@@ -24,6 +24,7 @@ class ActorConfig:
     # Cognitive architecture
     embedding_dim: int = 128
     learning_rate: float = 3e-4
+    learning_rate_final: float = 3e-5
 
     # PPO hyper-parameters
     gamma: float = 0.99
@@ -53,6 +54,7 @@ class ActorConfig:
 
     # RND curiosity
     rnd_learning_rate: float = 3e-5
+    rnd_learning_rate_final: float = 3e-6
 
     # Episodic memory
     memory_capacity: int = 10_000
@@ -65,7 +67,7 @@ class ActorConfig:
     collision_penalty: float = 0.0
     existential_tax: float = -0.01
     velocity_weight: float = 0.0  # disabled — speed is not a training signal
-    intrinsic_coeff_init: float = 1.0
+    intrinsic_coeff_init: float = 0.2
     intrinsic_coeff_final: float = 0.01
     intrinsic_anneal_steps: int = 500_000
     loop_penalty_coeff: float = 0.5

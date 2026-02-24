@@ -1,0 +1,6 @@
+Mamba2TemporalCore: using GRU fallback (mamba-ssm not found)
+EpisodicMemory: using numpy fallback (faiss not found)
+PPO Trainer started: SUB=tcp://localhost:5559, REQ=tcp://localhost:5560, PUB=tcp://*:5557, device=cpu
+[step 100] reward_ema=0.5865 episodes=0 beta=0.9998 | sps=25.4 zero_wait=0.0% fwd=11.1ms step=29.5ms mem=0.2ms tick=42.7ms
+[step 143] actor 0 episode ended (done=True truncated=False) reward_ema=0.6745 episodes=1
+[step 200] reward_ema=0.9867 episodes=1 beta=0.9996 | sps=22.9 zero_wait=0.0% fwd=10.0ms step=34.0ms mem=0.1ms tick=45.9ms

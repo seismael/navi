@@ -7,7 +7,7 @@ and uses the same .glb format as Habitat's ReplicaCAD scenes.
 
 Usage::
 
-    uv run --project projects/environment python scripts/generate_sample_scene.py
+    uv run --project projects/environment scripts/generate_sample_scene.py
 
 Outputs ``data/scenes/sample_apartment.glb``.
 """

@@ -141,6 +141,12 @@ class _ActorState:
     prev_angular: NDArray[np.float32] = field(
         default_factory=lambda: np.zeros(3, dtype=np.float32),
     )
+    # Pre-allocated raycasting buffers (populated in backend __init__)
+    ray_origins: NDArray[np.float32] | None = None
+    ray_dirs_rotated: NDArray[np.float32] | None = None
+    dist_flat: NDArray[np.float32] | None = None
+    sem_flat: NDArray[np.int32] | None = None
+    valid_flat: NDArray[np.bool_] | None = None
 
 
 class MeshSceneBackend(SimulatorBackend):
@@ -194,6 +200,7 @@ class MeshSceneBackend(SimulatorBackend):
         self._ray_dirs = self._build_ray_directions()
 
         # Persistent thread pool for parallel actor stepping
+        from concurrent.futures import ThreadPoolExecutor
         self._step_pool: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(max_workers=max(config.n_actors, 1))
             if config.n_actors > 1
@@ -210,11 +217,18 @@ class MeshSceneBackend(SimulatorBackend):
 
         # Per-actor state (N actors share the same mesh)
         self._actors: dict[int, _ActorState] = {}
+        n_rays = self._az_bins * self._el_bins
         for i in range(self._n_actors):
             sp = spawns[i % len(spawns)]
             sx, sy, sz = sp
             # Diversify yaw when actors share a spawn
             yaw_offset = (2.0 * math.pi * i) / max(self._n_actors, 1)
+            # Pre-allocate raycasting buffers for this actor
+            ray_origins = np.zeros((n_rays, 3), dtype=np.float32)
+            ray_dirs_rotated = np.zeros((n_rays, 3), dtype=np.float32)
+            dist_flat = np.full(n_rays, self._max_distance, dtype=np.float32)
+            sem_flat = np.zeros(n_rays, dtype=np.int32)
+            valid_flat = np.zeros(n_rays, dtype=np.bool_)
             self._actors[i] = _ActorState(
                 pose=RobotPose(
                     x=sx, y=sy, z=sz,
@@ -223,6 +237,11 @@ class MeshSceneBackend(SimulatorBackend):
                 ),
                 floor_y=sy - _SPAWN_ALTITUDE,
                 spawn_position=sp,
+                ray_origins=ray_origins,
+                ray_dirs_rotated=ray_dirs_rotated,
+                dist_flat=dist_flat,
+                sem_flat=sem_flat,
+                valid_flat=valid_flat,
             )
 
         if self._scene_pool:
@@ -532,6 +551,7 @@ class MeshSceneBackend(SimulatorBackend):
     # Raycasting
     # ------------------------------------------------------------------
 
+
     def _cast_rays(
         self, *, actor_id: int = 0,
     ) -> tuple[NDArray[np.float32], NDArray[np.int32], NDArray[np.bool_]]:
@@ -552,8 +572,14 @@ class MeshSceneBackend(SimulatorBackend):
             [-sin_y, 0, cos_y],
         ], dtype=np.float32)
 
-        dirs_rotated = (rot @ self._ray_dirs.T).T  # (N, 3)
-        origins = np.broadcast_to(pos, dirs_rotated.shape).copy()
+        # Use pre-allocated buffers
+        dirs_rotated = a.ray_dirs_rotated
+        origins = a.ray_origins
+        n_rays = self._az_bins * self._el_bins
+
+        # Update dirs_rotated and origins in-place
+        np.dot(self._ray_dirs, rot.T, out=dirs_rotated)  # (N, 3)
+        origins[:] = pos  # broadcast pos to all origins
 
         # trimesh ray intersection via mesh.ray (uses rtree spatial index)
         try:
@@ -568,10 +594,16 @@ class MeshSceneBackend(SimulatorBackend):
             valid = np.zeros((self._az_bins, self._el_bins), dtype=np.bool_)
             return depth, semantic, valid
 
-        n_rays = self._az_bins * self._el_bins
-        dist_flat = np.full(n_rays, self._max_distance, dtype=np.float32)
-        sem_flat = np.zeros(n_rays, dtype=np.int32)
-        valid_flat = np.zeros(n_rays, dtype=np.bool_)
+        # Use pre-allocated result buffers
+        dist_flat = a.dist_flat
+        sem_flat = a.sem_flat
+        valid_flat = a.valid_flat
+        if dist_flat is not None:
+            dist_flat.fill(self._max_distance)
+        if sem_flat is not None:
+            sem_flat.fill(0)
+        if valid_flat is not None:
+            valid_flat.fill(False)
 
         if len(index_ray) > 0:
             # Compute distances
@@ -586,17 +618,17 @@ class MeshSceneBackend(SimulatorBackend):
 
             # For duplicate rays (shouldn't happen with multiple_hits=False),
             # keep nearest
-            if len(ray_idx) > 0:
+            if len(ray_idx) > 0 and dist_flat is not None and sem_flat is not None and valid_flat is not None:
                 dist_flat[ray_idx] = dists
                 sem_flat[ray_idx] = self._face_semantics[tri_idx]
                 valid_flat[ray_idx] = True
 
         # Normalize depth to [0, 1]
-        depth_norm = np.clip(dist_flat / self._max_distance, 0.0, 1.0)
+        depth_norm = np.clip(dist_flat / self._max_distance, 0.0, 1.0) if dist_flat is not None else np.ones(self._az_bins * self._el_bins, dtype=np.float32)
 
-        depth_2d = depth_norm.reshape(self._az_bins, self._el_bins)
-        semantic_2d = sem_flat.reshape(self._az_bins, self._el_bins)
-        valid_2d = valid_flat.reshape(self._az_bins, self._el_bins)
+        depth_2d = depth_norm.reshape(self._az_bins, self._el_bins) if dist_flat is not None else np.ones((self._az_bins, self._el_bins), dtype=np.float32)
+        semantic_2d = sem_flat.reshape(self._az_bins, self._el_bins) if sem_flat is not None else np.zeros((self._az_bins, self._el_bins), dtype=np.int32)
+        valid_2d = valid_flat.reshape(self._az_bins, self._el_bins) if valid_flat is not None else np.zeros((self._az_bins, self._el_bins), dtype=np.bool_)
 
         return depth_2d, semantic_2d, valid_2d
 
@@ -897,11 +929,11 @@ class MeshSceneBackend(SimulatorBackend):
         )
         prop_z = a.pose.z + world_dz
 
-        # Collision avoidance probe
-        motion_dist = math.sqrt(world_dx * world_dx + world_dz * world_dz)
+        # Collision avoidance probe (full 3D — includes vertical motion)
+        motion_dist = math.sqrt(world_dx * world_dx + world_dy * world_dy + world_dz * world_dz)
         if motion_dist > 0.01:
             direction = np.array(
-                [[world_dx / motion_dist, 0.0, world_dz / motion_dist]],
+                [[world_dx / motion_dist, world_dy / motion_dist, world_dz / motion_dist]],
                 dtype=np.float64,
             )
             origin = np.array(
@@ -920,6 +952,7 @@ class MeshSceneBackend(SimulatorBackend):
                         safe = max(0.0, hit_dist - _COLLISION_CLEARANCE)
                         ratio = safe / max(motion_dist, 1e-6)
                         prop_x = a.pose.x + world_dx * ratio
+                        prop_y = a.pose.y + world_dy * ratio
                         prop_z = a.pose.z + world_dz * ratio
             except Exception:
                 _log.debug("Collision probe failed")
@@ -1047,14 +1080,11 @@ class MeshSceneBackend(SimulatorBackend):
             a.pos_history = a.pos_history[-_CIRCLING_WINDOW:]
         if len(a.yaw_history) >= _CIRCLING_WINDOW:
             net_yaw = abs(a.yaw_history[-1] - a.yaw_history[0])
-            pos_travel = sum(
-                float(math.sqrt(
-                    (a.pos_history[i][0] - a.pos_history[i - 1][0]) ** 2
-                    + (a.pos_history[i][1] - a.pos_history[i - 1][1]) ** 2,
-                ))
-                for i in range(1, len(a.pos_history))
-            )
-            if net_yaw > 2.0 * math.pi and pos_travel < 1.0:
+            net_pos_travel = float(math.sqrt(
+                (a.pos_history[-1][0] - a.pos_history[0][0]) ** 2
+                + (a.pos_history[-1][1] - a.pos_history[0][1]) ** 2,
+            ))
+            if net_yaw > 2.0 * math.pi and net_pos_travel < 1.0:
                 reward += _CIRCLING_PENALTY
 
         # 5) Proximity clear bonus — near obstacles but not colliding

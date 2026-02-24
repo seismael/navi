@@ -30,6 +30,9 @@
   Simulator backend: "habitat" (requires habitat-sim) or "mesh" (uses trimesh+embreex).
   Default: mesh (no habitat-sim dependency).
 
+.PARAMETER NumActors
+  Number of parallel actors to use for data collection. Default: 1.
+
 .PARAMETER LogDir
   Directory for per-scene log files. Default: scripts/logs/habitat
 
@@ -48,6 +51,7 @@ param(
     [string]$CheckpointDir = "",
     [string]$ResumeCheckpoint = "",
     [string]$Backend = "mesh",
+    [int]$NumActors = 1,
     [string]$LogDir = "",
     [int]$SkipScenes = 0
 )
@@ -98,6 +102,7 @@ Write-Host "========================================================"
 Write-Host "  Navi Sequential Habitat Training"
 Write-Host "  Scenes     : $($scenes.Count)"
 Write-Host "  Steps/scene: $StepsPerScene"
+Write-Host "  Actors     : $NumActors"
 Write-Host "  Backend    : $Backend"
 Write-Host "  Checkpoint : $CheckpointDir"
 Write-Host "  Skip       : $SkipScenes scenes"
@@ -235,7 +240,8 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
         "--pub", "tcp://*:5559",
         "--rep", "tcp://*:5560",
         "--backend", $Backend,
-        "--habitat-scene", $scenePath
+        "--habitat-scene", $scenePath,
+        "--actors", "$NumActors"
     )
 
     Write-Host "  Starting Environment ($Backend)..."
@@ -267,6 +273,7 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
         "--sub", "tcp://localhost:5559",
         "--pub", "tcp://*:5557",
         "--step-endpoint", "tcp://localhost:5560",
+        "--actors", "$NumActors",
         "--steps", "$stepsThisScene",
         "--log-every", "100",
         "--checkpoint-every", "0",
@@ -299,8 +306,8 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
     Write-Host "  Training on scene $sceneLabel complete (exit code: $($actorProc.ExitCode))."
 
     # ── Save scene checkpoint ──
-    # The trainer always saves a final checkpoint as policy_step_NNNNNNN.pt
-    $latestCkpt = Get-ChildItem -Path $CheckpointDir -Filter "policy_step_*.pt" -ErrorAction SilentlyContinue |
+    # The trainer always saves a final checkpoint as policy-step-NNNNNNN.pt
+    $latestCkpt = Get-ChildItem -Path $CheckpointDir -Filter "policy-step-*.pt" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
 

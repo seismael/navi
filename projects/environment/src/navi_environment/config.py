@@ -54,6 +54,13 @@ class EnvironmentConfig:
     # Multi-actor
     n_actors: int = 1
 
+    # Training mode flag.  When ``True``, the server enforces the
+    # unthrottled lock-step (REQ/REP) loop: ``mode`` must be ``"step"``,
+    # no artificial delays or sleeps are injected, and all publishing
+    # is non-blocking fire-and-forget.  The simulation runs at maximum
+    # hardware speed.
+    training_mode: bool = False
+
     # Skip overhead minimap computation (never used by policy).
     # Disabled by default — the overhead minimap is gallery-only data
     # that is structurally banned from the training path.

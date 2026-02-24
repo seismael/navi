@@ -53,6 +53,18 @@ class EnvironmentServer:
         config: EnvironmentConfig,
         backend: SimulatorBackend,
     ) -> None:
+        # ── Training-mode invariant ──────────────────────────────────
+        # When training_mode is True, enforce the unthrottled REQ/REP
+        # lock-step loop.  The simulation must never be artificially
+        # delayed; wall-clock time is irrelevant during training.
+        if config.training_mode and config.mode != "step":
+            msg = (
+                "training_mode=True requires mode='step' (REQ/REP). "
+                f"Got mode='{config.mode}'.  Async mode is for "
+                "inference/dashboard only."
+            )
+            raise ValueError(msg)
+
         self._config = config
         self._backend = backend
         self._step_id = 0

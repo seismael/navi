@@ -116,6 +116,7 @@ class HabitatBackend(SimulatorBackend):
         self._yaw_history: list[float] = []
         self._pos_history: list[tuple[float, float]] = []
         self._goal_position: NDArray[np.float32] | None = None
+        self._min_dist_to_goal: float = float("inf")
 
         # PointNav episodes loaded from dataset config (JSON)
         self._episodes: list[dict[str, Any]] = self._load_episodes(config)
@@ -170,6 +171,7 @@ class HabitatBackend(SimulatorBackend):
         self._visited_cells.clear()
         self._yaw_history.clear()
         self._pos_history.clear()
+        self._min_dist_to_goal = float("inf")
         self._adapter.reset()
         self._prev_depth = None
 
@@ -467,35 +469,30 @@ class HabitatBackend(SimulatorBackend):
         ):
             reward += _COLLISION_PENALTY
 
-        # 4) Goal proximity (PointNav)
+        # 4) Goal proximity (PointNav) — only reward *new* closest
+        #    approach to prevent back-and-forth oscillation exploit.
         if self._goal_position is not None:
             robot_pos = np.array([current_pose.x, current_pose.y, current_pose.z])
             dist_to_goal = float(np.linalg.norm(robot_pos - self._goal_position))
-            # Geodesic progress reward (approached goal since last step)
-            prev_pos = np.array([previous_pose.x, previous_pose.y, previous_pose.z])
-            prev_dist = float(np.linalg.norm(prev_pos - self._goal_position))
-            goal_progress = prev_dist - dist_to_goal
-            reward += goal_progress * 2.0
+            if dist_to_goal < self._min_dist_to_goal:
+                goal_progress = self._min_dist_to_goal - dist_to_goal
+                reward += goal_progress * 2.0
+                self._min_dist_to_goal = dist_to_goal
 
-        # 5) Anti-circling
+        # 5) Anti-circling — uses net angular/positional displacement
+        #    (not summed absolute travel) to avoid false positives.
         self._yaw_history.append(float(current_pose.yaw))
         self._pos_history.append((float(current_pose.x), float(current_pose.z)))
         if len(self._yaw_history) > _CIRCLING_WINDOW:
             self._yaw_history = self._yaw_history[-_CIRCLING_WINDOW:]
             self._pos_history = self._pos_history[-_CIRCLING_WINDOW:]
         if len(self._yaw_history) >= _CIRCLING_WINDOW:
-            yaw_travel = sum(
-                abs(self._yaw_history[i] - self._yaw_history[i - 1])
-                for i in range(1, len(self._yaw_history))
-            )
-            pos_travel = sum(
-                float(np.sqrt(
-                    (self._pos_history[i][0] - self._pos_history[i - 1][0]) ** 2
-                    + (self._pos_history[i][1] - self._pos_history[i - 1][1]) ** 2
-                ))
-                for i in range(1, len(self._pos_history))
-            )
-            if yaw_travel > 3.0 and pos_travel < 1.0:
+            net_yaw = abs(self._yaw_history[-1] - self._yaw_history[0])
+            net_pos_travel = float(math.sqrt(
+                (self._pos_history[-1][0] - self._pos_history[0][0]) ** 2
+                + (self._pos_history[-1][1] - self._pos_history[0][1]) ** 2,
+            ))
+            if net_yaw > 2.0 * math.pi and net_pos_travel < 1.0:
                 reward += _CIRCLING_PENALTY
 
         _ = obs

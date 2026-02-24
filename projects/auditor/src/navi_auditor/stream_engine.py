@@ -157,6 +157,12 @@ class StreamState:
     ppo_reward_ema_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
+    ppo_lr_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    ppo_rnd_lr_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
 
     # Performance instrumentation ring buffers
     perf_sps_history: deque[float] = field(
@@ -211,10 +217,12 @@ class StreamEngine:
     ) -> None:
         self._ctx: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._poller = zmq.Poller()
-        self._actor_states: dict[int, StreamState] = {
-            i: StreamState() for i in range(max(1, n_actors))
-        }
-        self.state = self._actor_states[0]  # backward compat
+        self._actor_states: dict[int, StreamState] = {}
+
+        # Pre-populate actor states only if n_actors explicitly requested,
+        # ensuring they exist for the dashboard to find immediately.
+        for i in range(max(1, n_actors)):
+            self._actor_states[i] = StreamState()
 
         # Environment PUB socket
         self._sock_matrix = self._ctx.socket(zmq.SUB)
@@ -239,6 +247,11 @@ class StreamEngine:
             self._sock_step.connect(step_endpoint)
 
         self._step_counter = 0
+
+    @property
+    def state(self) -> StreamState:
+        """Backward compatibility accessor for Actor 0."""
+        return self._resolve_state(0)
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -322,8 +335,10 @@ class StreamEngine:
         return len(self._actor_states)
 
     def _resolve_state(self, actor_id: int) -> StreamState:
-        """Return the StreamState for *actor_id*, falling back to 0."""
-        return self._actor_states.get(actor_id, self._actor_states[0])
+        """Return the StreamState for *actor_id*, creating it if necessary."""
+        if actor_id not in self._actor_states:
+            self._actor_states[actor_id] = StreamState()
+        return self._actor_states[actor_id]
 
     def _dispatch(self, topic: str, msg: object) -> None:
         """Route a deserialized message to the appropriate per-actor state."""
@@ -392,6 +407,9 @@ class StreamEngine:
             state.ppo_clip_fraction_history.append(float(p[5]))
             state.ppo_total_loss_history.append(float(p[6]))
             state.ppo_rnd_loss_history.append(float(p[7]))
+            if len(p) >= 11:
+                state.ppo_lr_history.append(float(p[9]))
+                state.ppo_rnd_lr_history.append(float(p[10]))
 
         elif et == "actor.training.ppo.episode" and len(p) >= 2:
             state.episode_return_history.append(float(p[0]))

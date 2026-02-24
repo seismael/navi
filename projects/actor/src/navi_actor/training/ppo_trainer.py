@@ -487,6 +487,8 @@ class PpoTrainer:
             metrics.total_loss,      # [6] total loss
             metrics.rnd_loss,        # [7] RND distillation loss
             self._reward_shaper.beta,  # [8] current beta
+            self._learner._learning_rate,     # [9] policy LR
+            self._learner._rnd_learning_rate, # [10] RND LR
         ], dtype=np.float32)
 
         event = TelemetryEvent(
@@ -769,26 +771,7 @@ class PpoTrainer:
         checkpoint_every: int = 0,
         checkpoint_dir: str = "checkpoints",
     ) -> PpoTrainingMetrics:
-        """Run PPO training loop with N actors in parallel.
-
-        Each rollout tick performs **one** batched policy forward pass for
-        all actors, sends **one** ``BatchStepRequest``, and receives
-        **one** ``BatchStepResult``.  This replaces the old sequential
-        round-robin loop and cuts ZMQ latency from O(N) to O(1) per tick.
-
-        Per-actor buffers are concatenated for the PPO update so the
-        shared policy learns from every actor's experience.
-
-        Args:
-            total_steps: total environment steps to collect (across all actors).
-            log_every: steps between log messages.
-            checkpoint_every: steps between checkpoints (0 = disabled).
-            checkpoint_dir: directory for checkpoint files.
-
-        Returns:
-            Summary training metrics.
-
-        """
+        """Run PPO training loop with N actors in parallel."""
         if self._sub_socket is None or self._step_socket is None:
             msg = "Sockets not initialised. Call start() first."
             raise RuntimeError(msg)
@@ -806,6 +789,8 @@ class PpoTrainer:
         episode_count = 0
         intrinsic_sum = 0.0
         loop_detections = 0
+
+        # Instantiate fallback metrics if not yet available
         last_metrics = PpoMetrics(
             policy_loss=0.0,
             value_loss=0.0,
@@ -814,6 +799,8 @@ class PpoTrainer:
             clip_fraction=0.0,
             total_loss=0.0,
             rnd_loss=0.0,
+            learning_rate=self._learner._learning_rate,
+            rnd_learning_rate=self._learner._rnd_learning_rate,
         )
 
         # Per-actor state
@@ -887,9 +874,6 @@ class PpoTrainer:
                     actions_t, log_probs_t, values_t, new_hidden_batch, z_t = (
                         self._policy.forward(obs_batch, hidden_batch)
                     )
-                    # actions_t: (N, 4), log_probs_t: (N,), values_t: (N,)
-                    # z_t: (N, D), new_hidden_batch: (1, N, D) or None
-
                     # RND intrinsic rewards for all actors at once
                     intrinsic_rewards = self._rnd.intrinsic_reward(z_t)  # (N,)
                 forward_ms = (time.perf_counter() - t_fwd) * 1000
@@ -946,6 +930,17 @@ class PpoTrainer:
 
                 # ── 6. Per-actor transition processing ──
                 t_trans = time.perf_counter()
+
+                # Update learning rate annealing
+                progress_frac = min(1.0, step_id / max(1, total_steps))
+                curr_lr = self._config.learning_rate + progress_frac * (
+                    self._config.learning_rate_final - self._config.learning_rate
+                )
+                curr_rnd_lr = self._config.rnd_learning_rate + progress_frac * (
+                    self._config.rnd_learning_rate_final - self._config.rnd_learning_rate
+                )
+                self._learner.set_learning_rate(curr_lr, curr_rnd_lr)
+
                 for actor_id in range(n):
                     result = batch_result.results[actor_id]
                     next_obs = batch_result.observations[actor_id]
@@ -1120,8 +1115,6 @@ class PpoTrainer:
             self._opt_event.set()
 
             # ── Checkpoint (requires opt to finish) ──
-            # Use elapsed-since-last to avoid alignment issues between
-            # rollout_length*n and checkpoint_every (§6.2).
             if checkpoint_every > 0 and step_id - last_ckpt_step >= checkpoint_every:
                 self._opt_done.wait()
                 if self._last_opt_metrics is not None:
@@ -1148,7 +1141,7 @@ class PpoTrainer:
                 step_id, reward_ema, last_metrics,
             )
 
-        # Compute zero-wait ratio
+        # Compute summary metrics
         zero_wait = (
             self._sim_steps_during_opt / max(1, self._total_sim_steps)
         )
@@ -1163,64 +1156,10 @@ class PpoTrainer:
             self._opt_duration_acc / max(1, self._opt_duration_count)
         )
 
-        _LOGGER.info(
-            "══════════════════════════════════════════════════════════"
-        )
-        _LOGGER.info("  TRAINING COMPLETE — Performance Summary")
-        _LOGGER.info(
-            "══════════════════════════════════════════════════════════"
-        )
-        _LOGGER.info(
-            "  Wall clock       : %.1fs (%.1f min)", wall_clock, wall_clock / 60
-        )
-        _LOGGER.info("  Total steps      : %d", step_id)
-        _LOGGER.info("  Episodes         : %d", episode_count)
-        _LOGGER.info("  Mean SPS         : %.1f steps/sec", mean_sps)
-        _LOGGER.info(
-            "  Zero-wait ratio  : %.1f%% (%d/%d sim steps during opt)",
-            zero_wait * 100,
-            self._sim_steps_during_opt,
-            self._total_sim_steps,
-        )
-        _LOGGER.info(
-            "──────────────────────────────────────────────────────────"
-        )
-        _LOGGER.info(
-            "  Per-tick breakdown (mean over %d ticks):", tick_count
-        )
-        _LOGGER.info(
-            "    Forward pass   : %6.2f ms  (budget: <5ms)", mean_forward_ms
-        )
-        _LOGGER.info(
-            "    Batch step     : %6.2f ms", mean_batch_step_ms
-        )
-        _LOGGER.info(
-            "    Memory query   : %6.2f ms", mean_memory_ms
-        )
-        _LOGGER.info(
-            "    Transition     : %6.2f ms", mean_transition_ms
-        )
-        _LOGGER.info(
-            "    Tick total     : %6.2f ms", mean_tick_ms
-        )
-        _LOGGER.info(
-            "──────────────────────────────────────────────────────────"
-        )
-        _LOGGER.info(
-            "  PPO update (mean over %d updates):", self._opt_duration_count
-        )
-        _LOGGER.info(
-            "    Update total   : %6.2f ms", mean_opt_ms
-        )
-        _LOGGER.info(
-            "══════════════════════════════════════════════════════════"
-        )
-
         # ── Final checkpoint (always saved) ──
         final_ckpt = Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt"
         final_ckpt.parent.mkdir(parents=True, exist_ok=True)
         self.save_training_state(final_ckpt)
-        _LOGGER.info("Final checkpoint saved: %s", final_ckpt)
 
         return PpoTrainingMetrics(
             total_steps=step_id,

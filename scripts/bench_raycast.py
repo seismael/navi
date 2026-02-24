@@ -1,4 +1,8 @@
-"""Quick benchmark: measure raycast + step time at current resolution."""
+"""Quick benchmark: measure raycast + step time at current resolution.
+
+Usage:
+    uv run --project projects/environment scripts/bench_raycast.py
+"""
 from __future__ import annotations
 
 import time
