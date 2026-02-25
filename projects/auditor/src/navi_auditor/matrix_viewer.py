@@ -19,7 +19,6 @@ class MatrixViewer:
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
         scene_path: str | None = None,
-        n_actors: int = 1,
     ) -> None:
         self._matrix_sub = matrix_sub
         self._actor_sub = actor_sub
@@ -28,7 +27,6 @@ class MatrixViewer:
         self._linear_speed = linear_speed
         self._yaw_rate = yaw_rate
         self._scene_path = scene_path
-        self._n_actors = n_actors
 
     def run(self) -> None:
         """Launch the PyQtGraph RL Dashboard."""
@@ -40,5 +38,4 @@ class MatrixViewer:
             linear_speed=self._linear_speed,
             yaw_rate=self._yaw_rate,
             scene_path=self._scene_path,
-            n_actors=self._n_actors,
         )

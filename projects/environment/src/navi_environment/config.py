@@ -2,22 +2,53 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__: list[str] = ["EnvironmentConfig"]
 
+def find_root_env() -> Path:
+    """Search upwards for the root .env file."""
+    try:
+        curr = Path(__file__).resolve().parent
+        for _ in range(6):
+            target = curr / ".env"
+            if target.exists():
+                return target
+            curr = curr.parent
+    except Exception:  # noqa: S110
+        pass
+    return Path(".env") # fallback
 
-@dataclass(frozen=True)
-class EnvironmentConfig:
-    """Environment service configuration, loadable from TOML."""
+class EnvironmentConfig(BaseSettings):
+    """Environment service configuration, loadable from environment or .env."""
 
-    pub_address: str = "tcp://*:5559"
-    rep_address: str = "tcp://*:5560"
-    action_sub_address: str = "tcp://localhost:5557"
-    mode: str = "step"  # "step" or "async"
-    world_source: str = "procedural"  # "procedural" or "file"
+    model_config = SettingsConfigDict(
+        env_file=find_root_env(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Robust Fallback
+    pub_address: str = Field(
+        default="tcp://*:5559",
+        validation_alias="NAVI_ENV_PUB_ADDRESS",
+    )
+    rep_address: str = Field(
+        default="tcp://*:5560",
+        validation_alias="NAVI_ENV_REP_ADDRESS",
+    )
+    action_sub_address: str = Field(
+        default="tcp://localhost:5557",
+        validation_alias="NAVI_ACTOR_PUB_ADDRESS",
+    )
+
+    mode: str = "step"
+    world_source: str = "procedural"
     world_file: str = ""
-    generator: str = "arena"  # "arena", "city", "maze", "open3d", or "rooms"
+    generator: str = "arena"
     window_radius: int = 2
     lookahead_margin: int = 8
     seed: int = 42
@@ -25,57 +56,20 @@ class EnvironmentConfig:
     barrier_distance: float = 1.0
     collision_probe_radius: float = 1.5
     max_steps_per_episode: int = 50_000
-    azimuth_bins: int = 256
-    elevation_bins: int = 128
+    azimuth_bins: int = Field(default=128, validation_alias="NAVI_AZIMUTH_BINS")
+    elevation_bins: int = Field(default=24, validation_alias="NAVI_ELEVATION_BINS")
     max_distance: float = 30.0
-
-    # Physics timestep (seconds).  Default 0.02 = 50 Hz.
     physics_dt: float = 0.02
-
-    # Command-hold: repeat the last action for N physics ticks per
-    # decision.  1 = every tick requires a new decision (default).
     steps_per_decision: int = 1
-
-    # Drone speed — scales normalised steering [-1, 1] from the policy
-    # into physical velocities.  Re-training is NOT required when
-    # changing speed.
-    #
-    # Forward speed is **dynamic**: the backend reads the front-hemisphere
-    # depth from the previous observation and scales down when close to
-    # obstacles.  ``drone_max_speed`` is the ceiling reached in open
-    # space; near walls the drone automatically crawls.
-    # Climb, strafe and yaw rates also scale with proximity (except yaw
-    # which always stays at full rate so the drone can turn to escape).
-    drone_max_speed: float = 10.0     # max forward speed (m/s, open space)
-    drone_climb_rate: float = 2.0     # max vertical rate (m/s)
-    drone_strafe_speed: float = 3.0   # max lateral speed (m/s)
-    drone_yaw_rate: float = 3.0       # max yaw rate (rad/s, ~172°/s)
-
-    # Multi-actor
+    drone_max_speed: float = 10.0
+    drone_climb_rate: float = 2.0
+    drone_strafe_speed: float = 3.0
+    drone_yaw_rate: float = 3.0
     n_actors: int = 1
-
-    # Training mode flag.  When ``True``, the server enforces the
-    # unthrottled lock-step (REQ/REP) loop: ``mode`` must be ``"step"``,
-    # no artificial delays or sleeps are injected, and all publishing
-    # is non-blocking fire-and-forget.  The simulation runs at maximum
-    # hardware speed.
     training_mode: bool = False
-
-    # Skip overhead minimap computation (never used by policy).
-    # Disabled by default — the overhead minimap is gallery-only data
-    # that is structurally banned from the training path.
     compute_overhead: bool = False
-
-    # Backend selection — "voxel" (default) or "habitat"
     backend: str = "voxel"
-
-    # Habitat-specific settings (ignored when backend != "habitat")
     habitat_scene: str = ""
     habitat_dataset_config: str = ""
     habitat_rgb_resolution: tuple[int, int] = (480, 640)
-
-    # Scene pool for per-episode cycling (mesh backend).
-    # When non-empty, the backend cycles through these paths on each
-    # episode reset (once per n_actors episodes).  The pool is consumed
-    # sequentially; wrap-around restarts from the beginning.
     scene_pool: tuple[str, ...] = ()

@@ -68,6 +68,8 @@ def _default(obj: Any) -> Any:
     """Msgpack default encoder for custom types."""
     if isinstance(obj, np.ndarray):
         return msgpack.ExtType(_EXT_NDARRAY, _encode_ndarray(obj))
+    if isinstance(obj, np.generic):
+        return obj.item()
     msg = f"Object of type {type(obj)} is not serializable"
     raise TypeError(msg)
 
@@ -116,8 +118,14 @@ def _serialize_distance_matrix(dm: DistanceMatrix) -> dict[str, Any]:
 
 def serialize(
     model: (
-        DistanceMatrix | Action | RobotPose | StepRequest | StepResult
-        | TelemetryEvent | BatchStepRequest | BatchStepResult
+        DistanceMatrix
+        | Action
+        | RobotPose
+        | StepRequest
+        | StepResult
+        | TelemetryEvent
+        | BatchStepRequest
+        | BatchStepResult
     ),
 ) -> bytes:
     """Serialize a wire-format model to msgpack bytes."""
@@ -166,9 +174,7 @@ def serialize(
         payload = {
             "_type": "BatchStepResult",
             "results": [_serialize_step_result(r) for r in model.results],
-            "observations": [
-                _serialize_distance_matrix(o) for o in model.observations
-            ],
+            "observations": [_serialize_distance_matrix(o) for o in model.observations],
         }
     else:
         msg = f"Unsupported model type: {type(model)}"
@@ -180,8 +186,14 @@ def serialize(
 def deserialize(
     data: bytes,
 ) -> (
-    DistanceMatrix | Action | RobotPose | StepRequest | StepResult
-    | TelemetryEvent | BatchStepRequest | BatchStepResult
+    DistanceMatrix
+    | Action
+    | RobotPose
+    | StepRequest
+    | StepResult
+    | TelemetryEvent
+    | BatchStepRequest
+    | BatchStepResult
 ):
     """Deserialize msgpack bytes to a wire-format model."""
     raw: dict[str, Any] = msgpack.unpackb(data, ext_hook=_ext_hook)

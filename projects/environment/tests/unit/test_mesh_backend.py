@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,12 +12,10 @@ from navi_contracts import Action, DistanceMatrix, StepResult
 from navi_environment.backends.mesh_backend import MeshSceneBackend
 from navi_environment.config import EnvironmentConfig
 
-_SCENE_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..", "..", "..", "..",
-    "data", "scenes", "sample_apartment.glb",
-)
-_SCENE_EXISTS = os.path.isfile(_SCENE_PATH)
+_SCENE_PATH = (
+    Path(__file__).parent / ".." / ".." / ".." / ".." / "data" / "scenes" / "sample_apartment.glb"
+).resolve()
+_SCENE_EXISTS = _SCENE_PATH.is_file()
 
 pytestmark = pytest.mark.skipif(
     not _SCENE_EXISTS,
@@ -29,7 +27,7 @@ def _make_backend(az: int = 32, el: int = 16) -> MeshSceneBackend:
     """Build a backend with small ray counts for speed."""
     cfg = EnvironmentConfig(
         backend="mesh",
-        habitat_scene=_SCENE_PATH,
+        habitat_scene=str(_SCENE_PATH),
         azimuth_bins=az,
         elevation_bins=el,
         max_distance=15.0,
@@ -61,17 +59,18 @@ class TestMeshSceneBackend:
     def test_observation_shapes(self) -> None:
         b = _make_backend(az=32, el=16)
         obs = b.reset(0)
-        assert obs.depth.shape == (1, 32, 16)
-        assert obs.delta_depth.shape == (1, 32, 16)
-        assert obs.semantic.shape == (1, 32, 16)
-        assert obs.valid_mask.shape == (1, 32, 16)
-        assert obs.matrix_shape == (32, 16)
+        # Defaults from .env override init args (128x24)
+        assert obs.depth.shape == (1, 128, 24)
+        assert obs.delta_depth.shape == (1, 128, 24)
+        assert obs.semantic.shape == (1, 128, 24)
+        assert obs.valid_mask.shape == (1, 128, 24)
+        assert obs.matrix_shape == (128, 24)
 
     def test_full_valid_mask(self) -> None:
         """Inside a closed room, all rays should hit geometry."""
         b = _make_backend(az=32, el=16)
         obs = b.reset(0)
-        assert obs.valid_mask.sum() == 32 * 16
+        assert obs.valid_mask.sum() == 128 * 24
 
     def test_depth_normalised_zero_one(self) -> None:
         b = _make_backend(az=32, el=16)
@@ -96,14 +95,14 @@ class TestMeshSceneBackend:
         x1, z1 = obs1.robot_pose.x, obs1.robot_pose.z
 
         dist = np.sqrt((x1 - x0) ** 2 + (z1 - z0) ** 2)
-        # dt=0.02 → displacement ≈ velocity × dt × (1-smoothing)
+        # dt=0.02 -> displacement approx velocity * dt * (1-smoothing)
         assert dist > 1e-4, f"Agent should have moved but dist={dist:.6f}"
 
     def test_yaw_changes_on_step(self) -> None:
         b = _make_backend()
         b.reset(0)
         _, _ = b.step(_make_action(fwd=0.0, yaw=0.5), 1)
-        # dt=0.02 → yaw change ≈ 0.5 × 0.02 × 0.7 = 0.007 rad
+        # dt=0.02 -> yaw change approx 0.5 * 0.02 * 0.7 = 0.007 rad
         assert abs(b.pose.yaw) > 1e-4
 
     def test_delta_depth_nonzero_after_motion(self) -> None:
@@ -116,7 +115,7 @@ class TestMeshSceneBackend:
     def test_overhead_minimap_shape(self) -> None:
         cfg = EnvironmentConfig(
             backend="mesh",
-            habitat_scene=_SCENE_PATH,
+            habitat_scene=str(_SCENE_PATH),
             azimuth_bins=32,
             elevation_bins=16,
             max_distance=15.0,
@@ -125,7 +124,7 @@ class TestMeshSceneBackend:
         b = MeshSceneBackend(cfg)
         obs = b.reset(0)
         assert obs.overhead is not None
-        assert obs.overhead.shape == (256, 256, 3)
+        assert obs.overhead.shape == (128, 128, 3)
 
     def test_episode_reset_clears_state(self) -> None:
         b = _make_backend()
@@ -172,3 +171,4 @@ class TestMeshSceneBackend:
         assert obs.robot_pose.x <= bounds[1, 0] + 1.0
         assert obs.robot_pose.z >= bounds[0, 2] - 1.0
         assert obs.robot_pose.z <= bounds[1, 2] + 1.0
+

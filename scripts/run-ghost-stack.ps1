@@ -159,7 +159,7 @@ if ($Train) {
         if (-not $NoDashboard) {
             # Wait for ZMQ sockets to bind (env + actor start inside train-sequential)
             Write-Host "`nWaiting for ZMQ sockets to bind..."
-            Start-Sleep -Seconds 8
+            Start-Sleep -Seconds 4
 
             Write-Host "Launching Dashboard (foreground)..."
             Write-Host "  Tab = toggle manual/AI | WASD = move | ESC = quit"
@@ -188,16 +188,17 @@ if ($Train) {
 # ═══════════════════════════════════════════════════════════════════
 # Inference mode: Environment + Actor + Dashboard as 3 processes
 # ═══════════════════════════════════════════════════════════════════
-$envArgs = @(
-    "run",
-    "--project", (Join-Path $repoRoot "projects\environment"),
-    "navi-environment",
-    "serve",
-    "--mode", "step",
-    "--pub", $EnvironmentPub,
-    "--rep", $EnvironmentRep,
-    "--backend", $Backend
-)
+    $envArgs = @(
+        "run",
+        "--project", (Join-Path $repoRoot "projects\environment"),
+        "navi-environment",
+        "serve",
+        "--mode", "step",
+        "--pub", $EnvironmentPub,
+        "--rep", $EnvironmentRep,
+        "--backend", $Backend,
+        "--actors", $Actors
+    )
 
 if ($Backend -eq "voxel") {
     $envArgs += @("--generator", "arena")

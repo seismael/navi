@@ -19,6 +19,9 @@ dependencies = [
     "pyqtgraph>=0.13",
     "trimesh>=4.0",
     "PyOpenGL>=3.1",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "torchaudio>=2.10.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +36,7 @@ open3d = [
 
 [project.scripts]
 navi-auditor = "navi_auditor.cli:app"
+dashboard = "navi_auditor.cli:dashboard_shortcut"
 
 [tool.uv.sources]
 navi-contracts = { path = "../contracts", editable = true }
@@ -78,6 +82,7 @@ module = [
     "trimesh.*",
     "OpenGL",
     "OpenGL.*",
+    "pydantic_settings",
 ]
 ignore_missing_imports = true
 

@@ -296,7 +296,17 @@ Synchronous step-mode PPO with BPTT-aware sequential minibatch sampling.
    - Value loss with clipping.
    - Entropy bonus: $\mathcal{L}_{entropy} = -c_{ent} \cdot H[\pi]$.
    - RND distillation loss: $\mathcal{L}_{RND}$.
-4. Publish 13 telemetry metrics via `telemetry_event_v2`.
+4. Publish 13 telemetry metrics and high-fidelity performance diagnostics via `telemetry_event_v2`.
+
+**High-Fidelity Performance Metrics:**
+
+| Metric | Description |
+|--------|-------------|
+| `sps` | Steps Per Second (throughput) |
+| `fwd_ms` | Inference latency (Ray-ViT forward pass) |
+| `env_ms` | Simulation latency (Batch raycasting) |
+| `mem_ms` | Episodic memory query latency |
+| `zw_ratio` | Zero-wait ratio (overlap of sim and optimization) |
 
 **Telemetry metrics published per update:**
 

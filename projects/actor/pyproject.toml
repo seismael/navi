@@ -18,6 +18,8 @@ dependencies = [
     "matplotlib>=3.9",
     "msgpack>=1.0",
     "msgpack-numpy>=0.4",
+    "torchvision>=0.17.0",
+    "torchaudio>=2.2.0",
 ]
 
 [project.optional-dependencies]
@@ -29,8 +31,17 @@ dev = [
 
 [project.scripts]
 navi-actor = "navi_actor.cli:app"
+brain = "navi_actor.cli:serve_shortcut"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
 
 [tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
 navi-contracts = { path = "../contracts", editable = true }
 navi-environment = { path = "../environment", editable = true }
 
@@ -75,6 +86,7 @@ module = [
     "causal_conv1d.*",
     "faiss",
     "faiss.*",
+    "pydantic_settings",
 ]
 ignore_missing_imports = true
 

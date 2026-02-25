@@ -57,19 +57,23 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
-        # Output projection
+        # Final projection to embedding_dim
         self.fc = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, embedding_dim),
         )
 
+        # Cache for positional encodings
+        self._pos_enc_cache: Tensor | None = None
+        self._cache_key: tuple[int, int, torch.device] | None = None
+
     def _get_fixed_pos_enc(
         self, n_az: int, n_el: int, dim: int, device: torch.device
     ) -> Tensor:
-        """Compute fixed 2D sin/cos positional encodings for spherical patches.
+        """Compute fixed 2D sin/cos positional encodings for spherical patches."""
+        if self._pos_enc_cache is not None and self._cache_key == (n_az, n_el, device):
+            return self._pos_enc_cache
 
-        Encodes the absolute (azimuth, elevation) of each patch center.
-        """
         grid_az, grid_el = torch.meshgrid(
             torch.linspace(0, 2 * 3.14159, n_az, device=device),
             torch.linspace(-3.14159 / 2, 3.14159 / 2, n_el, device=device),
@@ -95,8 +99,12 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
             pos_enc = torch.nn.functional.pad(
                 pos_enc, (0, dim - pos_enc.shape[-1])
             )
-        # Return (1, N_patches, D)
-        return pos_enc.unsqueeze(0)
+
+        # Cache and return (1, N_patches, D)
+        final_enc = pos_enc.unsqueeze(0)
+        self._pos_enc_cache = final_enc
+        self._cache_key = (n_az, n_el, device)
+        return final_enc
 
     def forward(self, x: Tensor) -> Tensor:
         """Encode spherical observation via ViT.
@@ -132,7 +140,7 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         # Add [CLS] token and FIXED positional embeddings
         pos_enc = self._get_fixed_pos_enc(n_az, n_el, self.hidden_dim, x.device)
         h = h + pos_enc
-        
+
         # Prepend [CLS] token
         cls_tokens = self.cls_token.expand(batch, -1, -1)
         h = torch.cat((cls_tokens, h), dim=1)

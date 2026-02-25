@@ -2,15 +2,57 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__: list[str] = ["AuditorConfig"]
 
+def find_root_env() -> Path:
+    """Search upwards for the root .env file."""
+    try:
+        curr = Path(__file__).resolve().parent
+        for _ in range(6):
+            target = curr / ".env"
+            if target.exists():
+                return target
+            curr = curr.parent
+    except Exception:  # noqa: S110
+        pass
+    return Path(".env") # fallback
 
-@dataclass(frozen=True)
-class AuditorConfig:
-    """Auditor service configuration, loadable from TOML."""
+class AuditorConfig(BaseSettings):
+    """Auditor service configuration, loadable from environment or .env."""
 
-    sub_addresses: tuple[str, ...] = ("tcp://localhost:5559", "tcp://localhost:5557")
-    output_path: str = "session.zarr"
-    pub_address: str = "tcp://*:5558"
+    model_config = SettingsConfigDict(
+        env_file=find_root_env(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Robust Fallback: Defaults match the NAVI standard
+    matrix_sub_address: str = Field(
+        default="tcp://localhost:5559",
+        validation_alias="NAVI_ENV_PUB_ADDRESS",
+    )
+    actor_sub_address: str = Field(
+        default="tcp://localhost:5557",
+        validation_alias="NAVI_ACTOR_PUB_ADDRESS",
+    )
+    step_endpoint: str = Field(
+        default="tcp://localhost:5560",
+        validation_alias="NAVI_ENV_REP_ADDRESS",
+    )
+    output_path: str = Field(
+        default="session.zarr",
+        validation_alias="NAVI_AUDITOR_OUTPUT",
+    )
+    pub_address: str = Field(
+        default="tcp://*:5558",
+        validation_alias="NAVI_AUDITOR_PUB_ADDRESS",
+    )
+
+    @property
+    def sub_addresses(self) -> tuple[str, ...]:
+        return (self.matrix_sub_address, self.actor_sub_address)

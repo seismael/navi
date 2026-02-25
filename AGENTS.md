@@ -1,202 +1,102 @@
 # AGENTS.md — Ghost-Matrix Implementation Blueprint
 
-This file is the implementation policy for [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+This file is the **sacred source of truth** for implementation policy and architectural standards. All agent actions must be validated against this blueprint before execution.
 
-## 1) Scope
+## 1) Scope & Sovereignty
 
-Navi is a Ghost-Matrix system focused on throughput RL with strict separation of:
-- Simulation Layer (headless stepping + sensing via pluggable backends)
-- Brain Layer (policy + training — sacred, immutable engine)
-- Gallery Layer (record/replay/visualization — passive only)
+Navi is a modular ecosystem of isolated projects. Each project is a sovereign entity with its own environment, purpose, and configuration.
 
-## 2) Non-Negotiables
+### Isolated Projects:
+- **`projects/contracts`**: Wire-format models and serialization (The source of truth for communication).
+- **`projects/environment`**: Simulation Layer (headless stepping + sensing).
+- **`projects/actor`**: Brain Layer (policy + training — sacred, immutable engine).
+- **`projects/auditor`**: Gallery Layer (record/replay/visualization — passive only).
 
-1. Canonical wire contracts are v2 only:
-   - `RobotPose`
-   - `DistanceMatrix`
-   - `Action`
-   - `StepRequest`
-   - `StepResult`
-   - `BatchStepRequest`
-   - `BatchStepResult`
-   - `TelemetryEvent`
-2. No other models may be added to the contracts package without explicit approval.
-   Visualization types (RGB frames, camera images) are never canonical contracts.
-3. Legacy wire contracts/topics are not allowed in new code.
-4. Inter-process communication is ZMQ only (PUB/SUB + REQ/REP).
-5. Training runtime is headless; rendering is optional and asynchronous.
-6. Services are sovereign packages; no service imports another service package.
-   **Known exception:** The actor’s `train-sequential` CLI command imports from
-   `navi_environment` to enable in-process training without ZMQ. This is an
-   acknowledged sovereignty violation scoped to a single CLI command; the core
-   actor engine never imports environment types.
-7. Code quality gates remain mandatory: `ruff`, `mypy --strict`, `pytest`.
-8. **The training engine is sacred.** The actor's cognitive pipeline
-       (RayViTEncoder → Mamba2 → EpisodicMemory → ActorCriticHeads → PPO)   is never modified to accommodate a new data source. External data always
-   connects through a `DatasetAdapter` that transforms *to* the engine's
-   canonical `(1, Az, El)` DistanceMatrix format.
-9. All backends must produce arrays in canonical shape `(n_envs, Az, El)` with
-   `matrix_shape = (azimuth_bins, elevation_bins)`. Depth normalised to `[0, 1]`.
+## 2) Professional Standards
 
-## 3) Repository Structure
+### 2.1 Configuration Standard
+- All projects must use `pydantic-settings` for configuration management.
+- **Centralized Defaults:** Professional defaults are defined in a root `.env` file.
+- **Global Discovery:** `BaseSettings` MUST be configured to search up the directory tree or use an absolute path to the root `.env`.
+- **Robust Fallback:** Hard-coded defaults in `config.py` MUST match the `.env` standard (`5559`, `5560`, `5557`) to ensure functionality if `.env` is missing.
+- **Network Defaults:**
+  - `NAVI_ENV_PUB_ADDRESS=tcp://localhost:5559`
+  - `NAVI_ENV_REP_ADDRESS=tcp://localhost:5560`
+  - `NAVI_ACTOR_PUB_ADDRESS=tcp://localhost:5557`
+- **Resolution Defaults:**
+  - `NAVI_AZIMUTH_BINS=256`
+  - `NAVI_ELEVATION_BINS=48` (High-fidelity navigation)
 
-```text
-navi/
-├── AGENTS.md
-├── README.md
-├── TODO.md
-├── Makefile
-├── docs/
-│   ├── ARCHITECTURE.md          # system layers, SDF theory, design decisions
-│   ├── ACTOR.md                 # cognitive engine specification (sacred)
-│   ├── SIMULATION.md            # simulation layer + backends + raycasting
-│   ├── PERFORMANCE.md           # theoretical baselines & throughput targets
-│   └── CONTRACTS.md             # canonical wire format specification
-├── data/
-│   └── scenes/                  # scene assets + manifest
-│       └── sample_episodes.json
-├── artifacts/
-│   └── checkpoints/             # training checkpoints (gitignored)
-├── scripts/
-│   ├── run-ghost-stack.ps1      # one-command full stack launch
-│   ├── train-habitat-sequential.ps1  # sequential multi-scene training
-│   ├── download-habitat-data.ps1     # download HSSD/ReplicaCAD scenes
-│   ├── generate_sample_scene.py      # generate sample PointNav episodes
-│   └── bench_raycast.py              # raycast engine benchmark
-└── projects/
-    ├── contracts/
-    │   └── src/navi_contracts/
-    │       ├── models.py
-    │       ├── topics.py
-    │       ├── serialization.py
-    │       └── types.py
-    ├── environment/
-    │   └── src/navi_environment/
-    │       ├── server.py            # thin ZMQ shell
-    │       ├── cli.py
-    │       ├── config.py
-    │       ├── raycast.py           # RaycastEngine (scatter-reduce)
-    │       ├── distance_matrix_v2.py
-    │       ├── mjx_env.py           # MjxEnvironment (kinematics)
-    │       ├── matrix.py            # SparseVoxelGrid
-    │       ├── sliding_window.py    # SlidingWindow
-    │       ├── frustum.py           # FrustumLoader
-    │       ├── lookahead.py         # LookAheadBuffer
-    │       ├── pruning.py           # chunk pruning utilities
-    │       ├── backends/
-    │       │   ├── base.py              # SimulatorBackend ABC
-    │       │   ├── adapter.py           # DatasetAdapter Protocol
-    │       │   ├── voxel.py             # VoxelBackend (procedural)
-    │       │   ├── mesh_backend.py      # MeshSceneBackend (trimesh)
-    │       │   ├── habitat_backend.py   # HabitatBackend (habitat-sim)
-    │       │   ├── habitat_adapter.py   # HabitatAdapter (raw→canonical)
-    │       │   └── habitat_semantic_lut.py
-    │       ├── generators/
-    │       │   ├── base.py              # AbstractWorldGenerator ABC
-    │       │   ├── arena.py
-    │       │   ├── city.py
-    │       │   ├── maze.py
-    │       │   ├── rooms.py
-    │       │   ├── open3d_voxel.py
-    │       │   └── file_loader.py
-    │       └── transformers/
-    │           └── compiler.py          # WorldModelCompiler (PLY/OBJ/STL→Zarr)
-    ├── actor/
-    │   └── src/navi_actor/
-    │       ├── server.py
-    │       ├── cli.py
-    │       ├── config.py
-    │       ├── spherical_features.py    # 17-dim feature extraction
-    │       ├── cognitive_policy.py      # CognitiveMambaPolicy (sacred)
-    │       ├── perception.py            # RayViTEncoder ViT
-    │       ├── mamba_core.py            # Mamba2TemporalCore
-    │       ├── actor_critic.py          # ActorCriticHeads
-    │       ├── rnd.py                   # RND curiosity
-    │       ├── reward_shaping.py
-    │       ├── learner_ppo.py           # PpoLearner
-    │       ├── rollout_buffer.py        # TrajectoryBuffer (BPTT)
-    │       ├── memory/
-    │       │   └── episodic.py           # EpisodicMemory (CPU FAISS KNN)
-    │       └── training/
-    │           └── ppo_trainer.py        # PpoTrainer (PPO + RND + GAE)
-    └── auditor/
-        └── src/navi_auditor/
-            ├── recorder.py
-            ├── rewinder.py
-            ├── stream_engine.py      # StreamEngine (ZMQ subscriber)
-            ├── matrix_viewer.py
-            ├── cli.py
-            ├── config.py
-            ├── storage/
-            │   ├── base.py
-            │   └── zarr_backend.py
-            └── dashboard/
-                ├── app.py            # GhostMatrixDashboard (PyQtGraph)
-                ├── panels.py
-                ├── renderers.py
-                ├── scene_view.py
-                └── occupancy_view.py
-```
+### 2.2 Simple Launch Commands
+Each project must provide a dedicated `uv run` shortcut and a corresponding wrapper script in `scripts/`:
+- **Dashboard:** `uv run dashboard` → `scripts/run-dashboard.ps1`
+- **Environment:** `uv run environment` → `scripts/run-environment.ps1`
+- **Brain (Actor):** `uv run brain` → `scripts/run-brain.ps1`
 
-## 4) Active Runtime Topics
+### 2.3 Mode Detection Standard
+- The Dashboard MUST detect mode dynamically:
+  - **TRAINING:** Triggered by `actor.training.*` telemetry events.
+  - **INFERENCE:** Triggered by `actor.inference.*` events.
+  - **OBSERVER:** Default state when no actor telemetry is present.
+- Training mode MUST be detectable even when high-frequency per-step telemetry is disabled for performance.
 
-- `distance_matrix_v2`
-- `action_v2`
-- `step_request_v2`
-- `step_result_v2`
-- `telemetry_event_v2`
+### 2.3 Non-Negotiables
+1. **Wire Contracts:** v2 only (`RobotPose`, `DistanceMatrix`, `Action`, etc.).
+2. **Sacred Brain:** The cognitive pipeline (`RayViTEncoder` → `Mamba2` → `EpisodicMemory` → `ActorCriticHeads`) is **immutable**.
+3. **No Stall Mandate:** High-throughput training is the primary success metric. Optimization must never stall rollout.
+4. **Project Isolation:** No service imports another service package (except for recognized CLI-level integrations).
+5. **Quality Gates:** `ruff`, `mypy --strict`, and `pytest` are mandatory for all changes.
 
-No other topics may be added without explicit approval.
+## 3) Performance Mandates
 
-## 5) Implementation Rules
+### 3.1 Batched Raycasting (Mesh Backend)
+- The `MeshSceneBackend` MUST use batched raycasting in `batch_step`.
+- Individual actor rays must be concatenated into a single `intersects_location` call to leverage SIMD/Parallel throughput.
+- **Benchmark:** Target ≥ 66 SPS for 4 actors at 128x24 on standard hardware.
 
-- Every module must use `from __future__ import annotations`.
-- Public modules and all package `__init__.py` must define `__all__`.
-- All functions/methods require full type annotations.
-- Keep module sizes focused and single-responsibility.
-- Remove dead code during migration; do not leave deprecated branches.
-- No visualization types in canonical contracts — ever.
+### 3.2 Vision Transformer Optimization
+- `RayViTEncoder` MUST cache fixed spherical positional encodings.
+- Avoid redundant sin/cos recomputation on every forward pass.
 
-## 6) Migration Policy
+### 3.3 Zero-Stall Telemetry
+- High-frequency per-actor per-step telemetry is forbidden during training as it bottlenecks the CPU rollout loop.
+- Use coarse-grained metrics (every 100 steps) for performance tracking.
 
-- This repository is in hard-cut migration mode.
-- Allowed projects for final architecture: `contracts`, `environment`, `actor`, `auditor`.
-- `ingress` and `cartographer` are removed from active architecture.
-- Any new code must target v2 contracts and Ghost-Matrix flow only.
+## 4) Resilient Diagnostic Standard
+- Gallery Layer tools (Dashboard, Recorder) MUST be operational independent of Simulation/Brain layers.
+- Tools MUST handle missing ZMQ streams gracefully, displaying a `WAITING` state instead of crashing.
+- **Dynamic Discovery:** UI MUST NOT require hard-coded actor counts. It must detect, list, and switch between actors dynamically based on incoming ZMQ `env_ids`.
+- **UI Throughput:** Processing (ZMQ polling, heavy rendering) MUST NOT block the UI thread for > 16ms per tick. Ingestion MUST be capped or moved to a background thread to maintain 60 FPS responsiveness.
+- UI components MUST be non-blocking during stream connection attempts.
 
-## 7) Adapter Isolation Boundary
+## 5) Data Isolation Boundary
+External data sources connect strictly through a `DatasetAdapter` Protocol.
+- **Location:** `environment/backends/`
+- **Responsibility:** The ONLY place for axis transposes, depth normalisation, and semantic remapping.
+- **Output:** Canonical `(1, Az, El)` DistanceMatrix format.
 
-External data sources (Habitat, Isaac, real-robot feeds, etc.) connect through a
-formal `DatasetAdapter` Protocol:
+## 6) System Lifecycle Standard
+- **Clean Reset:** Agents MUST use robust termination (taskkill /T) before restarting to ensure ZMQ ports are released.
+- **Stateless Launch:** Tools MUST favor environment-based configuration over CLI parameters.
+- **Visibility Verification:** Agents MUST NOT "fire and forget." Every GUI launch must be followed by a process-check and, if possible, a window-title verification to confirm the user can actually see the tool.
+- **Verification:** Every restart MUST be followed by a log-check to confirm successful socket binding.
 
-```
-DatasetAdapter Protocol
-  .adapt(raw_obs, step_id) → dict[str, NDArray]     # canonical arrays
-  .reset()                                            # clear frame-diff state
-  .metadata → AdapterMetadata                         # az/el bins, LUT info
-```
+## 7) The Sacred Validation Pipeline
 
-The adapter is the **only** place where axis transposes, depth normalisation,
-semantic class remapping, delta-depth computation, and env-dimension insertion
-are performed. The result is always `(1, Az, El)` arrays that slot directly into
-a `DistanceMatrix` without any changes to the engine.
+Every instruction MUST follow this exact sequence. Implementation without alignment is a structural failure.
 
-Adapters live in `environment/backends/` alongside their backend. They never
-import from `actor` or `auditor`.
+1.  **Validate:** Cross-reference the request against `AGENTS.md` non-negotiables.
+2.  **Document & Standardize:** Update `AGENTS.md` and `docs/*.md` to codify any new patterns, architectural shifts, or refined benchmarks.
+3.  **Plan:** Present a detailed implementation strategy that adheres to the updated documentation.
+4.  **Implement:** Execute code changes ONLY after the plan and documentation are verified and aligned.
 
-## 8) Validation Commands
+## 8) Performance Benchmarks (Feb 2026)
 
-Per project:
+| Metric | Target | Status |
+|--------|--------|--------|
+| **Rollout Throughput (4 Actors)** | ≥ 60 SPS | ACHIEVED (via Batched Raycasting) |
+| **Inference Latency (CPU)** | ≤ 15ms/actor | ACHIEVED (via ViT Caching) |
+| **Environment Latency (4 Actors)** | ≤ 25ms | ACHIEVED (via trimesh batching) |
 
-```bash
-uv sync
-uv run ruff check .
-uv run mypy src/
-uv run pytest tests/
-```
-
-Repository goal:
-
-```bash
-make check-all
-```
+---
+*Status: Active canonical specification (Feb 2026)*

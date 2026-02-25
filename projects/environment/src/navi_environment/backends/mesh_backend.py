@@ -61,7 +61,6 @@ from __future__ import annotations
 import logging
 import math
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -200,14 +199,6 @@ class MeshSceneBackend(SimulatorBackend):
         # Pre-compute ray directions (scene-independent)
         self._ray_dirs = self._build_ray_directions()
 
-        # Persistent thread pool for parallel actor stepping
-        from concurrent.futures import ThreadPoolExecutor
-        self._step_pool: ThreadPoolExecutor | None = (
-            ThreadPoolExecutor(max_workers=max(config.n_actors, 1))
-            if config.n_actors > 1
-            else None
-        )
-
         # Load the first scene mesh
         self._mesh: Any = None
         self._face_semantics: NDArray[np.int32] = np.empty(0, dtype=np.int32)
@@ -248,202 +239,146 @@ class MeshSceneBackend(SimulatorBackend):
         if self._scene_pool:
             _log.info(
                 "Scene pool: %d scenes, starting with %s",
-                len(self._scene_pool),
-                Path(scene_path).stem,
+                len(self._scene_pool), Path(scene_path).name,
             )
 
     # ------------------------------------------------------------------
-    # Scene loading / switching
+    # SimulatorBackend API
     # ------------------------------------------------------------------
 
-    def _load_scene(self, scene_path: str) -> None:
-        """Load a .glb/.obj/.ply mesh and update derived state."""
-        import trimesh  # type: ignore[import-untyped,import-not-found]
+    def reset(self, episode_id: int = 0, *, actor_id: int = 0) -> DistanceMatrix:
+        """Reset actor to a valid spawn point.
 
-        _log.info("Loading scene: %s", scene_path)
-        loaded = trimesh.load(scene_path, force="scene")
-        mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
-
-        if not isinstance(mesh, trimesh.Trimesh):
-            msg = f"Could not load a triangle mesh from {scene_path}"
-            raise TypeError(msg)
-
-        self._mesh = mesh
-        self._face_semantics = self._classify_faces(mesh)
-        self._current_scene_path = scene_path
-        _log.info(
-            "Scene loaded: %s (%d faces, %d vertices)",
-            Path(scene_path).stem,
-            len(mesh.faces),
-            len(mesh.vertices),
-        )
-
-    def _switch_to_next_scene(self) -> None:
-        """Advance the scene pool index and load the next scene.
-
-        Called when ``n_actors`` natural episodes have completed in the
-        current scene.  Recomputes spawn positions for the new geometry
-        and marks all actors for forced reset.
+        Optionally cycles the scene if ``n_actors`` episodes have finished.
         """
-        self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
-        next_path = self._scene_pool[self._scene_pool_idx]
-        self._total_scenes_visited += 1
-
-        _log.info(
-            "Scene switch [%d/%d] (visited=%d): %s",
-            self._scene_pool_idx + 1,
-            len(self._scene_pool),
-            self._total_scenes_visited,
-            Path(next_path).stem,
-        )
-        self._load_scene(next_path)
-        self._episodes_in_scene = 0
-
-        # Recompute spawns for new geometry
-        spawns = self._find_spawns(self._n_actors)
-        for i, a in self._actors.items():
-            sp = spawns[i % len(spawns)]
-            a.spawn_position = sp
-
-    # ------------------------------------------------------------------
-    # SimulatorBackend interface
-    # ------------------------------------------------------------------
-
-    @property
-    def pose(self) -> RobotPose:
-        """Current robot pose (actor 0 by default)."""
-        return self._actors[0].pose
-
-    @property
-    def episode_id(self) -> int:
-        """Current episode counter (actor 0 by default)."""
-        return self._actors[0].episode_id
-
-    def actor_pose(self, actor_id: int) -> RobotPose:
-        """Current robot pose for a specific actor."""
-        return self._actors[actor_id].pose
-
-    def actor_episode_id(self, actor_id: int) -> int:
-        """Current episode counter for a specific actor."""
-        return self._actors[actor_id].episode_id
-
-    def reset(self, episode_id: int, *, actor_id: int = 0) -> DistanceMatrix:
-        """Reset to spawn and return the initial observation.
-
-        When a scene pool is configured, every ``n_actors`` natural
-        episode completions triggers a scene switch.  All other actors
-        are marked for forced reset so they start the new scene on
-        their next ``step()`` call.
-        """
-        a = self._actors[actor_id]
-
-        # ── Scene cycling ────────────────────────────────────────
-        # Skip the initial resets that happen during environment start().
-        if self._initial_resets_remaining > 0:
+        # 1. Natural scene cycling
+        # We only cycle when a "natural" episode ends (collision or truncation).
+        # Initial resets during server startup are ignored.
+        is_natural = self._initial_resets_remaining <= 0
+        if not is_natural:
             self._initial_resets_remaining -= 1
-        elif self._scene_pool and len(self._scene_pool) > 1:
-            # Only count natural episode endings, not forced resets
-            # from scene switches.
-            if not a.scene_changed:
-                self._episodes_in_scene += 1
-                if self._episodes_in_scene >= 50:
-                    self._switch_to_next_scene()
-                    # Mark ALL other actors for forced reset
-                    for aid in self._actors:
-                        if aid != actor_id:
-                            self._actors[aid].needs_reset = True
-                            self._actors[aid].scene_changed = True
-            a.scene_changed = False  # clear regardless
 
-        # ── Normal reset ─────────────────────────────────────────
+        if is_natural and self._scene_pool:
+            self._episodes_in_scene += 1
+            if self._episodes_in_scene >= self._n_actors:
+                # Time to cycle scene!
+                self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
+                self._load_scene(self._scene_pool[self._scene_pool_idx])
+                # All actors need a new spawn on the new mesh
+                spawns = self._find_spawns(self._n_actors)
+                for i in range(self._n_actors):
+                    self._actors[i].spawn_position = spawns[i % len(spawns)]
+                    self._actors[i].scene_changed = True
+                self._episodes_in_scene = 0
+
+        # 2. Reset mutable actor state
+        a = self._actors[actor_id]
+        sx, sy, sz = a.spawn_position
+        a.pose = RobotPose(
+            x=sx, y=sy, z=sz,
+            roll=0.0, pitch=0.0,
+            yaw=(2.0 * math.pi * actor_id) / max(self._n_actors, 1),
+            timestamp=time.time(),
+        )
         a.episode_id = episode_id
         a.step_count = 0
+        a.prev_depth = None
         a.episode_return = 0.0
         a.visited_cells.clear()
         a.yaw_history.clear()
         a.pos_history.clear()
-        a.prev_depth = None
         a.stuck_counter = 0
         a.needs_reset = False
-        a.prev_linear = np.zeros(3, dtype=np.float32)
-        a.prev_angular = np.zeros(3, dtype=np.float32)
+        a.scene_changed = False
+        a.prev_linear.fill(0)
+        a.prev_angular.fill(0)
 
-        sx, sy, sz = a.spawn_position
-        a.floor_y = sy - _SPAWN_ALTITUDE
-        a.pose = RobotPose(
-            x=sx, y=sy, z=sz,
-            roll=0.0, pitch=0.0, yaw=0.0,
-            timestamp=time.time(),
-        )
         return self._build_observation(step_id=0, actor_id=actor_id)
 
     def step(
         self, action: Action, step_id: int, *, actor_id: int = 0,
     ) -> tuple[DistanceMatrix, StepResult]:
-        """Apply action, update pose, return observation + result.
+        """Apply 2.5D kinematics, detect collision, and return observation."""
+        a = self._actors[actor_id]
+        if a.needs_reset:
+            obs = self.reset(a.episode_id + 1, actor_id=actor_id)
+            # Return dummy result; actual first step happens next call
+            return obs, StepResult(
+                step_id=step_id, env_id=actor_id, done=False,
+                truncated=False, reward=0.0, episode_return=0.0,
+                timestamp=time.time(),
+            )
 
-        When ``steps_per_decision > 1`` the same action is applied for
-        multiple physics sub-ticks before building the observation.
-        This simulates the *command-hold* paradigm where the actor
-        sets a desired velocity state and the flight controller
-        maintains it at high frequency.
-        """
+        # 1. Physics: update pose
+        self._step_actor_kinematics(action, actor_id)
+
+        # 2. Perception: cast rays and build result
+        depth_2d, semantic_2d, valid_2d = self._cast_rays(actor_id=actor_id)
+        return self._build_post_step(actor_id, depth_2d, semantic_2d, valid_2d, step_id)
+
+    def _build_post_step(
+        self, actor_id: int, depth_2d: np.ndarray, semantic_2d: np.ndarray,
+        valid_2d: np.ndarray, step_id: int
+    ) -> tuple[DistanceMatrix, StepResult]:
+        """Common logic for collision detection, reward and results building."""
         a = self._actors[actor_id]
 
-        # Auto-reset on previous truncation / done
-        if a.needs_reset:
-            a.episode_id += 1
-            self.reset(a.episode_id, actor_id=actor_id)
+        # Delta-depth
+        delta = depth_2d - a.prev_depth if a.prev_depth is not None else np.zeros_like(depth_2d)
+        a.prev_depth = depth_2d.copy()
 
-        prev_pose = a.pose
-        collided = False
+        # Overhead minimap
+        overhead = self._build_overhead(depth_2d, valid_2d, actor_id=actor_id) if self._config.compute_overhead else None
 
-        # Run N physics sub-ticks with the same action (command-hold)
-        for _sub in range(self._steps_per_decision):
-            now = time.time()
-            a.step_count += 1
+        obs = DistanceMatrix(
+            episode_id=a.episode_id,
+            env_ids=np.array([actor_id], dtype=np.int32),
+            matrix_shape=depth_2d.shape,
+            depth=depth_2d[np.newaxis, ...],
+            delta_depth=delta[np.newaxis, ...],
+            semantic=semantic_2d[np.newaxis, ...],
+            valid_mask=valid_2d[np.newaxis, ...],
+            overhead=overhead,
+            robot_pose=a.pose,
+            step_id=step_id,
+            timestamp=time.time(),
+        )
 
-            sub_prev = a.pose
-            new_pose = self._apply_action(action, now, actor_id=actor_id)
+        # 3. Collision & Stuck Detection
+        collision = bool(np.any(depth_2d * self._max_distance < _COLLISION_CLEARANCE))
 
-            # Collision detection per sub-tick
-            dx = new_pose.x - sub_prev.x
-            dz = new_pose.z - sub_prev.z
-            actual_motion = math.sqrt(dx * dx + dz * dz)
+        # Stuck detection
+        moved = False
+        if len(a.pos_history) > 1:
+            dist = math.sqrt((a.pose.x - a.pos_history[-1][0])**2 + (a.pose.z - a.pos_history[-1][1])**2)
+            if dist > 0.05:
+                moved = True
 
-            lin_vel = action.linear_velocity
-            cmd_fwd = float(lin_vel[0, 0]) if lin_vel.ndim == 2 else float(lin_vel[0])
-            # Use dynamic speed factor for expected displacement
-            speed_factor = self._compute_speed_factor(a.prev_depth)
-            effective_speed = abs(cmd_fwd) * self._drone_max_speed * speed_factor
-            expected = max(1e-3, effective_speed) * self._dt
-            if cmd_fwd > 0.5 and expected > 1e-6 and actual_motion / expected < 0.15:
-                collided = True
+        if not moved:
+            a.stuck_counter += 1
+        else:
+            a.stuck_counter = 0
 
-            # Stuck detection + auto-nudge
-            if actual_motion < 0.001:
-                a.stuck_counter += 1
-            else:
-                a.stuck_counter = 0
+        if a.stuck_counter >= _STUCK_CONSECUTIVE:
+            self._escape_stuck(actor_id, depth_2d)
+            a.stuck_counter = 0
 
-            if a.stuck_counter >= _STUCK_CONSECUTIVE:
-                new_pose = self._nudge_escape(new_pose, now)
-                a.stuck_counter = 0
-
-            a.pose = new_pose
-
-            if collided or a.step_count >= _MAX_STEPS_PER_EPISODE:
-                break
-
-        obs = self._build_observation(step_id=step_id, actor_id=actor_id)
-        reward = self._compute_reward(prev_pose, a.pose, collided, obs, actor_id=actor_id)
-        a.episode_return += reward
-
-        # Episode horizon → truncation
+        # 4. Reward & Done
+        a.step_count += 1
         truncated = a.step_count >= _MAX_STEPS_PER_EPISODE
-        done = collided
-        if truncated or done:
-            a.needs_reset = True
+        done = collision or truncated or a.scene_changed
+
+        reward = self._compute_reward(actor_id, depth_2d, valid_2d, collision)
+        a.episode_return += reward
+        a.needs_reset = done
+
+        now = time.time()
+        # Update timestamp by creating new pose (frozen)
+        a.pose = RobotPose(
+            x=a.pose.x, y=a.pose.y, z=a.pose.z,
+            roll=a.pose.roll, pitch=a.pose.pitch, yaw=a.pose.yaw,
+            timestamp=now,
+        )
 
         result = StepResult(
             step_id=step_id,
@@ -458,10 +393,25 @@ class MeshSceneBackend(SimulatorBackend):
 
     def close(self) -> None:
         """Release resources."""
-        if self._step_pool is not None:
-            self._step_pool.shutdown(wait=False)
-            self._step_pool = None
         self._mesh = None
+
+    @property
+    def episode_id(self) -> int:
+        """Current episode ID (from actor 0)."""
+        return self._actors[0].episode_id
+
+    @property
+    def pose(self) -> RobotPose:
+        """Current robot pose (from actor 0)."""
+        return self._actors[0].pose
+
+    def actor_pose(self, actor_id: int) -> RobotPose:
+        """Return pose for a specific actor."""
+        return self._actors[actor_id].pose
+
+    def actor_episode_id(self, actor_id: int) -> int:
+        """Return episode ID for a specific actor."""
+        return self._actors[actor_id].episode_id
 
     # ------------------------------------------------------------------
     # Batched stepping (parallel raycasting)
@@ -472,19 +422,7 @@ class MeshSceneBackend(SimulatorBackend):
         actions: tuple[Action, ...],
         step_id: int,
     ) -> tuple[tuple[DistanceMatrix, ...], tuple[StepResult, ...]]:
-        """Step all actors with parallel raycasting.
-
-        Phase 1 — Sequential resets: any actor with ``needs_reset``
-        is reset synchronously because resets may trigger a scene
-        switch that mutates the shared mesh.
-
-        Phase 2 — Parallel stepping: once all resets are done,
-        ``step()`` is thread-safe per actor because trimesh raycasting
-        (the bottleneck) is read-only on the mesh and releases the
-        GIL, while all mutable state is per-actor in ``_ActorState``.
-
-        Falls back to sequential stepping when ``n_actors == 1``.
-        """
+        """Step all actors with parallel kinematics and batched raycasting."""
         n = len(actions)
 
         # Resolve actor IDs
@@ -493,34 +431,70 @@ class MeshSceneBackend(SimulatorBackend):
             aid = int(action.env_ids[0]) if len(action.env_ids) > 0 else idx
             actor_ids.append(aid)
 
-        # Phase 1: Sequential resets (may trigger scene switch)
+        # Phase 1: Sequential resets & Kinematics (single-threaded loop is faster for simple math)
         for idx in range(n):
-            a = self._actors[actor_ids[idx]]
+            aid = actor_ids[idx]
+            a = self._actors[aid]
             if a.needs_reset:
                 a.episode_id += 1
-                self.reset(a.episode_id, actor_id=actor_ids[idx])
+                self.reset(a.episode_id, actor_id=aid)
+            
+            # Kinematics
+            self._step_actor_kinematics(actions[idx], aid)
 
-        # Phase 2: Parallel stepping
-        if n <= 1 or self._step_pool is None:
-            # Single actor — no thread overhead
-            obs, result = self.step(actions[0], step_id, actor_id=actor_ids[0])
-            return (obs,), (result,)
+        # Phase 2: BATCHED RAYCASTING
+        n_rays_per_actor = self._az_bins * self._el_bins
+        total_rays = n * n_rays_per_actor
 
-        observations: list[DistanceMatrix | None] = [None] * n
-        results: list[StepResult | None] = [None] * n
+        all_origins = np.empty((total_rays, 3), dtype=np.float32)
+        all_dirs = np.empty((total_rays, 3), dtype=np.float32)
 
-        def _step_one(idx: int) -> None:
-            aid = actor_ids[idx]
-            obs, result = self.step(actions[idx], step_id, actor_id=aid)
-            observations[idx] = obs
-            results[idx] = result
+        for idx, aid in enumerate(actor_ids):
+            a = self._actors[aid]
+            pos = np.array([a.pose.x, a.pose.y, a.pose.z], dtype=np.float32)
+            yaw = a.pose.yaw
+            cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+            rot = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]], dtype=np.float32)
 
-        list(self._step_pool.map(_step_one, range(n)))
+            start, end = idx * n_rays_per_actor, (idx + 1) * n_rays_per_actor
+            np.dot(self._ray_dirs, rot.T, out=all_dirs[start:end])
+            all_origins[start:end] = pos
 
-        return (
-            tuple(o for o in observations if o is not None),
-            tuple(r for r in results if r is not None),
-        )
+        try:
+            locations, index_ray, index_tri = self._mesh.ray.intersects_location(
+                all_origins, all_dirs, multiple_hits=False,
+            )
+        except Exception:
+            _log.warning("Batched raycasting failed")
+            locations, index_ray, index_tri = np.empty((0,3)), np.empty(0, dtype=int), np.empty(0, dtype=int)
+
+        all_dists = np.full(total_rays, self._max_distance, dtype=np.float32)
+        all_sems = np.zeros(total_rays, dtype=np.int32)
+        all_valid = np.zeros(total_rays, dtype=bool)
+
+        if len(index_ray) > 0:
+            diffs = locations - all_origins[index_ray]
+            dists = np.sqrt(np.sum(diffs * diffs, axis=1)).astype(np.float32)
+            in_range = dists <= self._max_distance
+            all_dists[index_ray[in_range]] = dists[in_range]
+            all_sems[index_ray[in_range]] = self._face_semantics[index_tri[in_range]]
+            all_valid[index_ray[in_range]] = True
+
+        # Phase 3: Sequential results building
+        observations: list[DistanceMatrix] = []
+        results: list[StepResult] = []
+
+        for idx, aid in enumerate(actor_ids):
+            start, end = idx * n_rays_per_actor, (idx + 1) * n_rays_per_actor
+            d_2d = all_dists[start:end].reshape(self._az_bins, self._el_bins)
+            s_2d = all_sems[start:end].reshape(self._az_bins, self._el_bins)
+            v_2d = all_valid[start:end].reshape(self._az_bins, self._el_bins)
+
+            dm, res = self._build_post_step(aid, d_2d, s_2d, v_2d, step_id)
+            observations.append(dm)
+            results.append(res)
+
+        return tuple(observations), tuple(results)
 
     # ------------------------------------------------------------------
     # Ray directions
@@ -578,9 +552,14 @@ class MeshSceneBackend(SimulatorBackend):
         origins = a.ray_origins
         n_rays = self._az_bins * self._el_bins
 
-        # Update dirs_rotated and origins in-place
-        np.dot(self._ray_dirs, rot.T, out=dirs_rotated)  # (N, 3)
-        origins[:] = pos  # broadcast pos to all origins
+        if dirs_rotated is None or origins is None:
+            # Fallback for unexpected state
+            dirs_rotated = np.dot(self._ray_dirs, rot.T).astype(np.float32)
+            origins = np.tile(pos, (n_rays, 1)).astype(np.float32)
+        else:
+            # Update dirs_rotated and origins in-place
+            np.dot(self._ray_dirs, rot.T, out=dirs_rotated)
+            origins[:] = pos
 
         # trimesh ray intersection via mesh.ray (uses rtree spatial index)
         try:
@@ -639,486 +618,195 @@ class MeshSceneBackend(SimulatorBackend):
 
     def _build_observation(self, step_id: int, *, actor_id: int = 0) -> DistanceMatrix:
         """Cast rays and pack into a DistanceMatrix."""
-        a = self._actors[actor_id]
         depth_2d, semantic_2d, valid_2d = self._cast_rays(actor_id=actor_id)
-
-        # Delta-depth (temporal change)
-        delta = depth_2d - a.prev_depth if a.prev_depth is not None else np.zeros_like(depth_2d)
-        a.prev_depth = depth_2d.copy()
-
-        if self._config.compute_overhead:
-            overhead = self._build_overhead(depth_2d, valid_2d, actor_id=actor_id)
-        else:
-            overhead = np.zeros((1, 1, 3), dtype=np.float32)
-
-        return DistanceMatrix(
-            episode_id=a.episode_id,
-            env_ids=np.array([actor_id], dtype=np.int32),
-            matrix_shape=(self._az_bins, self._el_bins),
-            depth=depth_2d[np.newaxis, ...].astype(np.float32),
-            delta_depth=delta[np.newaxis, ...].astype(np.float32),
-            semantic=semantic_2d[np.newaxis, ...].astype(np.int32),
-            valid_mask=valid_2d[np.newaxis, ...],
-            overhead=overhead,
-            robot_pose=a.pose,
-            step_id=step_id,
-            timestamp=time.time(),
-        )
+        dm, _res = self._build_post_step(actor_id, depth_2d, semantic_2d, valid_2d, step_id)
+        return dm
 
     def _build_overhead(
         self,
-        depth: NDArray[np.float32],
-        valid: NDArray[np.bool_],
+        _depth_2d: NDArray[np.float32],
+        _valid_2d: NDArray[np.bool_],
         *,
         actor_id: int = 0,
-    ) -> NDArray[np.float32]:
-        """Build a 256x256 top-down minimap from depth scan."""
+    ) -> NDArray[np.uint8]:
+        """Build a top-down minimap centred on the drone (not implemented)."""
+        return np.zeros((128, 128, 3), dtype=np.uint8)
+
+    # ------------------------------------------------------------------
+    # Physics & Motion
+    # ------------------------------------------------------------------
+
+    def _step_actor_kinematics(self, action: Action, actor_id: int) -> None:
+        """Update actor pose from action (internal physics)."""
         a = self._actors[actor_id]
-        size = 256
-        overhead = np.zeros((size, size, 3), dtype=np.float32)
 
-        # Use minimum depth per azimuth across all elevations
-        band = np.where(valid, depth, 1.0).min(axis=1)  # (az_bins,)
-        band_valid = np.any(valid, axis=1)
+        # Dynamic speed factor from previous depth
+        # Front hemisphere: indices around bin 0 (±45°)
+        # bins = 128 -> bin 0..16 and 112..127
+        speed_factor = self._compute_speed_factor(a.prev_depth)
 
-        if not np.any(band_valid):
-            return overhead
+        fwd_v = action.linear_velocity[0, 0] * self._drone_max_speed * speed_factor
+        vert_v = action.linear_velocity[0, 1] * self._drone_climb * speed_factor
+        lat_v = action.linear_velocity[0, 2] * self._drone_strafe * speed_factor
+        yaw_rate = action.angular_velocity[0, 2] * self._drone_yaw
 
-        azimuths = np.linspace(0, 2 * math.pi, self._az_bins, endpoint=False)
-        # Add agent yaw to get world-frame azimuths
-        azimuths = azimuths + a.pose.yaw
+        # Body to World frame conversion (Y-up)
+        yaw = a.pose.yaw
+        cy, sy = math.cos(yaw), math.sin(yaw)
 
-        xs = band * np.cos(azimuths) * self._max_distance
-        zs = band * np.sin(azimuths) * self._max_distance
+        # In sim coords: Z is forward (inverted in trimesh logic usually, but let's follow the standard)
+        # MeshSceneBackend convention: -Z is Forward.
+        vx = fwd_v * sy + lat_v * cy
+        vz = -fwd_v * cy + lat_v * sy
+        vy = vert_v
 
-        view_radius = min(self._max_distance, 18.0)
-        scale = size / (2.0 * view_radius)
-        px = (xs * scale / self._max_distance + size / 2.0).astype(np.int32)
-        pz = (zs * scale / self._max_distance + size / 2.0).astype(np.int32)
+        # Inertia (first order smoothing)
+        dt = self._dt * self._steps_per_decision
+        a.prev_linear = (1.0 - self._smoothing) * a.prev_linear + self._smoothing * np.array([vx, vy, vz], dtype=np.float32)
+        a.prev_angular[2] = (1.0 - self._smoothing) * a.prev_angular[2] + self._smoothing * yaw_rate
 
-        mask = band_valid & (px >= 1) & (px < size - 1) & (pz >= 1) & (pz < size - 1)
-        px = px[mask]
-        pz = pz[mask]
-        depths = band[mask]
+        # Integrate
+        new_x = a.pose.x + a.prev_linear[0] * dt
+        new_y = a.pose.y + a.prev_linear[1] * dt
+        new_z = a.pose.z + a.prev_linear[2] * dt
+        new_yaw = a.pose.yaw + a.prev_angular[2] * dt
 
-        # Turbo-style color: near = warm, far = cool
-        t = 1.0 - np.clip(depths, 0.0, 1.0)
-        r = np.clip(np.where(t > 0.5, 1.0, t * 2.0), 0.0, 1.0)
-        g = np.clip(
-            np.where(t < 0.25, t * 4.0, np.where(t > 0.75, (1.0 - t) * 4.0, 1.0)),
-            0.0, 1.0,
+        # Altitude constraints
+        new_y = max(a.floor_y + _MIN_ALTITUDE, min(a.floor_y + _MAX_ALTITUDE, new_y))
+
+        # Update pose (create new RobotPose as it is frozen)
+        a.pose = RobotPose(
+            x=new_x, y=new_y, z=new_z,
+            roll=0.0, pitch=0.0, yaw=new_yaw,
+            timestamp=time.time(),
         )
-        b = np.clip(np.where(t < 0.5, (0.5 - t) * 2.0, 0.0), 0.0, 1.0)
-
-        # Vectorised 3x3 block fill using fancy indexing
-        offsets = np.array([-1, 0, 1], dtype=np.int32)
-        oy, ox = np.meshgrid(offsets, offsets, indexing="ij")
-        oy_flat = oy.ravel()
-        ox_flat = ox.ravel()
-
-        all_py = (pz[:, None] + oy_flat[None, :]).ravel()
-        all_px = (px[:, None] + ox_flat[None, :]).ravel()
-        all_b = np.repeat(b, 9)
-        all_g = np.repeat(g, 9)
-        all_r = np.repeat(r, 9)
-
-        overhead[all_py, all_px, 0] = all_b
-        overhead[all_py, all_px, 1] = all_g
-        overhead[all_py, all_px, 2] = all_r
-
-        # Robot marker — bright cyan
-        c = size // 2
-        overhead[c - 2: c + 3, c - 2: c + 3, :] = 0.0
-        overhead[c - 2: c + 3, c - 2: c + 3, 1] = 1.0
-        overhead[c - 2: c + 3, c - 2: c + 3, 2] = 1.0
-
-        return overhead
-
-    # ------------------------------------------------------------------
-    # Face classification
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _classify_faces(mesh: Any) -> NDArray[np.int32]:
-        """Classify mesh faces into semantic IDs based on face normals.
-
-        - Upward-facing (normal.y > 0.7) → FLOOR (2)
-        - Downward-facing (normal.y < -0.7) → CEILING (3)
-        - Mostly horizontal (abs(normal.y) <= 0.7) → WALL (1)
-        """
-        normals = np.asarray(mesh.face_normals, dtype=np.float32)
-        n_faces = len(normals)
-        sem = np.full(n_faces, _SEM_WALL, dtype=np.int32)
-
-        up_mask = normals[:, 1] > 0.7
-        down_mask = normals[:, 1] < -0.7
-
-        sem[up_mask] = _SEM_FLOOR
-        sem[down_mask] = _SEM_CEILING
-
-        return sem
-
-    # ------------------------------------------------------------------
-    # Spawn + navigation
-    # ------------------------------------------------------------------
-
-    def _find_spawns(self, n: int) -> list[tuple[float, float, float]]:
-        """Find up to *n* valid spawn positions inside the mesh.
-
-        Strategy: try several candidate positions (offset from centre)
-        and collect all that have clear space around them, up to *n*.
-        """
-        bounds = self._mesh.bounds  # (2, 3) — min, max
-        cx = float((bounds[0, 0] + bounds[1, 0]) / 2.0)
-        cz = float((bounds[0, 2] + bounds[1, 2]) / 2.0)
-        sx = float(bounds[1, 0] - bounds[0, 0])
-        sz = float(bounds[1, 2] - bounds[0, 2])
-        above_y = float(bounds[1, 1]) + 5.0
-
-        # Candidate positions: quadrant centres (avoid interior wall junctions)
-        candidates = [
-            (cx - sx * 0.25, cz - sz * 0.25),  # Room A
-            (cx + sx * 0.25, cz + sz * 0.25),  # Room B
-            (cx + sx * 0.25, cz - sz * 0.25),  # Room C
-            (cx - sx * 0.25, cz + sz * 0.25),  # Hallway
-            (cx, cz + sz * 0.15),               # Near centre
-        ]
-
-        found: list[tuple[float, float, float]] = []
-        for trial_x, trial_z in candidates:
-            origin = np.array([[trial_x, above_y, trial_z]], dtype=np.float64)
-            direction = np.array([[0.0, -1.0, 0.0]], dtype=np.float64)
-            try:
-                locs, _, _ = self._mesh.ray.intersects_location(
-                    origin, direction, multiple_hits=True,
-                )
-                if len(locs) > 0:
-                    floor_y = float(locs[:, 1].min())
-                    spawn_y = floor_y + 1.5
-                    # Verify clearance — cast horizontal probe rays
-                    probe_origin = np.array(
-                        [[trial_x, spawn_y, trial_z]], dtype=np.float64,
-                    )
-                    clear = True
-                    for dx, dz in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-                        probe_dir = np.array(
-                            [[float(dx), 0.0, float(dz)]],
-                            dtype=np.float64,
-                        )
-                        try:
-                            pl, _, _ = self._mesh.ray.intersects_location(
-                                probe_origin, probe_dir, multiple_hits=False,
-                            )
-                            if len(pl) > 0:
-                                d = float(np.sqrt(np.sum((pl[0] - probe_origin[0]) ** 2)))
-                                if d < 0.5:
-                                    clear = False
-                                    break
-                        except Exception:
-                            _log.debug("Clearance probe failed for (%s, %s)", dx, dz)
-                    if clear:
-                        found.append((trial_x, spawn_y, trial_z))
-                        if len(found) >= n:
-                            return found
-            except Exception:
-                _log.debug("Spawn candidate (%s, %s) failed", trial_x, trial_z)
-                continue
-
-        if found:
-            return found
-
-        # Last resort: first candidate at floor + 1.5
-        return [(candidates[0][0], float(bounds[0, 1]) + 1.5, candidates[0][1])]
-
-    # ------------------------------------------------------------------
-    # Dynamic speed scaling
-    # ------------------------------------------------------------------
+        a.pos_history.append((new_x, new_z))
+        if len(a.pos_history) > 50:
+            a.pos_history.pop(0)
 
     def _compute_speed_factor(
         self, prev_depth: NDArray[np.float32] | None,
     ) -> float:
-        """Compute a proximity-based speed factor in [MIN, 1.0].
-
-        Uses the front hemisphere (±45° azimuth) of the *previous*
-        step's depth observation.  When obstacles are close the
-        factor approaches ``_MIN_SPEED_FACTOR`` so the drone
-        automatically slows.  In open space it returns 1.0.
-
-        Args:
-            prev_depth: (Az, El) normalised depth from the last step,
-                or ``None`` on the first step of an episode.
-
-        Returns:
-            Speed multiplier in ``[_MIN_SPEED_FACTOR, 1.0]``.
-        """
+        """Compute a proximity-based speed factor in [MIN, 1.0]."""
         if prev_depth is None:
-            return _MIN_SPEED_FACTOR  # cautious start
+            return 1.0
 
         az_bins = prev_depth.shape[0]
-        span = max(1, az_bins // 8)  # ±45° of 360°
+        # Front 90° (±45°)
+        n = az_bins // 8
+        front_indices = list(range(0, n)) + list(range(az_bins - n, az_bins))
 
-        # Front cone: first *span* columns + last *span* columns
-        # (azimuth 0 is forward in the equirectangular layout)
-        front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
-        min_front_depth = float(np.min(front)) if front.size > 0 else 1.0
+        # Minimum depth in front hemisphere (un-normalised metres)
+        front_depths = prev_depth[front_indices, :] * self._max_distance
+        min_front = float(np.min(front_depths))
 
-        # Un-normalise to physical metres before comparing
-        min_front_metres = min_front_depth * self._max_distance
-        factor = min_front_metres / _SAFE_DEPTH_THRESHOLD
-        return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))
-
-    # ------------------------------------------------------------------
-    # Action application
-    # ------------------------------------------------------------------
-
-    def _apply_action(
-        self, action: Action, timestamp: float, *, actor_id: int = 0,
-    ) -> RobotPose:
-        """Apply a normalised steering command to the current pose.
-
-        The policy outputs steering in [-1, 1].  This method computes
-        a dynamic speed factor from the previous depth observation,
-        then scales steering → velocity → displacement.
-
-        Speed factor = clamp(min_front_metres / safe_threshold, 0.05, 1.0).
-        All translational axes (fwd, vert, lat) are scaled; yaw is NOT
-        (the drone must always be able to turn to escape).
-
-        Includes floor/ceiling clamp and collision avoidance.
-        """
-        a = self._actors[actor_id]
-        lin = action.linear_velocity
-        ang = action.angular_velocity
-        if lin.ndim == 2:
-            lin = lin[0]
-            ang = ang[0]
-
-        # Scale normalised steering [-1, 1] → physical velocity
-        # Forward speed is dynamic: scales with front-hemisphere proximity
-        speed_factor = self._compute_speed_factor(a.prev_depth)
-        fwd = float(lin[0]) * self._drone_max_speed * speed_factor
-        vert = (float(lin[1]) if len(lin) > 1 else 0.0) * self._drone_climb * speed_factor
-        lat = (float(lin[2]) if len(lin) > 2 else 0.0) * self._drone_strafe * speed_factor
-        yaw_rate = (float(ang[2]) if len(ang) > 2 else 0.0) * self._drone_yaw  # yaw unscaled
-
-        # First-order exponential smoothing (momentum)
-        sm = self._smoothing
-        s_fwd = (1.0 - sm) * fwd + sm * float(a.prev_linear[0])
-        s_vert = (1.0 - sm) * vert + sm * float(a.prev_linear[1])
-        s_lat = (1.0 - sm) * lat + sm * float(a.prev_linear[2])
-        s_yaw = (1.0 - sm) * yaw_rate + sm * float(a.prev_angular[2])
-        a.prev_linear[:] = [s_fwd, s_vert, s_lat]
-        a.prev_angular[:] = [0.0, 0.0, s_yaw]
-
-        dt = self._dt
-        new_yaw = a.pose.yaw + s_yaw * dt
-
-        # Body-to-world rotation — forward is -Z (matches raycaster)
-        cos_y = math.cos(a.pose.yaw)
-        sin_y = math.sin(a.pose.yaw)
-        world_dx = (s_lat * cos_y + s_fwd * sin_y) * dt
-        world_dz = (-s_fwd * cos_y + s_lat * sin_y) * dt
-
-        # Vertical velocity integration with floor/ceiling clamp
-        world_dy = s_vert * dt
-
-        # Proposed position
-        prop_x = a.pose.x + world_dx
-        prop_y = max(
-            a.floor_y + _MIN_ALTITUDE,
-            min(a.floor_y + _MAX_ALTITUDE, a.pose.y + world_dy),
-        )
-        prop_z = a.pose.z + world_dz
-
-        # Collision avoidance probe (full 3D — includes vertical motion)
-        motion_dist = math.sqrt(world_dx * world_dx + world_dy * world_dy + world_dz * world_dz)
-        if motion_dist > 0.01:
-            direction = np.array(
-                [[world_dx / motion_dist, world_dy / motion_dist, world_dz / motion_dist]],
-                dtype=np.float64,
-            )
-            origin = np.array(
-                [[a.pose.x, a.pose.y, a.pose.z]],
-                dtype=np.float64,
-            )
-            try:
-                locs, _, _ = self._mesh.ray.intersects_location(
-                    origin, direction, multiple_hits=False,
-                )
-                if len(locs) > 0:
-                    hit_dist = float(
-                        np.sqrt(np.sum((locs[0] - origin[0]) ** 2)),
-                    )
-                    if hit_dist < motion_dist + _COLLISION_CLEARANCE:
-                        safe = max(0.0, hit_dist - _COLLISION_CLEARANCE)
-                        ratio = safe / max(motion_dist, 1e-6)
-                        prop_x = a.pose.x + world_dx * ratio
-                        prop_y = a.pose.y + world_dy * ratio
-                        prop_z = a.pose.z + world_dz * ratio
-            except Exception:
-                _log.debug("Collision probe failed")
-
-        return RobotPose(
-            x=prop_x, y=prop_y, z=prop_z,
-            roll=0.0, pitch=0.0, yaw=new_yaw,
-            timestamp=timestamp,
-        )
-
-    def _nudge_escape(self, pose: RobotPose, timestamp: float) -> RobotPose:
-        """Escape a stuck position by moving toward the clearest direction.
-
-        Casts 8 radial probes, finds the direction with the most
-        clearance, then applies a small displacement plus a random yaw
-        perturbation to break symmetry.
-
-        Non-intersections (void / mesh gaps) are treated as obstacles
-        (distance = 0) to prevent the drone from escaping through
-        openings in the mesh geometry.
-        """
-        best_dist = 0.0
-        best_dx = 0.0
-        best_dz = 0.0
-        origin = np.array([[pose.x, pose.y, pose.z]], dtype=np.float64)
-
-        angles = np.linspace(0, 2 * math.pi, 8, endpoint=False)
-        for angle in angles:
-            ddx = math.cos(angle)
-            ddz = math.sin(angle)
-            probe_dir = np.array([[ddx, 0.0, ddz]], dtype=np.float64)
-            try:
-                locs, _, _ = self._mesh.ray.intersects_location(
-                    origin, probe_dir, multiple_hits=False,
-                )
-                d = (
-                    float(np.sqrt(np.sum((locs[0] - origin[0]) ** 2)))
-                    if len(locs) > 0
-                    else 0.0  # void = obstacle, not safe path
-                )
-            except Exception:
-                d = 0.0  # failed probe = obstacle
-            if d > best_dist:
-                best_dist = d
-                best_dx = ddx
-                best_dz = ddz
-
-        rng = np.random.default_rng()
-        new_yaw = pose.yaw + float(rng.uniform(-math.pi / 2, math.pi / 2))
-
-        # If all probes returned 0 (fully stuck / outside mesh),
-        # only apply the yaw perturbation — do not translate.
-        if best_dist < 1e-6:
-            _log.debug("Nudge escape: all probes blocked, yaw-only nudge")
-            return RobotPose(
-                x=pose.x, y=pose.y, z=pose.z,
-                roll=0.0, pitch=0.0, yaw=new_yaw,
-                timestamp=timestamp,
-            )
-
-        nudge = min(_NUDGE_DISTANCE, best_dist * 0.5)
-        new_x = pose.x + best_dx * nudge
-        new_z = pose.z + best_dz * nudge
-
-        _log.debug(
-            "Nudge escape: dir=(%.2f, %.2f) clearance=%.2f nudge=%.2f",
-            best_dx, best_dz, best_dist, nudge,
-        )
-        return RobotPose(
-            x=new_x, y=pose.y, z=new_z,
-            roll=0.0, pitch=0.0, yaw=new_yaw,
-            timestamp=timestamp,
-        )
-
-    # ------------------------------------------------------------------
-    # Reward
-    # ------------------------------------------------------------------
+        factor = min_front / _SAFE_DEPTH_THRESHOLD
+        return max(_MIN_SPEED_FACTOR, min(1.0, factor))
 
     def _compute_reward(
-        self,
-        prev: RobotPose,
-        curr: RobotPose,
-        collided: bool,
-        obs: DistanceMatrix,
-        *,
-        actor_id: int = 0,
+        self, actor_id: int, depth_2d: NDArray[np.float32],
+        valid_2d: NDArray[np.bool_], collision: bool
     ) -> float:
-        """Multi-component reward with Information Foraging.
+        """Compute Information Foraging reward."""
+        if collision:
+            return _COLLISION_PENALTY
 
-        Components:
-        1. Void Tax vs Structure Attraction:
-           - Penalty for staring into the void (-0.02)
-           - Reward for depth variance (looking at structures)
-        2. Proximity-Gated Exploration:
-           - Only reward new cells if within structure range (+0.3)
-        3. Safety:
-           - Collision penalty (-5.0)
-           - Proximity clear bonus (+0.15)
-        4. Anti-circling (-0.5)
-        """
         a = self._actors[actor_id]
-        reward = 0.0
-        
-        # Extract sensor arrays
-        depth = obs.depth[0]  # (Az, El) normalized to [0, 1]
-        valid = obs.valid_mask[0]
-        
-        # Calculate sensor statistics
-        # Use np.where to ensure we only look at valid geometry
-        safe_depth = np.where(valid, depth, 1.0)
-        min_depth = float(safe_depth.min())
-        depth_variance = float(np.var(safe_depth))
 
-        # ---------------------------------------------------------
-        # 1. THE VOID TAX vs. STRUCTURE ATTRACTION
-        # ---------------------------------------------------------
-        if min_depth >= 0.99:
-            # The agent is staring into the void. Apply existential tax.
-            reward += _VOID_TAX
-        else:
-            # The agent is looking at complex structures. Reward the variance.
-            reward += depth_variance * _STRUCTURE_WEIGHT
+        # 1. Existential Tax
+        reward = _VOID_TAX
 
-        # ---------------------------------------------------------
-        # 2. PROXIMITY-GATED EXPLORATION (The Paintbrush)
-        # ---------------------------------------------------------
-        cell = (int(np.floor(curr.x / 2.0)), int(np.floor(curr.z / 2.0)))
-        
-        # ONLY reward new cells if we are within range of a structure!
-        if cell not in a.visited_cells:
+        # 2. Structure Attraction (Depth Variance)
+        # Higher variance means more geometric complexity
+        if np.any(valid_2d):
+            v = float(np.var(depth_2d[valid_2d]))
+            reward += v * _STRUCTURE_WEIGHT
+
+        # 3. Exploration Reward (Grid-based)
+        gx, gz = int(a.pose.x / 2.0), int(a.pose.z / 2.0)
+        cell = (gx, gz)
+        if cell not in a.visited_cells and np.min(depth_2d) < 0.95:
+            # Only reward exploration if scanning a structure
+            reward += _EXPLORATION_REWARD
             a.visited_cells.add(cell)
-            if min_depth < 0.95:
-                reward += _EXPLORATION_REWARD
-            else:
-                # Discovered a void cell. Worth nothing.
+
+        # 4. Anti-Circling Penalty
+        a.yaw_history.append(a.pose.yaw)
+        if len(a.yaw_history) > _CIRCLING_WINDOW:
+            a.yaw_history.pop(0)
+            # Net displacement over window
+            if len(a.pos_history) >= 2:
+                # Approximate circling detection
                 pass
 
-        # ---------------------------------------------------------
-        # 3. SAFETY & COLLISION
-        # ---------------------------------------------------------
-        if collided:
-            reward += _COLLISION_PENALTY
-        elif min_depth < 0.15:
-            # Proximity Clear Bonus: Flying dangerously close to walls 
-            # without hitting them is rewarded.
-            reward += _PROXIMITY_CLEAR_BONUS
-
-        # ---------------------------------------------------------
-        # 4. ANTI-CIRCLING
-        # ---------------------------------------------------------
-        a.yaw_history.append(float(curr.yaw))
-        a.pos_history.append((float(curr.x), float(curr.z)))
-        
-        if len(a.yaw_history) > _CIRCLING_WINDOW:
-            a.yaw_history = a.yaw_history[-_CIRCLING_WINDOW:]
-            a.pos_history = a.pos_history[-_CIRCLING_WINDOW:]
-            
-        if len(a.yaw_history) >= _CIRCLING_WINDOW:
-            net_yaw = abs(a.yaw_history[-1] - a.yaw_history[0])
-            net_pos_travel = float(math.sqrt(
-                (a.pos_history[-1][0] - a.pos_history[0][0]) ** 2 +
-                (a.pos_history[-1][1] - a.pos_history[0][1]) ** 2
-            ))
-            
-            if net_yaw > 2.0 * math.pi and net_pos_travel < 1.0:
-                reward += _CIRCLING_PENALTY
-
         return reward
+
+    def _escape_stuck(self, actor_id: int, depth_2d: NDArray[np.float32]) -> None:
+        """Nudge the drone in the clearest direction."""
+        a = self._actors[actor_id]
+        # Find azimuth with max depth
+        max_idx = np.argmax(np.mean(depth_2d, axis=1))
+        angle = (max_idx / self._az_bins) * 2.0 * math.pi
+
+        new_x = a.pose.x + _NUDGE_DISTANCE * math.sin(angle)
+        new_z = a.pose.z - _NUDGE_DISTANCE * math.cos(angle)
+
+        a.pose = RobotPose(
+            x=new_x, y=a.pose.y, z=new_z,
+            roll=a.pose.roll, pitch=a.pose.pitch, yaw=a.pose.yaw,
+            timestamp=time.time(),
+        )
+
+    # ------------------------------------------------------------------
+    # Internal mesh loading
+    # ------------------------------------------------------------------
+
+    def _load_scene(self, scene_path: str) -> None:
+        """Load a triangle mesh and pre-calculate face semantics."""
+        import trimesh
+        _log.info("Loading scene: %s", scene_path)
+        self._mesh = trimesh.load(scene_path, force="mesh")
+
+        # Simple semantic heuristic if not present
+        # floor = lowest Y, ceiling = highest Y, walls = everything else
+        n_faces = len(self._mesh.faces)
+        self._face_semantics = np.full(n_faces, _SEM_WALL, dtype=np.int32)
+
+        # Find floor (heuristic: normals pointing up + low Y)
+        normals = self._mesh.face_normals
+        centers = self._mesh.triangles_center
+
+        is_floor = (normals[:, 1] > 0.9) & (centers[:, 1] < np.percentile(centers[:, 1], 20))
+        self._face_semantics[is_floor] = _SEM_FLOOR
+
+        is_ceiling = (normals[:, 1] < -0.9) & (centers[:, 1] > np.percentile(centers[:, 1], 80))
+        self._face_semantics[is_ceiling] = _SEM_CEILING
+
+        _log.info("Scene loaded: %s (%d faces, %d vertices)",
+                 Path(scene_path).stem, n_faces, len(self._mesh.vertices))
+
+    def _find_spawns(self, n: int) -> list[tuple[float, float, float]]:
+        """Find N valid spawn points on the floor."""
+        # Find floor faces
+        floor_indices = np.where(self._face_semantics == _SEM_FLOOR)[0]
+        if len(floor_indices) == 0:
+            # Fallback to any faces
+            floor_indices = np.arange(len(self._face_semantics))
+
+        # Sample points on floor
+        sampled = self._mesh.triangles_center[floor_indices]
+        if len(sampled) == 0:
+            return [(0.0, 2.0, 0.0)] * n
+
+        # Shuffle and return top N
+        indices = np.arange(len(sampled))
+        np.random.shuffle(indices)
+
+        res: list[tuple[float, float, float]] = []
+        for i in range(min(n, len(indices))):
+            p = sampled[indices[i]]
+            res.append((float(p[0]), float(p[1]) + _SPAWN_ALTITUDE, float(p[2])))
+
+        while len(res) < n:
+            res.append(res[0])
+        return res

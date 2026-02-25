@@ -121,9 +121,7 @@ until it reaches individual triangles.
   ScanNet) reach tens of millions, making per-ray intersection expensive even
   with optimized BVH libraries.
 
-> **Current usage:** Ray-mesh intersection via `trimesh` is used *only* in
-> `MeshSceneBackend` for data ingestion from `.glb`/`.obj`/`.ply` files.
-> It is never in the training-speed critical path.
+> **Current usage:** `MeshSceneBackend` supports high-throughput training on complex meshes (HSSD, ReplicaCAD) via **batched raycasting**. It leverages `trimesh` with a vectorized query structure to maintain high rollout throughput across multiple actors at 128x24 resolution.
 
 ### 3.2. Why Not Dense Voxel Occupancy / 3D DDA
 

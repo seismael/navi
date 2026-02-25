@@ -213,16 +213,17 @@ class StreamEngine:
         matrix_sub: str,
         actor_sub: str = "",
         step_endpoint: str = "",
-        n_actors: int = 1,
+        n_actors: int = 0,
     ) -> None:
         self._ctx: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._poller = zmq.Poller()
         self._actor_states: dict[int, StreamState] = {}
+        self._active_actor_id: int = 0
 
-        # Pre-populate actor states only if n_actors explicitly requested,
-        # ensuring they exist for the dashboard to find immediately.
-        for i in range(max(1, n_actors)):
-            self._actor_states[i] = StreamState()
+        # Pre-populate actor states if requested
+        if n_actors > 0:
+            for i in range(n_actors):
+                self._actor_states[i] = StreamState()
 
         # Environment PUB socket
         self._sock_matrix = self._ctx.socket(zmq.SUB)
@@ -244,6 +245,12 @@ class StreamEngine:
         self._sock_step: zmq.Socket[bytes] | None = None
         if step_endpoint:
             self._sock_step = self._ctx.socket(zmq.REQ)
+            # Set short timeouts to prevent UI freezes
+            self._sock_step.setsockopt(zmq.RCVTIMEO, 500)
+            self._sock_step.setsockopt(zmq.SNDTIMEO, 500)
+            # REQ_RELAXED + REQ_CORRELATE allow the socket to recover if a request is lost
+            self._sock_step.setsockopt(zmq.REQ_RELAXED, 1)
+            self._sock_step.setsockopt(zmq.REQ_CORRELATE, 1)
             self._sock_step.connect(step_endpoint)
 
         self._step_counter = 0
@@ -255,17 +262,26 @@ class StreamEngine:
 
     # ── public API ───────────────────────────────────────────────────
 
-    def poll(self) -> None:
-        """Non-blocking drain of all ZMQ queues, updating state buffers."""
-        while True:
+    def poll(self, max_messages: int = 50) -> int:
+        """Non-blocking drain of ZMQ queues with a processing cap.
+
+        Returns:
+            Number of messages processed.
+        """
+        count = 0
+        while count < max_messages:
             socks = dict(self._poller.poll(0))
             if not socks:
                 break
 
             if self._sock_matrix in socks:
-                self._recv_from(self._sock_matrix)
+                count += self._recv_from(self._sock_matrix, limit=max_messages - count)
             if self._sock_actor is not None and self._sock_actor in socks:
-                self._recv_from(self._sock_actor)
+                count += self._recv_from(self._sock_actor, limit=max_messages - count)
+
+            if not socks:
+                break
+        return count
 
     def send_step_request(
         self,
@@ -293,14 +309,25 @@ class StreamEngine:
             timestamp=time.time(),
         )
         self._step_counter += 1
-        self._sock_step.send(serialize(request))
-        # Block until Environment replies (< 5 ms typical)
-        _reply = self._sock_step.recv()
+        try:
+            self._sock_step.send(serialize(request))
+            # Wait for reply with the timeout set in __init__
+            _reply = self._sock_step.recv()
+        except zmq.Again:
+            # Environment is busy or offline, just drop this teleop step
+            pass
+        except Exception:  # noqa: S110
+            # Log other ZMQ errors if necessary
+            pass
 
     @property
     def has_step_socket(self) -> bool:
         """Whether manual stepping is available."""
         return self._sock_step is not None
+
+    def set_active_actor(self, actor_id: int) -> None:
+        """Set which actor's history to record (saves memory for others)."""
+        self._active_actor_id = actor_id
 
     def close(self) -> None:
         """Tear down all sockets."""
@@ -313,9 +340,10 @@ class StreamEngine:
 
     # ── internal routing ─────────────────────────────────────────────
 
-    def _recv_from(self, sock: zmq.Socket[bytes]) -> None:
-        """Drain one socket, dispatching by topic."""
-        while True:
+    def _recv_from(self, sock: zmq.Socket[bytes], limit: int = 10) -> int:
+        """Drain one socket up to limit, dispatching by topic."""
+        count = 0
+        while count < limit:
             try:
                 topic_bytes, data = sock.recv_multipart(flags=zmq.NOBLOCK)
             except zmq.Again:
@@ -323,6 +351,8 @@ class StreamEngine:
             topic = topic_bytes.decode("utf-8")
             msg = deserialize(data)
             self._dispatch(topic, msg)
+            count += 1
+        return count
 
     @property
     def actor_states(self) -> dict[int, StreamState]:
@@ -347,8 +377,10 @@ class StreamEngine:
             state = self._resolve_state(actor_id)
             state.latest_matrix = msg
             state.last_rx_time = time.time()
-            pose = msg.robot_pose
-            state.pose_history.append((pose.x, pose.z, pose.yaw))
+            # Only record history for the active viewer
+            if actor_id == self._active_actor_id:
+                pose = msg.robot_pose
+                state.pose_history.append((pose.x, pose.z, pose.yaw))
 
         elif topic == TOPIC_ACTION and isinstance(msg, Action):
             actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
@@ -356,9 +388,12 @@ class StreamEngine:
             state.latest_action = msg
 
         elif topic == TOPIC_TELEMETRY_EVENT and isinstance(msg, TelemetryEvent):
-            state = self._resolve_state(msg.env_id)
+            actor_id = msg.env_id
+            state = self._resolve_state(actor_id)
             state.telemetry_buffer.append(msg)
-            self._route_telemetry(msg, state)
+            # Only record history for the active viewer
+            if actor_id == self._active_actor_id:
+                self._route_telemetry(msg, state)
 
     def _route_telemetry(
         self, event: TelemetryEvent, state: StreamState,

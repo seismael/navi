@@ -191,15 +191,20 @@ class OccupancyMap:
         if faces.size == 0:
             return
 
-        for tri_idx in range(faces.shape[0]):
-            tri = verts[faces[tri_idx]]  # (3, 3)
-            # Project to XZ (cols 0, 2) → grid coords
-            wx = tri[:, 0]
-            wz = tri[:, 2]
-            gx = ((wx - self._ox) / self._cell).astype(np.int32)
-            gz = ((wz - self._oz) / self._cell).astype(np.int32)
-            pts = np.column_stack((gx, gz)).reshape(1, -1, 2)
-            cv2.fillPoly(target.view(np.uint8), pts, 1)  # type: ignore[arg-type]
+        # Vectorised conversion from world XZ to grid indices for all triangles at once
+        # faces.shape = (N, 3), verts[faces].shape = (N, 3, 3)
+        tris = verts[faces]  # (N, 3, 3)
+        wx = tris[:, :, 0]    # (N, 3)
+        wz = tris[:, :, 2]    # (N, 3)
+
+        gx = ((wx - self._ox) / self._cell).astype(np.int32)
+        gz = ((wz - self._oz) / self._cell).astype(np.int32)
+
+        # pts_list must be a list of (3, 2) arrays for cv2.fillPoly
+        pts_list = np.stack([gx, gz], axis=-1).astype(np.int32)
+
+        # Batch fillPoly is significantly faster than a Python loop
+        cv2.fillPoly(target.view(np.uint8), pts_list, 1)
 
     # ── per-tick grid update ─────────────────────────────────────────
 
@@ -238,10 +243,14 @@ class OccupancyMap:
         self._trail.append((x, z, yaw))
 
         # ── per-azimuth minimum valid depth ──────────────────────────
+        # Simulation convention: bin 0 is 0° (Forward), rotating clockwise.
+        # local_angles[0] = 0, local_angles[N/4] = pi/2 (Right), etc.
         local_angles = np.linspace(
-            -np.pi, np.pi, az_bins, endpoint=False, dtype=np.float32,
+            0, 2 * np.pi, az_bins, endpoint=False, dtype=np.float32,
         )
-        world_angles = local_angles + yaw
+        # Note: MeshSceneBackend uses Z-forward (0, 0, -1), so we subtract yaw
+        # for a standard top-down cartesian map (X=right, Z=up/forward).
+        world_angles = local_angles - yaw - (np.pi / 2.0)
 
         min_d_m = np.full(az_bins, np.nan, dtype=np.float32)
         for i in range(az_bins):
@@ -282,7 +291,7 @@ class OccupancyMap:
             rgx_m = rgx[rm]
             rgz_m = rgz[rm]
             free_cells = self._occ[rgz_m, rgx_m] == 0
-            self._occ[rgz_m[free_cells], rgx_m[free_cells]] = 1
+            self._occ[rgz_m[free_cells], rgz_m[free_cells]] = 1
 
     # ── rendering ────────────────────────────────────────────────────
 
@@ -333,9 +342,10 @@ class OccupancyMap:
         occ_mask = v_occ == 2
         if np.any(occ_mask):
             d_norm = np.clip(v_dep[occ_mask] / self._max_dist, 0.0, 1.0)
-            gray = (d_norm * 255.0).astype(np.uint8)
+            gray = (d_norm * 255.0).astype(np.uint8).reshape(-1, 1)
             colored = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
             img[occ_mask] = colored.reshape(-1, 3)
+
 
         # ── resize to output ─────────────────────────────────────────
         out = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)

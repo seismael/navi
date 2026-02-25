@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 navi-environment = "navi_environment.cli:app"
+environment = "navi_environment.cli:serve_shortcut"
 
 [tool.uv.sources]
 navi-contracts = { path = "../contracts", editable = true }
@@ -58,6 +59,8 @@ module = [
     "zarr",
     "navi_contracts",
     "navi_contracts.*",
+    "pydantic_settings",
+    "trimesh",
 ]
 ignore_missing_imports = true
 

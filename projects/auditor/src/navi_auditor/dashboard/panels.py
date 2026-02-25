@@ -218,7 +218,18 @@ class StatusBar(QtWidgets.QFrame):
         self._stream_label.setStyleSheet("color: #0c0; font-size: 11px;")
         layout.addWidget(self._stream_label)
 
+        # Lag indicator
+        self._lag_label = QtWidgets.QLabel("lag=—")
+        self._lag_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(self._lag_label)
+
         layout.addStretch()
+
+    def set_lag(self, lag_ms: float) -> None:
+        """Update lag indicator with colour coding."""
+        color = "#0c0" if lag_ms < 16.0 else "#fa0" if lag_ms < 33.0 else "#f00"
+        self._lag_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._lag_label.setText(f"lag={lag_ms:.1f}ms")
 
     def set_mode(self, mode: str) -> None:
         """Update mode indicator text and colour."""

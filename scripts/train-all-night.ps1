@@ -13,7 +13,6 @@ param(
     [double]$EntropyCoeff = 0.02,
     [double]$LearningRate = 5e-4,
     [int]$BpttLen = 16,
-    [string]$Encoder = "vit",
     [int]$CheckpointEvery = 25000,
     [string]$LogDir = "scripts/logs/all_night"
 )
@@ -88,7 +87,6 @@ function Stop-NaviProcesses {
 Stop-NaviProcesses
 
 # ── Start Continuous Training ──
-# ── Start Continuous Training ──
 $actorArgs = @(
     "run",
     "--project", (Join-Path $repoRoot "projects\actor"),
@@ -106,9 +104,9 @@ $actorArgs = @(
     "--entropy-coeff", "$EntropyCoeff",
     "--learning-rate", "$LearningRate",
     "--bptt-len", "$BpttLen",
-    "--encoder", "$Encoder",
     "--backend", $Backend
 )
+
 
 if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) {
     $actorArgs += @("--checkpoint", $ResumeCheckpoint)

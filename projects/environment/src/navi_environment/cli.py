@@ -105,10 +105,10 @@ def _build_backend(config: EnvironmentConfig) -> SimulatorBackend:
 
 @app.command()
 def serve(
-    pub: str = typer.Option("tcp://*:5559", help="ZMQ PUB bind address (DistanceMatrix v2)"),
-    rep: str = typer.Option("tcp://*:5560", help="ZMQ REP bind address (StepRequest/StepResult)"),
+    pub: str = typer.Option(None, help="ZMQ PUB bind address (DistanceMatrix v2)"),
+    rep: str = typer.Option(None, help="ZMQ REP bind address (StepRequest/StepResult)"),
     action_sub: str = typer.Option(
-        "tcp://localhost:5557",
+        None,
         help="ZMQ SUB address for Action (async mode)",
     ),
     mode: str = typer.Option("step", help="Mode: step (REQ/REP) or async (PUB/SUB)"),
@@ -136,10 +136,12 @@ def serve(
     actors: int = typer.Option(1, help="Number of actors sharing the scene"),
 ) -> None:
     """Start the Environment service."""
+    default_config = EnvironmentConfig()
+
     config = EnvironmentConfig(
-        pub_address=pub,
-        rep_address=rep,
-        action_sub_address=action_sub,
+        pub_address=pub or default_config.pub_address,
+        rep_address=rep or default_config.rep_address,
+        action_sub_address=action_sub or default_config.action_sub_address,
         mode=mode,
         world_source=world_source,
         world_file=world_file,
@@ -170,6 +172,12 @@ def serve(
         f"generator={config.generator}, seed={config.seed}",
     )
     server.run()
+
+
+def serve_shortcut() -> None:
+    """Shortcut for 'navi-environment serve' command."""
+    app(["serve"])
+
 
 @app.command("compile-world")
 def compile_world(

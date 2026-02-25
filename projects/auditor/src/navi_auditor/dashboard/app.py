@@ -63,23 +63,20 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
         scene_path: str | None = None,
-        n_actors: int = 1,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Ghost-Matrix RL Auditor")
         self.resize(1920, 1080)
         self.setStyleSheet("QMainWindow { background: #0d0d1a; }")
 
-        self._n_actors = max(0, n_actors)
-        self._known_actors: list[int] = list(range(self._n_actors)) if n_actors > 0 else []
-        self._active_actor: int = 0
+        self._known_actors: list[int] = []
+        self._active_actor: int = -1  # None selected yet
 
         # Stream engine
         self._engine = StreamEngine(
             matrix_sub=matrix_sub,
             actor_sub=actor_sub,
             step_endpoint=step_endpoint,
-            n_actors=self._n_actors,
         )
 
         # Teleop state
@@ -114,21 +111,24 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Top status bar
         main_layout.addWidget(self._status_bar)
 
-        # Actor tab bar (initially hidden if n_actors <= 1)
-        self._actor_tab_bar = QtWidgets.QTabBar()
-        self._actor_tab_bar.setStyleSheet(
-            "QTabBar::tab { background: #1a1a2e; color: #aaa; "
-            "padding: 6px 18px; margin: 1px; border-radius: 4px; } "
-            "QTabBar::tab:selected { background: #2e86de; color: #fff; }"
+        # Actor selection (ComboBox)
+        self._actor_selector = QtWidgets.QComboBox()
+        self._actor_selector.setStyleSheet(
+            "QComboBox { background: #1a1a2e; color: #fff; border: 1px solid #333; "
+            "padding: 5px; border-radius: 4px; min-width: 120px; font-weight: bold; } "
+            "QComboBox::drop-down { border: none; } "
+            "QComboBox QAbstractItemView { background: #1a1a2e; color: #fff; selection-background-color: #2e86de; }"
         )
-        for i in self._known_actors:
-            self._actor_tab_bar.addTab(f"Actor {i}")
-        self._actor_tab_bar.currentChanged.connect(self._on_actor_tab_changed)
+        self._actor_selector.currentIndexChanged.connect(self._on_actor_selector_changed)
 
-        if len(self._known_actors) <= 1:
-            self._actor_tab_bar.hide()
+        selector_container = QtWidgets.QWidget()
+        selector_layout = QtWidgets.QHBoxLayout(selector_container)
+        selector_layout.setContentsMargins(10, 5, 10, 5)
+        selector_layout.addWidget(QtWidgets.QLabel("VIEWING ACTOR:"))
+        selector_layout.addWidget(self._actor_selector)
+        selector_layout.addStretch()
 
-        main_layout.addWidget(self._actor_tab_bar)
+        main_layout.addWidget(selector_container)
 
         # Body: splitter with left (spatial views) and right (chart grid)
         body = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -324,19 +324,25 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._plot_zero_wait.set_data_from_deque(state.perf_zero_wait_history)
         self._plot_opt_ms.set_data_from_deque(state.perf_opt_ms_history)
 
-    # ── actor tab switching ────────────────────────────────────────────
+    # ── actor selection ────────────────────────────────────────────
 
-    def _on_actor_tab_changed(self, index: int) -> None:
-        """Switch the displayed actor when a tab is clicked."""
-        if 0 <= index < len(self._known_actors):
-            self._active_actor = self._known_actors[index]
-            self._wire_plots()
+    def _on_actor_selector_changed(self, index: int) -> None:
+        """Switch the displayed actor when drop-down selection changes."""
+        if 0 <= index < self._actor_selector.count():
+            actor_id = self._actor_selector.itemData(index)
+            if actor_id is not None:
+                self._active_actor = int(actor_id)
+                self._engine.set_active_actor(self._active_actor)
+                self._wire_plots()
 
     # ── tick / render loop ───────────────────────────────────────────
 
     def _tick(self) -> None:
         """Called every timer interval — poll ZMQ, update all panels."""
-        self._engine.poll()
+        t_start = time.perf_counter()
+
+        # Ingest capped ZMQ burst (Standard: UI Throughput)
+        _msgs_processed = self._engine.poll(max_messages=100)
 
         # Dynamic actor discovery
         current_stream_actors = set(self._engine.actor_states.keys())
@@ -345,30 +351,32 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         if new_actors:
             for actor_id in new_actors:
-                self._actor_tab_bar.addTab(f"Actor {actor_id}")
+                self._actor_selector.addItem(f"Actor {actor_id}", actor_id)
                 self._known_actors.append(actor_id)
 
-            self._n_actors = len(self._known_actors)
-            if self._n_actors > 1:
-                self._actor_tab_bar.show()
-            elif self._n_actors == 1 and not self._known_actors:
-                # First actor arrived
-                pass
+            # Auto-select the first one if none selected
+            if self._actor_selector.currentIndex() < 0 and self._known_actors:
+                self._actor_selector.setCurrentIndex(0)
 
         if not self._known_actors:
-            # Waiting for data...
             self._status_bar.set_mode("WAITING")
             return
 
         if self._active_actor not in self._engine.actor_states:
-            # Safe fallback if active actor is somehow invalid
-            self._active_actor = self._known_actors[0] if self._known_actors else 0
+            if not self._known_actors:
+                return
+            self._active_actor = self._known_actors[0]
             self._wire_plots()
+
+        if self._active_actor not in self._engine.actor_states:
+            return
 
         state = self._engine.actor_states[self._active_actor]
 
-        # Determine mode
-        has_training_data = len(state.reward_history) > 0
+        # Determine mode (Standard: Mode Detection)
+        has_training_data = (len(state.reward_history) > 0 or
+                            len(state.ppo_reward_ema_history) > 0)
+
         if self._manual_mode:
             mode = "MANUAL"
         elif has_training_data:
@@ -387,13 +395,19 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._refresh_plots()
         self._handle_teleop()
 
+        lag_ms = (time.perf_counter() - t_start) * 1000.0
+        self._status_bar.set_lag(lag_ms)
+
     def _update_spatial_panels(self, dm: object) -> None:
         """Update spatial view panels: live occupancy map + raw depth."""
+        import numpy as np
+
         from navi_contracts import DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
-        depth_2d = dm.depth[0]
-        valid_2d = dm.valid_mask[0]
+        # Roll so bin 0 (Forward) is in the middle of the azimuth range
+        depth_2d = np.roll(dm.depth[0], shift=dm.depth[0].shape[0] // 2, axis=0)
+        valid_2d = np.roll(dm.valid_mask[0], shift=dm.valid_mask[0].shape[0] // 2, axis=0)
         az_bins = depth_2d.shape[0]
 
         fov_bins = max(1, int(az_bins * _FOV_FRACTION))
@@ -405,19 +419,22 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         # Live occupancy map — accumulate + render
         p = dm.robot_pose
-        self._occ_map.update(
-            depth_2d, valid_2d, p.x, p.z, p.yaw, dm.episode_id,
-        )
-        occ_img = self._occ_map.render(480, 480)
-        self._env_panel.set_image(occ_img)
+        if p:
+            # Pass the original un-rolled matrix to OccupancyMap for world-space projection
+            self._occ_map.update(
+                dm.depth[0], dm.valid_mask[0], p.x, p.z, p.yaw, dm.episode_id,
+            )
+            occ_img = self._occ_map.render(480, 480)
+            self._env_panel.set_image(occ_img)
 
-        # Raw depth (Viridis) — transpose to fix 180° flip
+        # Raw depth (Viridis) — transpose to put Azimuth on X and Elevation on Y
         viridis_img = depth_to_viridis(fov_depth.T, fov_valid.T)
         viridis_resized = cv2.resize(
             viridis_img, (480, 360), interpolation=cv2.INTER_NEAREST,
         )
         add_orientation_guides(viridis_resized)
         self._depth_panel.set_image(viridis_resized)
+
 
     def _update_status(
         self, dm: object, action: object, state: object,
@@ -557,7 +574,6 @@ def run_dashboard(
     linear_speed: float = 1.5,
     yaw_rate: float = 1.5,
     scene_path: str | None = None,
-    n_actors: int = 1,
 ) -> None:
     """Launch the Ghost-Matrix RL Dashboard as a standalone application."""
     app = pg.mkQApp("Ghost-Matrix RL Auditor")
@@ -570,7 +586,6 @@ def run_dashboard(
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,
         scene_path=scene_path,
-        n_actors=n_actors,
     )
     dashboard.show()
     app.exec()

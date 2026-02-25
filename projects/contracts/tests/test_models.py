@@ -219,7 +219,8 @@ class TestBatchStepRequest:
         for i, action in enumerate(restored.actions):
             assert action.env_ids[0] == i
             np.testing.assert_array_almost_equal(
-                action.linear_velocity, actions[i].linear_velocity,
+                action.linear_velocity,
+                actions[i].linear_velocity,
             )
 
 
@@ -229,8 +230,12 @@ class TestBatchStepResult:
     def test_round_trip_serialization(self) -> None:
         results = tuple(
             StepResult(
-                step_id=10, env_id=i, done=i == 1,
-                truncated=False, reward=0.5, episode_return=1.0,
+                step_id=10,
+                env_id=i,
+                done=i == 1,
+                truncated=False,
+                reward=0.5,
+                episode_return=1.0,
                 timestamp=1.0,
             )
             for i in range(3)
