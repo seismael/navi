@@ -32,8 +32,7 @@ Navi is a Ghost-Matrix system focused on throughput RL with strict separation of
    actor engine never imports environment types.
 7. Code quality gates remain mandatory: `ruff`, `mypy --strict`, `pytest`.
 8. **The training engine is sacred.** The actor's cognitive pipeline
-   (FoveatedEncoder → Mamba2 → EpisodicMemory → ActorCriticHeads → PPO)
-   is never modified to accommodate a new data source. External data always
+       (RayViTEncoder → Mamba2 → EpisodicMemory → ActorCriticHeads → PPO)   is never modified to accommodate a new data source. External data always
    connects through a `DatasetAdapter` that transforms *to* the engine's
    canonical `(1, Az, El)` DistanceMatrix format.
 9. All backends must produce arrays in canonical shape `(n_envs, Az, El)` with
@@ -109,7 +108,7 @@ navi/
     │       ├── config.py
     │       ├── spherical_features.py    # 17-dim feature extraction
     │       ├── cognitive_policy.py      # CognitiveMambaPolicy (sacred)
-    │       ├── perception.py            # FoveatedEncoder CNN
+    │       ├── perception.py            # RayViTEncoder ViT
     │       ├── mamba_core.py            # Mamba2TemporalCore
     │       ├── actor_critic.py          # ActorCriticHeads
     │       ├── rnd.py                   # RND curiosity

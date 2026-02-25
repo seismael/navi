@@ -13,7 +13,7 @@ def _make_transition(
     value: float = 0.5,
 ) -> PPOTransition:
     return PPOTransition(
-        observation=torch.randn(2, 64, 32),
+        observation=torch.randn(3, 128, 24),
         action=torch.randn(4),
         log_prob=-0.5,
         value=value,
@@ -130,7 +130,7 @@ def test_truncation_bootstrap() -> None:
     buf_trunc = TrajectoryBuffer(gamma=gamma, gae_lambda=gae_lambda)
     buf_trunc.append(_make_transition(reward=1.0, done=False, value=value))
     tr_trunc = PPOTransition(
-        observation=torch.randn(2, 64, 32),
+        observation=torch.randn(3, 128, 24),
         action=torch.randn(4),
         log_prob=-0.5,
         value=value,
@@ -172,7 +172,7 @@ def test_truncation_still_cuts_gae_trace() -> None:
     buf_trunc = TrajectoryBuffer(gamma=gamma, gae_lambda=gae_lambda)
     buf_trunc.append(_make_transition(reward=1.0, done=False, value=0.5))
     tr_trunc = PPOTransition(
-        observation=torch.randn(2, 64, 32),
+        observation=torch.randn(3, 128, 24),
         action=torch.randn(4),
         log_prob=-0.5,
         value=0.5,

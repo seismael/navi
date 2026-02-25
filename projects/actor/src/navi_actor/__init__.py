@@ -9,13 +9,13 @@ __all__: list[str] = [
     "CognitiveMambaPolicy",
     "EpisodicMemory",
     "extract_spherical_features",
-    "FoveatedEncoder",
     "Mamba2TemporalCore",
     "PPOTransition",
     "PpoLearner",
     "PpoMetrics",
     "PpoTrainer",
     "PpoTrainingMetrics",
+    "RayViTEncoder",
     "RewardShaper",
     "RNDModule",
     "ShapedReward",
@@ -28,7 +28,7 @@ from navi_actor.config import ActorConfig
 from navi_actor.learner_ppo import PpoLearner, PpoMetrics
 from navi_actor.mamba_core import Mamba2TemporalCore
 from navi_actor.memory.episodic import EpisodicMemory
-from navi_actor.perception import FoveatedEncoder
+from navi_actor.perception import RayViTEncoder
 from navi_actor.reward_shaping import RewardShaper, ShapedReward
 from navi_actor.rnd import RNDModule
 from navi_actor.rollout_buffer import (

@@ -59,7 +59,9 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
         )
 
         # Learnable log standard deviation (per action dim)
-        self.log_std = nn.Parameter(torch.zeros(self.action_dim))
+        # INITIAL DAMPING: Start with smaller variance (log_std = -0.5 -> std ~ 0.6)
+        # to stop the drone from "shaking" near walls at start of training.
+        self.log_std = nn.Parameter(torch.full((self.action_dim,), -0.5))
 
         # Critic MLP
         self.critic = nn.Sequential(

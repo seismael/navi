@@ -31,7 +31,7 @@ def test_save_load_training_state_roundtrip() -> None:
     trainer._reward_shaper._global_step = 12345
 
     # Force optimizer creation by doing a dummy forward/backward
-    obs = torch.randn(1, 2, 64, 32, device=trainer._device)
+    obs = torch.randn(1, 3, 128, 24, device=trainer._device)
     _actions, log_probs, values, _, _ = trainer._policy(obs)
     loss = -log_probs.sum() + values.sum()
     opt = trainer._learner._get_optimizer(trainer._policy)

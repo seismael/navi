@@ -29,9 +29,9 @@ class PPOTransition:
     value: float
     reward: float
     done: bool
-    aux_state: Tensor | None = None  # (3,) [prev_r, loop_sim, intrinsic_r]
     truncated: bool = False
     hidden_state: Tensor | None = None
+    aux_tensor: Tensor | None = None
 
 
 class TrajectoryBuffer:
@@ -107,9 +107,9 @@ class TrajectoryBuffer:
                     value=tail.value,
                     reward=tail.reward,
                     done=True,
-                    aux_state=tail.aux_state,
                     truncated=tail.truncated,
                     hidden_state=tail.hidden_state,
+                    aux_tensor=tail.aux_tensor,
                 )
 
         self._transitions.extend(other._transitions)
@@ -148,16 +148,9 @@ class TrajectoryBuffer:
         self._t_dones = torch.tensor(
             [tr.done for tr in self._transitions], dtype=torch.bool,
         )
-        # Handle auxiliary state (may be None if old version)
-        first_aux = self._transitions[0].aux_state
-        if first_aux is not None:
-            self._t_aux = torch.stack(
-                [tr.aux_state if tr.aux_state is not None else torch.zeros_like(first_aux) 
-                 for tr in self._transitions],
-            )
-        else:
-            self._t_aux = None
-
+        self._t_aux = torch.stack(
+            [tr.aux_tensor for tr in self._transitions]
+        ) if self._transitions[0].aux_tensor is not None else None
         self._t_cached = True
 
     def compute_returns_and_advantages(
@@ -218,9 +211,9 @@ class TrajectoryBuffer:
         old_values: Tensor  # (B,)
         advantages: Tensor  # (B,)
         returns: Tensor  # (B,)
-        aux_states: Tensor | None = None  # (B, 3)
         hidden_states: list[Tensor | None] = field(default_factory=list)
         dones: Tensor | None = None  # (n_seqs, seq_len) for BPTT
+        aux_tensors: Tensor | None = None  # (B, 3) or (n_seqs, seq_len, 3)
 
     def sample_minibatches(
         self,
@@ -260,8 +253,8 @@ class TrajectoryBuffer:
         acts = self._t_actions
         old_lp = self._t_log_probs
         old_v = self._t_values
-        aux = self._t_aux
         dones_flat = self._t_dones
+        aux_flat = self._t_aux
         advs = self._advantages
         rets = self._returns
 
@@ -297,9 +290,9 @@ class TrajectoryBuffer:
                     old_values=old_v[idx],
                     advantages=advs[idx],
                     returns=rets[idx],
-                    aux_states=aux[idx] if aux is not None else None,
                     hidden_states=chunk_hidden,
                     dones=torch.stack(chunk_dones),  # (n_seqs, seq_len)
+                    aux_tensors=aux_flat[idx] if aux_flat is not None else None,
                 )
         else:
             # Random shuffle
@@ -313,5 +306,5 @@ class TrajectoryBuffer:
                     old_values=old_v[idx],
                     advantages=advs[idx],
                     returns=rets[idx],
-                    aux_states=aux[idx] if aux is not None else None,
+                    aux_tensors=aux_flat[idx] if aux_flat is not None else None,
                 )

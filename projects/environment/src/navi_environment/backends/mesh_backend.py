@@ -85,10 +85,10 @@ __all__: list[str] = ["MeshSceneBackend"]
 _log = logging.getLogger(__name__)
 
 # ── Reward constants ─────────────────────────────────────────────────
-_STRUCTURE_REWARD: float = 0.5  # Bonus for being inside building (seeing surfaces)
-_VOID_PENALTY: float = -2.0     # Harsh penalty for escaping into empty space
+_EXPLORATION_REWARD: float = 0.3
 _COLLISION_PENALTY: float = -5.0
-_PROGRESS_REWARD_SCALE: float = 0.8
+_VOID_TAX: float = -0.02        # Penalty for staring into the void
+_STRUCTURE_WEIGHT: float = 0.1  # Weight for depth variance (structure attraction)
 _CIRCLING_PENALTY: float = -0.5
 _CIRCLING_WINDOW: int = 200  # physics ticks (~4 s at dt=0.02)
 _PROXIMITY_CLEAR_BONUS: float = 0.15
@@ -128,6 +128,7 @@ class _ActorState:
     step_count: int = 0
     prev_depth: NDArray[np.float32] | None = None
     episode_return: float = 0.0
+    visited_cells: set[tuple[int, int]] = field(default_factory=set)
     yaw_history: list[float] = field(default_factory=list)
     pos_history: list[tuple[float, float]] = field(default_factory=list)
     stuck_counter: int = 0
@@ -358,6 +359,7 @@ class MeshSceneBackend(SimulatorBackend):
         a.episode_id = episode_id
         a.step_count = 0
         a.episode_return = 0.0
+        a.visited_cells.clear()
         a.yaw_history.clear()
         a.pos_history.clear()
         a.prev_depth = None
@@ -1039,65 +1041,84 @@ class MeshSceneBackend(SimulatorBackend):
         *,
         actor_id: int = 0,
     ) -> float:
-        """Multi-component reward with structure-anchored exploration.
+        """Multi-component reward with Information Foraging.
 
         Components:
-        1. Structure Reward -- bonus for seeing valid geometry (+0.5 x %valid)
-        2. Void Penalty -- harsh penalty for escaping mesh bounds (-2.0)
-        3. Progress -- displacement (only if structure is visible)
-        4. Collision penalty (-5.0)
-        5. Anti-circling (spin in place) (-0.5)
-        6. Proximity clear bonus (+0.15)
+        1. Void Tax vs Structure Attraction:
+           - Penalty for staring into the void (-0.02)
+           - Reward for depth variance (looking at structures)
+        2. Proximity-Gated Exploration:
+           - Only reward new cells if within structure range (+0.3)
+        3. Safety:
+           - Collision penalty (-5.0)
+           - Proximity clear bonus (+0.15)
+        4. Anti-circling (-0.5)
         """
         a = self._actors[actor_id]
         reward = 0.0
-
-        depth = obs.depth[0]
-        valid = obs.valid_mask[0]
-        valid_frac = float(np.mean(valid))
-
-        # 1) & 2) Structure vs Void
-        if valid_frac < 0.05:
-            # Agent is likely outside the building or in a mesh gap
-            reward += _VOID_PENALTY
-        else:
-            # Reward being inside and seeing detail
-            reward += _STRUCTURE_REWARD * valid_frac
-
-        # 3) Progress — forward displacement
-        # Progress is only rewarded if we are "anchored" to a structure.
-        # This prevents the agent from finding infinite reward in the void.
-        dx = curr.x - prev.x
-        dz = curr.z - prev.z
-        dy = curr.y - prev.y
-        progress = float(math.sqrt(dx * dx + dz * dz + dy * dy))
         
-        scale = _PROGRESS_REWARD_SCALE if valid_frac > 0.1 else (_PROGRESS_REWARD_SCALE * 0.1)
-        reward += scale * progress
+        # Extract sensor arrays
+        depth = obs.depth[0]  # (Az, El) normalized to [0, 1]
+        valid = obs.valid_mask[0]
+        
+        # Calculate sensor statistics
+        # Use np.where to ensure we only look at valid geometry
+        safe_depth = np.where(valid, depth, 1.0)
+        min_depth = float(safe_depth.min())
+        depth_variance = float(np.var(safe_depth))
 
-        # 4) Collision penalty
+        # ---------------------------------------------------------
+        # 1. THE VOID TAX vs. STRUCTURE ATTRACTION
+        # ---------------------------------------------------------
+        if min_depth >= 0.99:
+            # The agent is staring into the void. Apply existential tax.
+            reward += _VOID_TAX
+        else:
+            # The agent is looking at complex structures. Reward the variance.
+            reward += depth_variance * _STRUCTURE_WEIGHT
+
+        # ---------------------------------------------------------
+        # 2. PROXIMITY-GATED EXPLORATION (The Paintbrush)
+        # ---------------------------------------------------------
+        cell = (int(np.floor(curr.x / 2.0)), int(np.floor(curr.z / 2.0)))
+        
+        # ONLY reward new cells if we are within range of a structure!
+        if cell not in a.visited_cells:
+            a.visited_cells.add(cell)
+            if min_depth < 0.95:
+                reward += _EXPLORATION_REWARD
+            else:
+                # Discovered a void cell. Worth nothing.
+                pass
+
+        # ---------------------------------------------------------
+        # 3. SAFETY & COLLISION
+        # ---------------------------------------------------------
         if collided:
             reward += _COLLISION_PENALTY
+        elif min_depth < 0.15:
+            # Proximity Clear Bonus: Flying dangerously close to walls 
+            # without hitting them is rewarded.
+            reward += _PROXIMITY_CLEAR_BONUS
 
-        # 5) Anti-circling
+        # ---------------------------------------------------------
+        # 4. ANTI-CIRCLING
+        # ---------------------------------------------------------
         a.yaw_history.append(float(curr.yaw))
         a.pos_history.append((float(curr.x), float(curr.z)))
+        
         if len(a.yaw_history) > _CIRCLING_WINDOW:
             a.yaw_history = a.yaw_history[-_CIRCLING_WINDOW:]
             a.pos_history = a.pos_history[-_CIRCLING_WINDOW:]
+            
         if len(a.yaw_history) >= _CIRCLING_WINDOW:
             net_yaw = abs(a.yaw_history[-1] - a.yaw_history[0])
             net_pos_travel = float(math.sqrt(
-                (a.pos_history[-1][0] - a.pos_history[0][0]) ** 2
-                + (a.pos_history[-1][1] - a.pos_history[0][1]) ** 2,
+                (a.pos_history[-1][0] - a.pos_history[0][0]) ** 2 +
+                (a.pos_history[-1][1] - a.pos_history[0][1]) ** 2
             ))
+            
             if net_yaw > 2.0 * math.pi and net_pos_travel < 1.0:
                 reward += _CIRCLING_PENALTY
-
-        # 6) Proximity clear bonus — near obstacles but not colliding
-        if valid_frac > 0:
-            min_depth = float(np.where(valid, depth, 1.0).min())
-            if min_depth < 0.15 and not collided:
-                reward += _PROXIMITY_CLEAR_BONUS
 
         return reward

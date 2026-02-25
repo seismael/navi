@@ -8,7 +8,7 @@ Brain Layer for Ghost-Matrix runtime.
 ## Engine Isolation Principle
 
 **The training engine is sacred.** The cognitive pipeline
-(FoveatedEncoder → Mamba2 → EpisodicMemory → ActorCriticHeads → PPO) is never
+(RayViTEncoder → Mamba2 → EpisodicMemory → ActorCriticHeads → PPO) is never
 modified to accommodate a new data source. External data always connects through
 a `DatasetAdapter` in `environment/backends/` that transforms raw
 observations *to* the engine's canonical `(1, Az, El)` DistanceMatrix format.
@@ -16,7 +16,7 @@ observations *to* the engine's canonical `(1, Az, El)` DistanceMatrix format.
 ## Cognitive Architecture
 
 `CognitiveMambaPolicy` implements a 5-stage pipeline:
-1. **FoveatedEncoder** — CNN `(B, 2, Az, El)` → `(B, 128)` spatial embedding
+1. **RayViTEncoder** — ViT `(B, 3, Az, El)` → `(B, 128)` spatial embedding
 2. **RND Curiosity** — intrinsic exploration reward from embedding novelty
 3. **EpisodicMemory** — FAISS KNN loop-closure detection and context retrieval
 4. **Mamba2TemporalCore** — O(n) selective state-space temporal integration

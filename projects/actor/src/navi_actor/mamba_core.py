@@ -107,12 +107,14 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
             _LOGGER.info("Mamba2TemporalCore: using GRU fallback (mamba-ssm not found)")
 
         self.norm = nn.LayerNorm(d_model)
+        self.aux_proj = nn.Linear(3, d_model)
 
     def forward(
         self,
         z_seq: Tensor,
         hidden: Tensor | None = None,
         dones: Tensor | None = None,
+        aux_tensor: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
         """Process a sequence of spatial embeddings through the temporal core.
 
@@ -123,12 +125,16 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
                 - Mamba2: None (stateless in training; uses internal cache for
                   inference).
             dones: (B, T) boolean mask for episode-boundary hidden resets.
+            aux_tensor: (B, T, 3) optional auxiliary tensor.
 
         Returns:
             output: (B, T, D) temporal representations.
             new_hidden: updated hidden state.
 
         """
+        if aux_tensor is not None:
+            z_seq = z_seq + self.aux_proj(aux_tensor)
+
         if self.use_mamba:
             # Mamba2 is stateless during training (full sequence at once).
             # For single-step inference, we wrap in a length-1 sequence.
@@ -142,13 +148,14 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
         return out, new_h
 
     def forward_step(
-        self, z_t: Tensor, hidden: Tensor | None = None,
+        self, z_t: Tensor, hidden: Tensor | None = None, aux_tensor: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
         """Process a single time step for online inference.
 
         Args:
             z_t: (B, D) single embedding.
             hidden: recurrent state.
+            aux_tensor: (B, 3) optional auxiliary tensor.
 
         Returns:
             output: (B, D) temporal representation.
@@ -157,5 +164,6 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
         """
         # Wrap as (B, 1, D) sequence
         z_seq = z_t.unsqueeze(1)
-        out_seq, new_hidden = self.forward(z_seq, hidden)
+        aux_seq = aux_tensor.unsqueeze(1) if aux_tensor is not None else None
+        out_seq, new_hidden = self.forward(z_seq, hidden, aux_tensor=aux_seq)
         return out_seq.squeeze(1), new_hidden

@@ -5,13 +5,14 @@ param(
     [string]$ResumeCheckpoint = "",
     [string]$Backend = "mesh",
     [int]$NumActors = 4,
-    [int]$AzimuthBins = 64,
-    [int]$ElevationBins = 32,
-    [int]$MinibatchSize = 512,
+    [int]$AzimuthBins = 128,
+    [int]$ElevationBins = 24,
+    [int]$MinibatchSize = 32,
     [int]$PpoEpochs = 2,
     [double]$ExistentialTax = -0.02,
     [double]$EntropyCoeff = 0.02,
     [double]$LearningRate = 5e-4,
+    [int]$BpttLen = 16,
     [string]$Encoder = "vit",
     [int]$CheckpointEvery = 25000,
     [string]$LogDir = "scripts/logs/all_night"
@@ -104,6 +105,7 @@ $actorArgs = @(
     "--existential-tax", "$ExistentialTax",
     "--entropy-coeff", "$EntropyCoeff",
     "--learning-rate", "$LearningRate",
+    "--bptt-len", "$BpttLen",
     "--encoder", "$Encoder",
     "--backend", $Backend
 )

@@ -29,7 +29,6 @@ def run(
     ),
     azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
     elevation_bins: int = typer.Option(128, help="Expected distance-matrix elevation resolution"),
-    encoder: str = typer.Option("cnn", help="Encoder type: cnn or vit"),
 ) -> None:
     """Start the Actor service (always uses CognitiveMambaPolicy)."""
     root_logger = logging.getLogger()
@@ -45,7 +44,6 @@ def run(
         step_endpoint=step_endpoint,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
-        encoder_type=encoder,
     )
 
     from navi_actor.cognitive_policy import CognitiveMambaPolicy
@@ -60,7 +58,6 @@ def run(
             max_vertical=config.max_vertical,
             max_lateral=config.max_lateral,
             max_yaw=config.max_yaw,
-            encoder_type=config.encoder_type,
         )
     else:
         runtime_policy = CognitiveMambaPolicy(
@@ -71,7 +68,6 @@ def run(
             max_vertical=config.max_vertical,
             max_lateral=config.max_lateral,
             max_yaw=config.max_yaw,
-            encoder_type=config.encoder_type,
         )
 
     server = ActorServer(config=config, policy=runtime_policy)
@@ -89,9 +85,8 @@ def train_ppo(
     step_endpoint: str = typer.Option(
         "tcp://localhost:5560", help="Environment REP address",
     ),
-    azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
-    elevation_bins: int = typer.Option(128, help="Expected distance-matrix elevation resolution"),
-    encoder: str = typer.Option("cnn", help="Encoder type: cnn or vit"),
+    azimuth_bins: int = typer.Option(128, help="Expected distance-matrix azimuth resolution"),
+    elevation_bins: int = typer.Option(24, help="Expected distance-matrix elevation resolution"),
     actors: int = typer.Option(1, help="Number of parallel environments"),
     steps: int = typer.Option(10000, help="Total environment steps"),
     log_every: int = typer.Option(100, help="Log interval in steps"),
@@ -99,9 +94,9 @@ def train_ppo(
     learning_rate_final: float = typer.Option(3e-5, help="Final annealed learning rate"),
     embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
     rollout_length: int = typer.Option(512, help="Steps per rollout"),
-    ppo_epochs: int = typer.Option(4, help="PPO epochs per update"),
-    minibatch_size: int = typer.Option(64, help="Minibatch size"),
-    bptt_len: int = typer.Option(32, help="BPTT sequence length (0 = random)"),
+    ppo_epochs: int = typer.Option(2, help="PPO epochs per update"),
+    minibatch_size: int = typer.Option(32, help="Minibatch size"),
+    bptt_len: int = typer.Option(16, help="BPTT sequence length (0 = random)"),
     clip_ratio: float = typer.Option(0.2, help="PPO clip ratio"),
     gamma: float = typer.Option(0.99, help="Discount factor"),
     gae_lambda: float = typer.Option(0.95, help="GAE lambda"),
@@ -141,7 +136,6 @@ def train_ppo(
         step_endpoint=step_endpoint,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
-        encoder_type=encoder,
         n_actors=actors,
         embedding_dim=embedding_dim,
         learning_rate=learning_rate,
@@ -214,9 +208,8 @@ def train_sequential(
         2,
         help="Number of actors sharing each scene",
     ),
-    azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
-    elevation_bins: int = typer.Option(128, help="Expected distance-matrix elevation resolution"),
-    encoder: str = typer.Option("cnn", help="Encoder type: cnn or vit"),
+    azimuth_bins: int = typer.Option(128, help="Expected distance-matrix azimuth resolution"),
+    elevation_bins: int = typer.Option(24, help="Expected distance-matrix elevation resolution"),
     total_steps: int = typer.Option(
         500_000, help="Total environment steps (across all scenes)",
     ),
@@ -232,9 +225,9 @@ def train_sequential(
     learning_rate_final: float = typer.Option(3e-5, help="Final annealed learning rate"),
     embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
     rollout_length: int = typer.Option(512, help="Steps per rollout"),
-    ppo_epochs: int = typer.Option(4, help="PPO epochs per update"),
-    minibatch_size: int = typer.Option(64, help="Minibatch size"),
-    bptt_len: int = typer.Option(32, help="BPTT sequence length (0 = random)"),
+    ppo_epochs: int = typer.Option(2, help="PPO epochs per update"),
+    minibatch_size: int = typer.Option(32, help="Minibatch size"),
+    bptt_len: int = typer.Option(16, help="BPTT sequence length (0 = random)"),
     clip_ratio: float = typer.Option(0.2, help="PPO clip ratio"),
     gamma: float = typer.Option(0.99, help="Discount factor"),
     gae_lambda: float = typer.Option(0.95, help="GAE lambda"),
@@ -356,7 +349,6 @@ def train_sequential(
         step_endpoint=f"tcp://localhost:{env_rep.split(':')[-1]}",
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
-        encoder_type=encoder,
         n_actors=actors,
         embedding_dim=embedding_dim,
         learning_rate=learning_rate,

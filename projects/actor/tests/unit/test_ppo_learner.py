@@ -14,7 +14,7 @@ def _fill_buffer(n: int = 64) -> TrajectoryBuffer:
     buf = TrajectoryBuffer(gamma=0.99, gae_lambda=0.95)
     for _ in range(n):
         buf.append(PPOTransition(
-            observation=torch.randn(2, 64, 32),
+            observation=torch.randn(3, 128, 24),
             action=torch.randn(4),
             log_prob=-0.5,
             value=0.5,

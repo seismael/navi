@@ -52,9 +52,9 @@ param(
     [string]$ResumeCheckpoint = "",
     [string]$Backend = "mesh",
     [int]$NumActors = 1,
-    [int]$AzimuthBins = 64,
-    [int]$ElevationBins = 32,
-    [int]$MinibatchSize = 512,
+    [int]$AzimuthBins = 128,
+    [int]$ElevationBins = 24,
+    [int]$MinibatchSize = 32,
     [int]$PpoEpochs = 2,
     [double]$ExistentialTax = -0.002,
     [double]$EntropyCoeff = 0.02,
@@ -296,7 +296,7 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
         "--existential-tax", "$ExistentialTax",
         "--entropy-coeff", "$EntropyCoeff",
         "--learning-rate", "$LearningRate",
-        "--bptt-len", "32"
+        "--bptt-len", "16"
     )
 
     if (-not [string]::IsNullOrWhiteSpace($currentCheckpoint)) {

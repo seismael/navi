@@ -21,7 +21,7 @@ def _make_policy() -> CognitiveMambaPolicy:
 def test_forward_shapes() -> None:
     """forward() should return (B,4), (B,), (B,), hidden, (B,D)."""
     policy = _make_policy()
-    obs = torch.randn(2, 2, 64, 32)
+    obs = torch.randn(2, 3, 128, 24)
     actions, log_probs, values, hidden, z_t = policy.forward(obs)
     assert actions.shape == (2, 4)
     assert log_probs.shape == (2,)
@@ -33,7 +33,7 @@ def test_forward_shapes() -> None:
 def test_evaluate_shapes() -> None:
     """evaluate() should return log_probs, values, entropy, hidden, z_t."""
     policy = _make_policy()
-    obs = torch.randn(2, 2, 64, 32)
+    obs = torch.randn(2, 3, 128, 24)
     acts = torch.randn(2, 4)
     lp, val, ent, hidden, z_t = policy.evaluate(obs, acts)
     assert lp.shape == (2,)
@@ -45,7 +45,7 @@ def test_evaluate_shapes() -> None:
 def test_act_returns_list() -> None:
     """act() inference should return list of floats."""
     policy = _make_policy()
-    obs = torch.randn(2, 64, 32)  # (C, Az, El) — no batch dim
+    obs = torch.randn(3, 128, 24)  # (C, Az, El) — no batch dim
     action_list, hidden = policy.act(obs, step_id=0)
     assert isinstance(action_list, list)
     assert len(action_list) == 4
@@ -55,7 +55,7 @@ def test_act_returns_list() -> None:
 def test_encode_returns_embedding() -> None:
     """encode() should return spatial embedding without temporal processing."""
     policy = _make_policy()
-    obs = torch.randn(2, 2, 64, 32)
+    obs = torch.randn(2, 3, 128, 24)
     z = policy.encode(obs)
     assert z.shape == (2, 128)
 
@@ -63,7 +63,7 @@ def test_encode_returns_embedding() -> None:
 def test_evaluate_sequence_shapes() -> None:
     """evaluate_sequence() should handle (B,T,...) observation sequences."""
     policy = _make_policy()
-    obs_seq = torch.randn(2, 4, 2, 64, 32)  # (B, T, C, Az, El)
+    obs_seq = torch.randn(2, 4, 3, 128, 24)  # (B, T, C, Az, El)
     acts_seq = torch.randn(2, 4, 4)  # (B, T, 4)
     lp, val, ent, hidden, z_t = policy.evaluate_sequence(obs_seq, acts_seq)
     assert lp.shape == (8,)  # B*T
@@ -88,7 +88,7 @@ def test_checkpoint_roundtrip() -> None:
 def test_gradient_flow() -> None:
     """Gradients should propagate through the full policy."""
     policy = _make_policy()
-    obs = torch.randn(2, 2, 64, 32)
+    obs = torch.randn(2, 3, 128, 24)
     actions, log_probs, values, _, _ = policy.forward(obs)
     loss = log_probs.sum() + values.sum()
     loss.backward()
@@ -100,7 +100,7 @@ def test_gradient_flow() -> None:
 def test_evaluate_value_stop_gradient() -> None:
     """evaluate() must stop-gradient: value loss must NOT flow to encoder/temporal."""
     policy = _make_policy()
-    obs = torch.randn(2, 2, 64, 32)
+    obs = torch.randn(2, 3, 128, 24)
     acts = torch.randn(2, 4)
     _, values, _, _, _ = policy.evaluate(obs, acts)
 
@@ -129,7 +129,7 @@ def test_evaluate_value_stop_gradient() -> None:
 def test_evaluate_sequence_value_stop_gradient() -> None:
     """evaluate_sequence() must stop-gradient: value loss must NOT flow to backbone."""
     policy = _make_policy()
-    obs_seq = torch.randn(2, 4, 2, 64, 32)
+    obs_seq = torch.randn(2, 4, 3, 128, 24)
     acts_seq = torch.randn(2, 4, 4)
     _, values, _, _, _ = policy.evaluate_sequence(obs_seq, acts_seq)
 
@@ -155,7 +155,7 @@ def test_evaluate_sequence_value_stop_gradient() -> None:
 def test_evaluate_actor_gradient_flows_to_backbone() -> None:
     """evaluate() actor loss SHOULD propagate through encoder+temporal (not blocked)."""
     policy = _make_policy()
-    obs = torch.randn(2, 2, 64, 32)
+    obs = torch.randn(2, 3, 128, 24)
     acts = torch.randn(2, 4)
     log_probs, _, _, _, _ = policy.evaluate(obs, acts)
 

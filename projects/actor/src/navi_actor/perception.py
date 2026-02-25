@@ -3,46 +3,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-__all__: list[str] = ["FoveatedEncoder", "RayViTEncoder"]
-
-
-class FoveatedEncoder(nn.Module):  # type: ignore[misc]
-    """4-layer CNN that encodes a (B, 3, Az, El) spherical image into z_t in R^D.
-
-    Channel 0 = depth, channel 1 = semantic class id, channel 2 = valid_mask.
-    """
-
-    def __init__(self, embedding_dim: int = 128) -> None:
-        super().__init__()
-        self.embedding_dim = embedding_dim
-
-        self.convs = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-        )
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(128, embedding_dim)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Encode spherical observation.
-
-        Args:
-            x: (B, 3, Az, El) float tensor.
-
-        Returns:
-            z_t: (B, embedding_dim) float tensor.
-
-        """
-        h: Tensor = self.convs(x)
-        h = self.pool(h).squeeze(-1).squeeze(-1)
-        z_t: Tensor = self.fc(h)
-        return z_t
+__all__: list[str] = ["RayViTEncoder"]
 
 
 class RayViTEncoder(nn.Module):  # type: ignore[misc]
@@ -53,6 +14,8 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
 
     Uses FIXED SPHERICAL POSITIONAL ENCODINGS based on the canonical
     mapping where center=front and edges=back/up/down.
+
+    Uses a [CLS] token for global spatial aggregation.
 
     Args:
         embedding_dim: output dimension D.
@@ -80,6 +43,9 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         patch_input_dim = 3 * patch_size * patch_size
         self.patch_proj = nn.Linear(patch_input_dim, hidden_dim)
 
+        # [CLS] token
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+
         # Transformer Encoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
@@ -103,7 +69,6 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         """Compute fixed 2D sin/cos positional encodings for spherical patches.
 
         Encodes the absolute (azimuth, elevation) of each patch center.
-        This exploits the fixed nature of the actor view (center=front, edges=back).
         """
         grid_az, grid_el = torch.meshgrid(
             torch.linspace(0, 2 * 3.14159, n_az, device=device),
@@ -130,7 +95,8 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
             pos_enc = torch.nn.functional.pad(
                 pos_enc, (0, dim - pos_enc.shape[-1])
             )
-        return pos_enc.unsqueeze(0)  # (1, N_patches, D)
+        # Return (1, N_patches, D)
+        return pos_enc.unsqueeze(0)
 
     def forward(self, x: Tensor) -> Tensor:
         """Encode spherical observation via ViT.
@@ -155,7 +121,7 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         n_el = el // p
         n_patches = n_az * n_el
 
-        # Reshape into patches: (B, 3, n_az, p, n_el, p) -> (B, n_az, n_el, 3, p, p)
+        # Reshape into patches
         patches = x.view(batch, channels, n_az, p, n_el, p)
         patches = patches.permute(0, 2, 4, 1, 3, 5).contiguous()
         patches = patches.view(batch, n_patches, -1)
@@ -163,16 +129,20 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         # Project to hidden_dim
         h = self.patch_proj(patches)
 
-        # Add FIXED positional embeddings (exploits structured data)
+        # Add [CLS] token and FIXED positional embeddings
         pos_enc = self._get_fixed_pos_enc(n_az, n_el, self.hidden_dim, x.device)
         h = h + pos_enc
+        
+        # Prepend [CLS] token
+        cls_tokens = self.cls_token.expand(batch, -1, -1)
+        h = torch.cat((cls_tokens, h), dim=1)
 
         # Transformer layers
         features = self.transformer(h)
 
-        # Global average pool across tokens
-        z_pooled = features.mean(dim=1)
+        # Extract [CLS] token output
+        z_cls = features[:, 0]
 
         # Final projection to embedding_dim
-        z_t: Tensor = self.fc(z_pooled)
+        z_t: Tensor = self.fc(z_cls)
         return z_t

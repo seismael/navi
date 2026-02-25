@@ -18,14 +18,13 @@ class ActorConfig:
     step_endpoint: str = "tcp://localhost:5560"  # Environment REP address
 
     # Observation shape (must match environment resolution)
-    azimuth_bins: int = 256
-    elevation_bins: int = 128
+    azimuth_bins: int = 128
+    elevation_bins: int = 24
 
     # Cognitive architecture
     embedding_dim: int = 128
     learning_rate: float = 3e-4
     learning_rate_final: float = 3e-5
-    encoder_type: str = "vit"  # "cnn" or "vit"
 
     # PPO hyper-parameters
     gamma: float = 0.99
@@ -34,10 +33,10 @@ class ActorConfig:
     entropy_coeff: float = 0.01
     value_coeff: float = 0.005
     max_grad_norm: float = 0.5
-    ppo_epochs: int = 4
+    ppo_epochs: int = 2
     rollout_length: int = 512
-    minibatch_size: int = 64
-    bptt_len: int = 32
+    minibatch_size: int = 32
+    bptt_len: int = 16
 
     # Multi-actor
     n_actors: int = 1

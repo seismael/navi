@@ -20,13 +20,13 @@ engine's canonical `(B, 2, Az, El)` input format.
 DistanceMatrix v2
   │
   ├── depth (B, 1, Az, El) ──┐
-  │                           ├── stack → (B, 2, Az, El)
-  └── semantic (B, 1, Az, El)─┘
+  ├── semantic (B, 1, Az, El)──┼── stack → (B, 3, Az, El)
+  └── valid_mask (B, 1, Az, El)┘
           │
           ▼
   ┌──────────────────────────┐
-  │   1. FoveatedEncoder     │  (B, 2, Az, El) → (B, 128) z_t
-  │      4-layer Conv2d CNN  │
+  │   1. Ray-ViT Encoder     │  (B, 3, Az, El) → (B, 128) z_t
+  │      Vision Transformer  │
   └──────────┬───────────────┘
              │ z_t
      ┌───────┼────────┐
@@ -56,33 +56,22 @@ episodic memory operate externally on $z_t$ during training.
 
 ---
 
-## 2. FoveatedEncoder — Spatial Perception
+## 2. Ray-ViT Encoder — Spatial Perception
 
 **Module:** `perception.py`
 
-A 4-layer convolutional neural network that compresses the full spherical
-observation into a dense spatial embedding.
+Vision Transformer (ViT) that treats patches of the spherical grid as tokens 
+with fixed sin/cos spherical positional encodings.
 
-**Architecture:**
-
-| Layer | Type | Channels | Kernel | Stride | Activation |
-|-------|------|----------|--------|--------|------------|
-| 1 | `Conv2d` | 2 → 32 | 3×3 | 2 | ReLU |
-| 2 | `Conv2d` | 32 → 64 | 3×3 | 2 | ReLU |
-| 3 | `Conv2d` | 64 → 128 | 3×3 | 2 | ReLU |
-| 4 | `Conv2d` | 128 → 128 | 3×3 | 2 | ReLU |
-| Pool | `AdaptiveAvgPool2d(1)` | 128 → 128 | — | — | — |
-| FC | `Linear` | 128 → D | — | — | — |
-
-- **Input:** `(B, 2, Az, El)` float tensor. Channel 0 = normalized depth
-  $\in [0, 1]$, channel 1 = semantic class ID (raw float cast).
-- **Output:** $z_t \in \mathbb{R}^{B \times D}$, where $D = 128$ (configurable
+- **Input:** `(B, 3, Az, El)` float tensor. Channel 0 = depth, channel 1 = 
+  semantic, channel 2 = valid_mask.
+- **Output:** $z_t \in \mathbb{R}^{B \times D}$, where $D = 128$ (configurable 
   `embedding_dim`).
-- **Padding:** All convolutions use `padding=1` to preserve spatial information
-  through stride-2 downsampling.
+- **Mechanism:** Implements §8.4 of ARCHITECTURE.md. Uses a [CLS] token for 
+  global spatial aggregation.
 
-The encoder is deliberately resolution-agnostic — it works with any
-`(Az, El)` grid size thanks to the adaptive average pooling layer.
+The encoder is resolution-agnostic and exploits the structured nature of the 
+spherical input (center=front, edges=back).
 
 ---
 
@@ -371,7 +360,7 @@ the "no stall" guarantee for memory queries.
 
 ### 10.2. Ray-ViT Encoder
 
-Replace `FoveatedEncoder` (CNN) with a Vision Transformer that natively ingests
+Uses `RayViTEncoder` (Vision Transformer) that natively ingests
 foveated (variable-density) ray sequences. Each ray or angular cluster becomes
 a sequence token with absolute $(\theta, \phi)$ positional encoding. Multi-head
 attention resolves spatial topology without the rigid 2D grid assumption of CNNs.

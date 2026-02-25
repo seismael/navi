@@ -36,14 +36,16 @@ if TYPE_CHECKING:
 
 __all__: list[str] = ["HabitatBackend"]
 
-# Reward constants (same tier system as VoxelBackend)
+# Reward constants (Information Foraging)
 _EXPLORATION_REWARD: float = 0.3
-_COLLISION_PENALTY: float = -2.0
-_PROGRESS_REWARD_SCALE: float = 0.8
+_COLLISION_PENALTY: float = -5.0
+_VOID_TAX: float = -0.02
+_STRUCTURE_WEIGHT: float = 0.1
+_PROXIMITY_CLEAR_BONUS: float = 0.15
 _GOAL_REACHED_REWARD: float = 10.0
 _GOAL_RADIUS: float = 0.2
 _CIRCLING_PENALTY: float = -0.5
-_CIRCLING_WINDOW: int = 20
+_CIRCLING_WINDOW: int = 200
 
 # Dynamic speed scaling constants
 # Threshold is in **metres** — depth is un-normalised before comparison.
@@ -445,32 +447,54 @@ class HabitatBackend(SimulatorBackend):
         current_pose: RobotPose,
         obs: dict[str, NDArray[Any]],
     ) -> float:
-        """Compute structured reward (same tier system as VoxelBackend)."""
+        """Compute structured reward with Information Foraging."""
         reward = 0.0
 
-        # 1) Exploration — visit new cells
+        # Calculate sensor statistics from the previous depth map
+        if self._prev_depth is not None:
+            # depth is normalized to [0, 1] in _obs_to_distance_matrix, so this works natively
+            min_depth = float(np.min(self._prev_depth))
+            depth_variance = float(np.var(self._prev_depth))
+        else:
+            min_depth = 1.0
+            depth_variance = 0.0
+
+        # ---------------------------------------------------------
+        # 1. THE VOID TAX vs. STRUCTURE ATTRACTION
+        # ---------------------------------------------------------
+        if min_depth >= 0.99:
+            # Staring into the void
+            reward += _VOID_TAX
+        else:
+            # Looking at complex structures
+            reward += depth_variance * _STRUCTURE_WEIGHT
+
+        # ---------------------------------------------------------
+        # 2. PROXIMITY-GATED EXPLORATION
+        # ---------------------------------------------------------
         cell = (int(np.floor(current_pose.x / 2.0)), int(np.floor(current_pose.z / 2.0)))
         if cell not in self._visited_cells:
             self._visited_cells.add(cell)
-            reward += _EXPLORATION_REWARD
+            if min_depth < 0.95:
+                reward += _EXPLORATION_REWARD
 
-        # 2) Progress — forward translation
-        dx = current_pose.x - previous_pose.x
-        dz = current_pose.z - previous_pose.z
-        dy = current_pose.y - previous_pose.y
-        progress = float(np.sqrt(dx * dx + dz * dz + dy * dy))
-        reward += _PROGRESS_REWARD_SCALE * progress
-
-        # 3) Collision detection via Habitat
-        if (
+        # ---------------------------------------------------------
+        # 3. SAFETY & COLLISION
+        # ---------------------------------------------------------
+        collided = (
             self._sim is not None
             and hasattr(self._sim, "previous_step_collided")
             and self._sim.previous_step_collided
-        ):
+        )
+        if collided:
             reward += _COLLISION_PENALTY
+        elif min_depth < 0.15:
+            # Proximity Clear Bonus
+            reward += _PROXIMITY_CLEAR_BONUS
 
-        # 4) Goal proximity (PointNav) — only reward *new* closest
-        #    approach to prevent back-and-forth oscillation exploit.
+        # ---------------------------------------------------------
+        # 4. GOAL PROXIMITY (PointNav)
+        # ---------------------------------------------------------
         if self._goal_position is not None:
             robot_pos = np.array([current_pose.x, current_pose.y, current_pose.z])
             dist_to_goal = float(np.linalg.norm(robot_pos - self._goal_position))
@@ -479,8 +503,9 @@ class HabitatBackend(SimulatorBackend):
                 reward += goal_progress * 2.0
                 self._min_dist_to_goal = dist_to_goal
 
-        # 5) Anti-circling — uses net angular/positional displacement
-        #    (not summed absolute travel) to avoid false positives.
+        # ---------------------------------------------------------
+        # 5. ANTI-CIRCLING
+        # ---------------------------------------------------------
         self._yaw_history.append(float(current_pose.yaw))
         self._pos_history.append((float(current_pose.x), float(current_pose.z)))
         if len(self._yaw_history) > _CIRCLING_WINDOW:

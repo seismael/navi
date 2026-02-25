@@ -79,14 +79,18 @@ time delta.
 
 The agent observes the world through a spherical depth panorama — a
 multidimensional tensor of normalized distances along $N$ directional rays
-$\hat{d}_i$ radiating from the actor's position. For each ray, the engine
-computes the minimum scalar $t_i$ such that
-$\Omega(\mathbf{p} + t_i\hat{d}_i) \leq 0$, representing a collision.
+$\hat{d}_i$ radiating from the actor's position.
 
-**Current implementation:** Rays are projected into a uniform 2D spherical grid
-with shape `(azimuth_bins, elevation_bins)`, default `(256, 128)`, via the
-`RaycastEngine` scatter-reduce projection. See §3.4 for the foveated
-distribution roadmap.
+**Current implementation:** Rays are projected into a uniform 3-channel 2D 
+spherical grid with shape `(azimuth_bins, elevation_bins)`, default `(64, 32)`, 
+via the `RaycastEngine`.
+- Channel 0: Normalized Depth $[0, 1]$
+- Channel 1: Semantic Class ID
+- Channel 2: Frontier Mask (Valid/Invalid)
+
+The perception engine is the **Ray-ViT Encoder** (§8.4), a Vision Transformer 
+that treats patches of this sphere as tokens with fixed spherical positional 
+encodings.
 
 ---
 
@@ -268,7 +272,7 @@ this engine.
 
 **Cognitive pipeline (5-stage):**
 
-1. **FoveatedEncoder** — 4-layer Conv2d CNN: `(B, 2, Az, El)` → `(B, 128)`
+1. **RayViTEncoder** — Transformer Encoder: `(B, 3, Az, El)` → `(B, 128)`
    spatial embedding $z_t$.
 2. **RND Curiosity** — frozen target MLP + trainable predictor: intrinsic
    exploration reward from embedding novelty.
