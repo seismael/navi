@@ -167,6 +167,7 @@ class PpoTrainer:
         self._opt_buffers: dict[int, TrajectoryBuffer] | None = None
         self._opt_obs: dict[int, DistanceMatrix] | None = None
         self._opt_hiddens: dict[int, torch.Tensor | None] | None = None
+        self._opt_aux: dict[int, list[float]] | None = None
         # Zero-wait metric counters
         self._sim_steps_during_opt: int = 0
         self._total_sim_steps: int = 0
@@ -576,19 +577,24 @@ class PpoTrainer:
         ])
 
     def _obs_to_tensor(self, obs: DistanceMatrix) -> torch.Tensor:
-        """Convert DistanceMatrix to (2, Az, El) float32 tensor.
+        """Convert DistanceMatrix to (3, Az, El) float32 tensor.
 
-        Depth and semantic may have a leading env dimension (n_envs, Az, El).
+        Depth, semantic, and valid may have a leading env dimension.
         We select env index 0 to get (Az, El).
         """
         depth = np.asarray(obs.depth, dtype=np.float32)
         semantic = np.asarray(obs.semantic, dtype=np.float32)
+        valid = np.asarray(obs.valid_mask, dtype=np.float32)
+        
         # Strip leading env dimension if present
         if depth.ndim == 3:
             depth = depth[0]
         if semantic.ndim == 3:
             semantic = semantic[0]
-        stacked = np.stack([depth, semantic])
+        if valid.ndim == 3:
+            valid = valid[0]
+            
+        stacked = np.stack([depth, semantic, valid])
         return torch.from_numpy(stacked)
 
     def _stack_hiddens(
@@ -608,8 +614,8 @@ class PpoTrainer:
         """
         if all(h is None for h in hiddens.values()):
             return None
-        # Determine D from the first non-None hidden
-        d_model = self._policy.encoder.embedding_dim
+        # Determine D from the temporal core (includes spatial + aux dim)
+        d_model = self._policy.temporal_core.d_model
         parts: list[torch.Tensor] = []
         for i in range(n):
             h = hiddens[i]
@@ -666,7 +672,8 @@ class PpoTrainer:
             buffers = self._opt_buffers
             obs_per_actor = self._opt_obs
             hiddens = self._opt_hiddens
-            if buffers is None or obs_per_actor is None or hiddens is None:
+            aux_snapshot = self._opt_aux
+            if buffers is None or obs_per_actor is None or hiddens is None or aux_snapshot is None:
                 self._opt_done.set()
                 continue
 
@@ -687,13 +694,17 @@ class PpoTrainer:
                             self._obs_to_tensor(obs_per_actor[aid])
                             for aid in active_ids
                         ]).to(self._device)
+                        boot_aux = torch.tensor(
+                            [aux_snapshot[aid] for aid in active_ids],
+                            dtype=torch.float32, device=self._device
+                        )
                         boot_hiddens = self._stack_hiddens(
                             {i: hiddens[active_ids[i]]
                              for i in range(len(active_ids))},
                             len(active_ids),
                         )
                         _, _, boot_vals, _, _ = self._policy.forward(
-                            boot_obs, boot_hiddens,
+                            boot_obs, boot_aux, boot_hiddens,
                         )
                     for k, aid in enumerate(active_ids):
                         buffers[aid].compute_returns_and_advantages(
@@ -807,6 +818,9 @@ class PpoTrainer:
         episode_reward_acc: dict[int, float] = {i: 0.0 for i in range(n)}
         episode_step_acc: dict[int, int] = {i: 0 for i in range(n)}
         hiddens: dict[int, torch.Tensor | None] = {i: None for i in range(n)}
+        
+        # Auxiliary awareness state [prev_r, loop_sim, intrinsic_r]
+        aux_states: dict[int, list[float]] = {i: [0.0, 0.0, 0.0] for i in range(n)}
 
         # Get initial observations via PUB/SUB (environment publishes on start)
         obs_per_actor: dict[int, DistanceMatrix] = {}
@@ -825,7 +839,7 @@ class PpoTrainer:
         step_ref: list[int] = [0]
         reward_ema_ref: list[float] = [0.0]
 
-        # Start async optimisation thread (No-Stall protocol §6.2)
+        # Start async optimisation thread (No-Stall protocol Â§6.2)
         self._opt_stop.clear()
         self._opt_done.set()
         self._sim_steps_during_opt = 0
@@ -840,7 +854,7 @@ class PpoTrainer:
         )
         self._opt_thread.start()
 
-        # ── Performance instrumentation accumulators ──
+        # â”€â”€ Performance instrumentation accumulators â”€â”€
         t_train_start = time.perf_counter()
         acc_forward_ms = 0.0
         acc_batch_step_ms = 0.0
@@ -850,7 +864,7 @@ class PpoTrainer:
         tick_count = 0
 
         while step_id < total_steps:
-            # ── Collect rollout (batched across all actors) ──
+            # â”€â”€ Collect rollout (batched across all actors) â”€â”€
             self._policy.eval()
 
             for _r in range(rollout_length):
@@ -859,26 +873,32 @@ class PpoTrainer:
 
                 t_tick = time.perf_counter()
 
-                # ── 1. Stack observations from all actors ──
+                # â”€â”€ 1. Stack observations and aux states from all actors â”€â”€
                 obs_tensors: list[torch.Tensor] = []
+                aux_tensors: list[torch.Tensor] = []
                 for actor_id in range(n):
                     obs_tensors.append(self._obs_to_tensor(obs_per_actor[actor_id]))
-                obs_batch = torch.stack(obs_tensors).to(self._device)  # (N, 2, Az, El)
+                    aux_tensors.append(
+                        torch.tensor(aux_states[actor_id], dtype=torch.float32, device=self._device)
+                    )
+                
+                obs_batch = torch.stack(obs_tensors).to(self._device)  # (N, 3, Az, El)
+                aux_batch = torch.stack(aux_tensors).to(self._device)  # (N, 3)
 
-                # ── 2. Stack hidden states for batched temporal core ──
+                # â”€â”€ 2. Stack hidden states for batched temporal core â”€â”€
                 hidden_batch = self._stack_hiddens(hiddens, n)
 
-                # ── 3. Single batched forward pass ──
+                # â”€â”€ 3. Single batched forward pass â”€â”€
                 t_fwd = time.perf_counter()
                 with torch.no_grad():
                     actions_t, log_probs_t, values_t, new_hidden_batch, z_t = (
-                        self._policy.forward(obs_batch, hidden_batch)
+                        self._policy.forward(obs_batch, aux_batch, hidden_batch)
                     )
                     # RND intrinsic rewards for all actors at once
                     intrinsic_rewards = self._rnd.intrinsic_reward(z_t)  # (N,)
                 forward_ms = (time.perf_counter() - t_fwd) * 1000
 
-                # ── 4. Build per-actor Action objects ──
+                # â”€â”€ 4. Build per-actor Action objects â”€â”€
                 actions_np = actions_t.cpu().numpy()  # (N, 4)
                 z_np_all = z_t.cpu().numpy()  # (N, D)
                 now = time.time()
@@ -901,7 +921,7 @@ class PpoTrainer:
                     # Publish action on PUB socket (for auditor)
                     self._publish_action(actor_actions[-1])
 
-                # Episodic memory queries — threaded (FAISS releases GIL)
+                # Episodic memory queries â€” threaded (FAISS releases GIL)
                 t_mem = time.perf_counter()
                 loop_sims: list[float] = [0.0] * n
                 if n > 1 and self._mem_pool is not None:
@@ -921,14 +941,14 @@ class PpoTrainer:
                         loop_sims[actor_id] = sim
                 memory_ms = (time.perf_counter() - t_mem) * 1000
 
-                # ── 5. Single batched step request ──
+                # â”€â”€ 5. Single batched step request â”€â”€
                 t_step = time.perf_counter()
                 batch_result = self._request_batch_step(
                     tuple(actor_actions), step_id,
                 )
                 batch_step_ms = (time.perf_counter() - t_step) * 1000
 
-                # ── 6. Per-actor transition processing ──
+                # â”€â”€ 6. Per-actor transition processing â”€â”€
                 t_trans = time.perf_counter()
 
                 # Update learning rate annealing
@@ -983,6 +1003,9 @@ class PpoTrainer:
 
                     self._memories[actor_id].add(z_np_all[actor_id])
 
+                    # Current aux_state for storage
+                    current_aux = torch.tensor(aux_states[actor_id], dtype=torch.float32)
+
                     transition = PPOTransition(
                         observation=obs_tensors[actor_id],
                         action=actions_t[actor_id].cpu(),
@@ -990,10 +1013,14 @@ class PpoTrainer:
                         value=values_t[actor_id].item(),
                         reward=shaped.total,
                         done=done,
+                        aux_state=current_aux,
                         truncated=truncated,
                         hidden_state=self._extract_hidden(hidden_batch, actor_id),
                     )
                     self._buffers[actor_id].append(transition)
+
+                    # Update aux_state for NEXT step
+                    aux_states[actor_id] = [shaped.total, loop_sim, intrinsic_reward]
 
                     reward_sum += raw_reward
                     ema_step += 1
@@ -1026,6 +1053,7 @@ class PpoTrainer:
                             reward_ema, episode_count,
                         )
                         hiddens[actor_id] = None
+                        aux_states[actor_id] = [0.0, 0.0, 0.0]
                         self._memories[actor_id].reset()
                     else:
                         hiddens[actor_id] = self._extract_hidden(
@@ -1099,6 +1127,7 @@ class PpoTrainer:
             # Snapshot observations & hidden states for bootstrap
             opt_obs = dict(obs_per_actor)
             opt_hiddens = dict(hiddens)
+            opt_aux = dict(aux_states)
 
             # Swap active buffer pointer
             filled = self._buffers
@@ -1111,6 +1140,7 @@ class PpoTrainer:
             self._opt_buffers = filled
             self._opt_obs = opt_obs
             self._opt_hiddens = opt_hiddens
+            self._opt_aux = opt_aux
             self._opt_done.clear()
             self._opt_event.set()
 

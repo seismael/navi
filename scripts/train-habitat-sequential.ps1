@@ -52,6 +52,13 @@ param(
     [string]$ResumeCheckpoint = "",
     [string]$Backend = "mesh",
     [int]$NumActors = 1,
+    [int]$AzimuthBins = 64,
+    [int]$ElevationBins = 32,
+    [int]$MinibatchSize = 512,
+    [int]$PpoEpochs = 2,
+    [double]$ExistentialTax = -0.002,
+    [double]$EntropyCoeff = 0.02,
+    [double]$LearningRate = 5e-4,
     [string]$LogDir = "",
     [int]$SkipScenes = 0
 )
@@ -103,6 +110,7 @@ Write-Host "  Navi Sequential Habitat Training"
 Write-Host "  Scenes     : $($scenes.Count)"
 Write-Host "  Steps/scene: $StepsPerScene"
 Write-Host "  Actors     : $NumActors"
+Write-Host "  Resolution : ${AzimuthBins}x${ElevationBins}"
 Write-Host "  Backend    : $Backend"
 Write-Host "  Checkpoint : $CheckpointDir"
 Write-Host "  Skip       : $SkipScenes scenes"
@@ -240,6 +248,8 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
         "--pub", "tcp://*:5559",
         "--rep", "tcp://*:5560",
         "--backend", $Backend,
+        "--azimuth-bins", "$AzimuthBins",
+        "--elevation-bins", "$ElevationBins",
         "--habitat-scene", $scenePath,
         "--actors", "$NumActors"
     )
@@ -274,13 +284,18 @@ for ($i = $SkipScenes; $i -lt $scenes.Count; $i++) {
         "--pub", "tcp://*:5557",
         "--step-endpoint", "tcp://localhost:5560",
         "--actors", "$NumActors",
+        "--azimuth-bins", "$AzimuthBins",
+        "--elevation-bins", "$ElevationBins",
         "--steps", "$stepsThisScene",
         "--log-every", "100",
         "--checkpoint-every", "0",
         "--checkpoint-dir", $CheckpointDir,
         "--rollout-length", "512",
-        "--ppo-epochs", "4",
-        "--minibatch-size", "64",
+        "--ppo-epochs", "$PpoEpochs",
+        "--minibatch-size", "$MinibatchSize",
+        "--existential-tax", "$ExistentialTax",
+        "--entropy-coeff", "$EntropyCoeff",
+        "--learning-rate", "$LearningRate",
         "--bptt-len", "32"
     )
 

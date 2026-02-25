@@ -47,21 +47,31 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         d_state: int = 64,
         d_conv: int = 4,
         expand: int = 2,
+        encoder_type: str = "cnn",
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
         self.azimuth_bins = azimuth_bins
         self.elevation_bins = elevation_bins
 
-        self.encoder = FoveatedEncoder(embedding_dim=embedding_dim)
+        from navi_actor.perception import FoveatedEncoder, RayViTEncoder
+
+        if encoder_type == "vit":
+            self.encoder: nn.Module = RayViTEncoder(embedding_dim=embedding_dim)
+        else:
+            self.encoder = FoveatedEncoder(embedding_dim=embedding_dim)
+
+        # Temporal core handles combined embedding + auxiliary features
+        # Aux: [prev_reward, prev_loop_similarity, prev_intrinsic_reward]
+        self.aux_dim = 3
         self.temporal_core = Mamba2TemporalCore(
-            d_model=embedding_dim,
+            d_model=embedding_dim + self.aux_dim,
             d_state=d_state,
             d_conv=d_conv,
             expand=expand,
         )
         self.heads = ActorCriticHeads(
-            input_dim=embedding_dim,
+            input_dim=embedding_dim + self.aux_dim,
             max_forward=max_forward,
             max_vertical=max_vertical,
             max_lateral=max_lateral,
@@ -74,7 +84,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         return next(self.parameters()).device
 
     def _obs_to_tensor(self, obs: Any) -> Tensor:
-        """Convert a DistanceMatrix observation to (1, 2, Az, El) tensor.
+        """Convert a DistanceMatrix observation to (1, 3, Az, El) tensor.
 
         Accepts either a DistanceMatrix (with .depth, .semantic, .valid_mask
         attributes) or a raw numpy array / torch Tensor.
@@ -87,20 +97,33 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         # DistanceMatrix wire contract
         depth: np.ndarray[Any, Any] = np.asarray(obs.depth)
         semantic: np.ndarray[Any, Any] = np.asarray(obs.semantic)
+        valid: np.ndarray[Any, Any] = np.asarray(obs.valid_mask)
 
-        # Stack depth + semantic as 2-channel image
-        stacked = np.stack([depth.astype(np.float32), semantic.astype(np.float32)])
+        # Stack depth + semantic + valid as 3-channel image
+        # Strip leading env dimension if present
+        if depth.ndim == 3:
+            depth = depth[0]
+            semantic = semantic[0]
+            valid = valid[0]
+
+        stacked = np.stack([
+            depth.astype(np.float32),
+            semantic.astype(np.float32),
+            valid.astype(np.float32),
+        ])
         return torch.from_numpy(stacked).unsqueeze(0).to(self.device)
 
     def forward(
         self,
         obs_tensor: Tensor,
+        aux_tensor: Tensor | None = None,
         hidden: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
-        """Full forward pass: encode → temporal core → actor-critic.
+        """Full forward pass: encode â†’ temporal core â†’ actor-critic.
 
         Args:
-            obs_tensor: (B, 2, Az, El) observation tensor.
+            obs_tensor: (B, 3, Az, El) observation tensor.
+            aux_tensor: (B, 3) auxiliary state [prev_r, loop_sim, intrinsic_r].
             hidden: recurrent hidden state for temporal core.
 
         Returns:
@@ -113,8 +136,14 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         """
         z_t = self.encoder(obs_tensor)
 
+        # Concatenate spatial embedding with auxiliary awareness
+        if aux_tensor is None:
+            aux_tensor = torch.zeros((obs_tensor.shape[0], self.aux_dim), device=self.device)
+        
+        input_combined = torch.cat([z_t, aux_tensor], dim=-1)
+
         # Temporal core: single-step inference
-        features, new_hidden = self.temporal_core.forward_step(z_t, hidden)
+        features, new_hidden = self.temporal_core.forward_step(input_combined, hidden)
 
         actions, log_probs, values = self.heads.sample(features)
         return actions, log_probs, values, new_hidden, z_t
@@ -125,7 +154,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         Useful for RND / episodic memory which operate on raw embeddings.
 
         Args:
-            obs_tensor: (B, 2, Az, El) observation tensor.
+            obs_tensor: (B, 3, Az, El) observation tensor.
 
         Returns:
             z_t: (B, D) spatial embedding.
@@ -137,13 +166,15 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         self,
         obs_tensor: Tensor,
         actions: Tensor,
+        aux_tensor: Tensor | None = None,
         hidden: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
         """Evaluate actions under current policy (for PPO loss computation).
 
         Args:
-            obs_tensor: (B, 2, Az, El) observation tensor.
+            obs_tensor: (B, 3, Az, El) observation tensor.
             actions: (B, 4) actions to evaluate.
+            aux_tensor: (B, 3) auxiliary state.
             hidden: recurrent hidden state.
 
         Returns:
@@ -155,7 +186,12 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
 
         """
         z_t = self.encoder(obs_tensor)
-        features, new_hidden = self.temporal_core.forward_step(z_t, hidden)
+        
+        if aux_tensor is None:
+            aux_tensor = torch.zeros((obs_tensor.shape[0], self.aux_dim), device=self.device)
+        input_combined = torch.cat([z_t, aux_tensor], dim=-1)
+
+        features, new_hidden = self.temporal_core.forward_step(input_combined, hidden)
 
         log_probs = self.heads.log_prob(features, actions)
         # Stop-gradient: critic sees detached features so value-loss
@@ -168,18 +204,18 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         self,
         obs_seq: Tensor,
         actions_seq: Tensor,
+        aux_seq: Tensor | None = None,
         hidden: Tensor | None = None,
         dones: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
         """Evaluate a full sequence for BPTT training.
 
         Args:
-            obs_seq: (B, T, 2, Az, El) observation sequence.
+            obs_seq: (B, T, 3, Az, El) observation sequence.
             actions_seq: (B, T, 4) action sequence.
+            aux_seq: (B, T, 3) auxiliary sequence.
             hidden: initial hidden state.
-            dones: (B, T) boolean episode-boundary mask.  When set, the
-                temporal core resets its hidden state at episode ends
-                within a BPTT chunk.
+            dones: (B, T) boolean episode-boundary mask.
 
         Returns:
             log_probs: (B*T,) log probabilities.
@@ -195,9 +231,14 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         z_flat = self.encoder(flat_obs)
         z_seq = z_flat.reshape(batch, seq_len, -1)
 
+        if aux_seq is None:
+            aux_seq = torch.zeros((batch, seq_len, self.aux_dim), device=self.device)
+        
+        input_combined_seq = torch.cat([z_seq, aux_seq], dim=-1)
+
         # Temporal core: full sequence with dones mask
         features_seq, new_hidden = self.temporal_core.forward(
-            z_seq, hidden, dones=dones,
+            input_combined_seq, hidden, dones=dones,
         )
         flat_features = features_seq.reshape(batch * seq_len, -1)
         flat_actions = actions_seq.reshape(batch * seq_len, -1)
@@ -214,13 +255,15 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         self,
         obs: Any,
         step_id: int,
+        aux: list[float] | None = None,
         hidden: Tensor | None = None,
     ) -> tuple[list[float], Tensor | None]:
         """Inference-mode action selection for the server loop.
 
         Args:
             obs: DistanceMatrix observation.
-            step_id: current time step (unused in Phase 1).
+            step_id: current time step.
+            aux: [prev_r, loop_sim, intrinsic_r] auxiliary data.
             hidden: recurrent hidden state.
 
         Returns:
@@ -230,7 +273,12 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         """
         self.eval()
         obs_tensor = self._obs_to_tensor(obs)
-        actions, _, _, new_hidden, _ = self.forward(obs_tensor, hidden)
+        
+        aux_tensor = None
+        if aux is not None:
+            aux_tensor = torch.tensor(aux, dtype=torch.float32, device=self.device).unsqueeze(0)
+            
+        actions, _, _, new_hidden, _ = self.forward(obs_tensor, aux_tensor, hidden)
         action_list: list[float] = actions.squeeze(0).cpu().tolist()
         return action_list, new_hidden
 

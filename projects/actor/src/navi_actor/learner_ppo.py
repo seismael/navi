@@ -233,6 +233,10 @@ class PpoLearner:
                         n_seqs, seq_len, *obs.shape[1:]
                     )
                     acts_seq = acts[:usable].reshape(n_seqs, seq_len, -1)
+                    
+                    aux_seq: Tensor | None = None
+                    if mb.aux_states is not None:
+                        aux_seq = mb.aux_states[:usable].reshape(n_seqs, seq_len, -1)
 
                     # Stack chunk-start hidden states → (1, n_seqs, D)
                     # and build dones mask → (n_seqs, seq_len)
@@ -258,20 +262,23 @@ class PpoLearner:
 
                     new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
                         obs_seq, acts_seq,
+                        aux_seq=aux_seq,
                         hidden=h0,
                         dones=dones_mask,
                     )
                     # Handle remainder (if any) with single-step evaluate
                     if usable < total:
+                        aux_rem = mb.aux_states[usable:].to(device) if mb.aux_states is not None else None
                         rem_lp, rem_v, rem_e, _, rem_z = policy.evaluate(
-                            obs[usable:], acts[usable:]
+                            obs[usable:], acts[usable:], aux_tensor=aux_rem
                         )
                         new_lp = torch.cat([new_lp, rem_lp])
                         new_vals = torch.cat([new_vals, rem_v])
                         ent = (ent * usable + rem_e * (total - usable)) / total
                         z_mb = torch.cat([z_mb, rem_z])
                 else:
-                    new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts)
+                    aux_mb = mb.aux_states.to(device) if mb.aux_states is not None else None
+                    new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_mb)
 
                 # Policy (actor) loss — clipped surrogate
                 ratio = (new_lp - old_lp).exp()

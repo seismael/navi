@@ -29,6 +29,7 @@ def run(
     ),
     azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
     elevation_bins: int = typer.Option(128, help="Expected distance-matrix elevation resolution"),
+    encoder: str = typer.Option("cnn", help="Encoder type: cnn or vit"),
 ) -> None:
     """Start the Actor service (always uses CognitiveMambaPolicy)."""
     root_logger = logging.getLogger()
@@ -44,6 +45,7 @@ def run(
         step_endpoint=step_endpoint,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
+        encoder_type=encoder,
     )
 
     from navi_actor.cognitive_policy import CognitiveMambaPolicy
@@ -58,6 +60,7 @@ def run(
             max_vertical=config.max_vertical,
             max_lateral=config.max_lateral,
             max_yaw=config.max_yaw,
+            encoder_type=config.encoder_type,
         )
     else:
         runtime_policy = CognitiveMambaPolicy(
@@ -68,6 +71,7 @@ def run(
             max_vertical=config.max_vertical,
             max_lateral=config.max_lateral,
             max_yaw=config.max_yaw,
+            encoder_type=config.encoder_type,
         )
 
     server = ActorServer(config=config, policy=runtime_policy)
@@ -85,6 +89,9 @@ def train_ppo(
     step_endpoint: str = typer.Option(
         "tcp://localhost:5560", help="Environment REP address",
     ),
+    azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
+    elevation_bins: int = typer.Option(128, help="Expected distance-matrix elevation resolution"),
+    encoder: str = typer.Option("cnn", help="Encoder type: cnn or vit"),
     actors: int = typer.Option(1, help="Number of parallel environments"),
     steps: int = typer.Option(10000, help="Total environment steps"),
     log_every: int = typer.Option(100, help="Log interval in steps"),
@@ -99,10 +106,10 @@ def train_ppo(
     gamma: float = typer.Option(0.99, help="Discount factor"),
     gae_lambda: float = typer.Option(0.95, help="GAE lambda"),
     entropy_coeff: float = typer.Option(0.01, help="Entropy bonus coefficient"),
-    value_coeff: float = typer.Option(0.005, help="Value loss coefficient (low to prevent gradient domination)"),
+    value_coeff: float = typer.Option(0.5, help="Value loss coefficient"),
     # Reward shaping
     collision_penalty: float = typer.Option(0.0, help="Collision termination penalty (backend supplies its own)"),
-    existential_tax: float = typer.Option(-0.01, help="Per-step existence cost"),
+    existential_tax: float = typer.Option(-0.02, help="Per-step existence cost"),
     velocity_weight: float = typer.Option(0.1, help="Forward-velocity heuristic weight"),
     # RND curiosity
     intrinsic_coeff_init: float = typer.Option(1.0, help="Initial RND intrinsic coefficient"),
@@ -114,7 +121,7 @@ def train_ppo(
     memory_capacity: int = typer.Option(10_000, help="Episodic memory max entries"),
     memory_exclusion_window: int = typer.Option(50, help="Exclude recent N steps from query"),
     loop_threshold: float = typer.Option(0.85, help="Cosine similarity loop threshold"),
-    loop_penalty_coeff: float = typer.Option(0.5, help="Loop penalty coefficient"),
+    loop_penalty_coeff: float = typer.Option(2.0, help="Loop penalty coefficient"),
     # Checkpointing
     checkpoint_every: int = typer.Option(0, help="Checkpoint interval (0 = disabled)"),
     checkpoint_dir: str = typer.Option("checkpoints", help="Checkpoint directory"),
@@ -132,6 +139,9 @@ def train_ppo(
         pub_address=pub,
         mode="step",
         step_endpoint=step_endpoint,
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+        encoder_type=encoder,
         n_actors=actors,
         embedding_dim=embedding_dim,
         learning_rate=learning_rate,
@@ -204,6 +214,9 @@ def train_sequential(
         2,
         help="Number of actors sharing each scene",
     ),
+    azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
+    elevation_bins: int = typer.Option(128, help="Expected distance-matrix elevation resolution"),
+    encoder: str = typer.Option("cnn", help="Encoder type: cnn or vit"),
     total_steps: int = typer.Option(
         500_000, help="Total environment steps (across all scenes)",
     ),
@@ -341,6 +354,9 @@ def train_sequential(
         pub_address=actor_pub,
         mode="step",
         step_endpoint=f"tcp://localhost:{env_rep.split(':')[-1]}",
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+        encoder_type=encoder,
         n_actors=actors,
         embedding_dim=embedding_dim,
         learning_rate=learning_rate,

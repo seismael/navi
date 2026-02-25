@@ -85,8 +85,9 @@ __all__: list[str] = ["MeshSceneBackend"]
 _log = logging.getLogger(__name__)
 
 # ── Reward constants ─────────────────────────────────────────────────
-_EXPLORATION_REWARD: float = 0.3
-_COLLISION_PENALTY: float = -1.0
+_STRUCTURE_REWARD: float = 0.5  # Bonus for being inside building (seeing surfaces)
+_VOID_PENALTY: float = -2.0     # Harsh penalty for escaping into empty space
+_COLLISION_PENALTY: float = -5.0
 _PROGRESS_REWARD_SCALE: float = 0.8
 _CIRCLING_PENALTY: float = -0.5
 _CIRCLING_WINDOW: int = 200  # physics ticks (~4 s at dt=0.02)
@@ -108,7 +109,7 @@ _NUDGE_DISTANCE: float = 0.6
 # The front hemisphere (±45° azimuth) of the previous depth map
 # determines a speed factor in [_MIN_SPEED_FACTOR, 1.0].
 # Threshold is in **metres** — depth is un-normalised before comparison.
-_SAFE_DEPTH_THRESHOLD: float = 1.5   # physical metres
+_SAFE_DEPTH_THRESHOLD: float = 3.0   # physical metres
 _MIN_SPEED_FACTOR: float = 0.05      # never below 5 % of max speed
 
 # ── Semantic IDs for mesh faces ──────────────────────────────────────
@@ -127,7 +128,6 @@ class _ActorState:
     step_count: int = 0
     prev_depth: NDArray[np.float32] | None = None
     episode_return: float = 0.0
-    visited_cells: set[tuple[int, int]] = field(default_factory=set)
     yaw_history: list[float] = field(default_factory=list)
     pos_history: list[tuple[float, float]] = field(default_factory=list)
     stuck_counter: int = 0
@@ -345,7 +345,7 @@ class MeshSceneBackend(SimulatorBackend):
             # from scene switches.
             if not a.scene_changed:
                 self._episodes_in_scene += 1
-                if self._episodes_in_scene >= self._n_actors:
+                if self._episodes_in_scene >= 5 * self._n_actors:
                     self._switch_to_next_scene()
                     # Mark ALL other actors for forced reset
                     for aid in self._actors:
@@ -358,7 +358,6 @@ class MeshSceneBackend(SimulatorBackend):
         a.episode_id = episode_id
         a.step_count = 0
         a.episode_return = 0.0
-        a.visited_cells.clear()
         a.yaw_history.clear()
         a.pos_history.clear()
         a.prev_depth = None
@@ -1040,39 +1039,47 @@ class MeshSceneBackend(SimulatorBackend):
         *,
         actor_id: int = 0,
     ) -> float:
-        """Multi-component reward with exploration incentives.
+        """Multi-component reward with structure-anchored exploration.
 
         Components:
-        1. Exploration -- new 2x2 floor cell        (+0.3)
-        2. Progress -- displacement                  (+0.8 x dist)
-        3. Collision penalty                        (-1.0)
-        4. Anti-circling (spin in place)            (-0.5)
-        5. Proximity clear — flying near obstacles
-           without collision                        (+0.15)
+        1. Structure Reward -- bonus for seeing valid geometry (+0.5 x %valid)
+        2. Void Penalty -- harsh penalty for escaping mesh bounds (-2.0)
+        3. Progress -- displacement (only if structure is visible)
+        4. Collision penalty (-5.0)
+        5. Anti-circling (spin in place) (-0.5)
+        6. Proximity clear bonus (+0.15)
         """
         a = self._actors[actor_id]
         reward = 0.0
 
-        # 1) Exploration -- new 2x2 floor cell
-        cell = (int(np.floor(curr.x / 2.0)), int(np.floor(curr.z / 2.0)))
-        if cell not in a.visited_cells:
-            a.visited_cells.add(cell)
-            reward += _EXPLORATION_REWARD
+        depth = obs.depth[0]
+        valid = obs.valid_mask[0]
+        valid_frac = float(np.mean(valid))
 
-        # 2) Progress — forward displacement
+        # 1) & 2) Structure vs Void
+        if valid_frac < 0.05:
+            # Agent is likely outside the building or in a mesh gap
+            reward += _VOID_PENALTY
+        else:
+            # Reward being inside and seeing detail
+            reward += _STRUCTURE_REWARD * valid_frac
+
+        # 3) Progress — forward displacement
+        # Progress is only rewarded if we are "anchored" to a structure.
+        # This prevents the agent from finding infinite reward in the void.
         dx = curr.x - prev.x
         dz = curr.z - prev.z
         dy = curr.y - prev.y
         progress = float(math.sqrt(dx * dx + dz * dz + dy * dy))
-        reward += _PROGRESS_REWARD_SCALE * progress
+        
+        scale = _PROGRESS_REWARD_SCALE if valid_frac > 0.1 else (_PROGRESS_REWARD_SCALE * 0.1)
+        reward += scale * progress
 
-        # 3) Collision penalty (softened so drone retries near walls)
+        # 4) Collision penalty
         if collided:
             reward += _COLLISION_PENALTY
 
-        # 4) Anti-circling — penalise sustained spinning in place.
-        #    Uses *net* angular displacement (not absolute travel) so
-        #    normal steering micro-corrections don't trigger the penalty.
+        # 5) Anti-circling
         a.yaw_history.append(float(curr.yaw))
         a.pos_history.append((float(curr.x), float(curr.z)))
         if len(a.yaw_history) > _CIRCLING_WINDOW:
@@ -1087,10 +1094,8 @@ class MeshSceneBackend(SimulatorBackend):
             if net_yaw > 2.0 * math.pi and net_pos_travel < 1.0:
                 reward += _CIRCLING_PENALTY
 
-        # 5) Proximity clear bonus — near obstacles but not colliding
-        depth = obs.depth[0]  # (Az, El)
-        valid = obs.valid_mask[0]
-        if np.any(valid):
+        # 6) Proximity clear bonus — near obstacles but not colliding
+        if valid_frac > 0:
             min_depth = float(np.where(valid, depth, 1.0).min())
             if min_depth < 0.15 and not collided:
                 reward += _PROXIMITY_CLEAR_BONUS

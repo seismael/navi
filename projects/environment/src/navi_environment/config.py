@@ -46,9 +46,9 @@ class EnvironmentConfig:
     # space; near walls the drone automatically crawls.
     # Climb, strafe and yaw rates also scale with proximity (except yaw
     # which always stays at full rate so the drone can turn to escape).
-    drone_max_speed: float = 100.0    # max forward speed (m/s, open space)
-    drone_climb_rate: float = 3.0     # max vertical rate (m/s)
-    drone_strafe_speed: float = 5.0   # max lateral speed (m/s)
+    drone_max_speed: float = 10.0     # max forward speed (m/s, open space)
+    drone_climb_rate: float = 2.0     # max vertical rate (m/s)
+    drone_strafe_speed: float = 3.0   # max lateral speed (m/s)
     drone_yaw_rate: float = 3.0       # max yaw rate (rad/s, ~172°/s)
 
     # Multi-actor

@@ -25,6 +25,7 @@ class ActorConfig:
     embedding_dim: int = 128
     learning_rate: float = 3e-4
     learning_rate_final: float = 3e-5
+    encoder_type: str = "vit"  # "cnn" or "vit"
 
     # PPO hyper-parameters
     gamma: float = 0.99
