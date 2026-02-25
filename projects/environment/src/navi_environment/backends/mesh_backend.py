@@ -345,7 +345,7 @@ class MeshSceneBackend(SimulatorBackend):
             # from scene switches.
             if not a.scene_changed:
                 self._episodes_in_scene += 1
-                if self._episodes_in_scene >= 5 * self._n_actors:
+                if self._episodes_in_scene >= 50:
                     self._switch_to_next_scene()
                     # Mark ALL other actors for forced reset
                     for aid in self._actors:

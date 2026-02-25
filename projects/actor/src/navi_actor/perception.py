@@ -51,6 +51,9 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
     Implements §8.4 of ARCHITECTURE.md. Treats patches of the spherical
     grid as tokens and processes them via a Transformer Encoder.
 
+    Uses FIXED SPHERICAL POSITIONAL ENCODINGS based on the canonical
+    mapping where center=front and edges=back/up/down.
+
     Args:
         embedding_dim: output dimension D.
         patch_size: size of square patches.
@@ -94,14 +97,46 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
             nn.Linear(hidden_dim, embedding_dim),
         )
 
-        # Learnable positional embeddings (max 1024 patches)
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1024, hidden_dim))
+    def _get_fixed_pos_enc(
+        self, n_az: int, n_el: int, dim: int, device: torch.device
+    ) -> Tensor:
+        """Compute fixed 2D sin/cos positional encodings for spherical patches.
+
+        Encodes the absolute (azimuth, elevation) of each patch center.
+        This exploits the fixed nature of the actor view (center=front, edges=back).
+        """
+        grid_az, grid_el = torch.meshgrid(
+            torch.linspace(0, 2 * 3.14159, n_az, device=device),
+            torch.linspace(-3.14159 / 2, 3.14159 / 2, n_el, device=device),
+            indexing="ij",
+        )
+        # Flatten to patches: (N_patches,)
+        flat_az = grid_az.reshape(-1)
+        flat_el = grid_el.reshape(-1)
+
+        # Frequency bands for encoding
+        bands = dim // 4
+        freqs = torch.pow(10000, -torch.arange(0, bands, device=device) / bands)
+
+        # az_sin, az_cos, el_sin, el_cos
+        enc_az = flat_az[:, None] * freqs[None, :]
+        enc_el = flat_el[:, None] * freqs[None, :]
+
+        pos_enc = torch.cat(
+            [enc_az.sin(), enc_az.cos(), enc_el.sin(), enc_el.cos()], dim=-1
+        )
+        # Pad if dim is not multiple of 4
+        if pos_enc.shape[-1] < dim:
+            pos_enc = torch.nn.functional.pad(
+                pos_enc, (0, dim - pos_enc.shape[-1])
+            )
+        return pos_enc.unsqueeze(0)  # (1, N_patches, D)
 
     def forward(self, x: Tensor) -> Tensor:
         """Encode spherical observation via ViT.
 
         Args:
-            x: (B, 2, Az, El) float tensor.
+            x: (B, 3, Az, El) float tensor.
 
         Returns:
             z_t: (B, embedding_dim) spatial embedding.
@@ -116,13 +151,11 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
             x = torch.nn.functional.pad(x, (0, pad_el, 0, pad_az))
             az, el = x.shape[2:]
 
-        # Reshape into patches: (B, 2, Az/p, p, El/p, p)
-        # -> (B, Az/p, El/p, 2, p, p)
-        # -> (B, N_patches, 2*p*p)
         n_az = az // p
         n_el = el // p
         n_patches = n_az * n_el
 
+        # Reshape into patches: (B, 3, n_az, p, n_el, p) -> (B, n_az, n_el, 3, p, p)
         patches = x.view(batch, channels, n_az, p, n_el, p)
         patches = patches.permute(0, 2, 4, 1, 3, 5).contiguous()
         patches = patches.view(batch, n_patches, -1)
@@ -130,8 +163,9 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         # Project to hidden_dim
         h = self.patch_proj(patches)
 
-        # Add positional embeddings (truncate to actual n_patches)
-        h = h + self.pos_embed[:, :n_patches, :]
+        # Add FIXED positional embeddings (exploits structured data)
+        pos_enc = self._get_fixed_pos_enc(n_az, n_el, self.hidden_dim, x.device)
+        h = h + pos_enc
 
         # Transformer layers
         features = self.transformer(h)
