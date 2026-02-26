@@ -68,7 +68,7 @@ class ActorConfig(BaseSettings):
     max_yaw: float = 1.0
     rnd_learning_rate: float = 3e-5
     rnd_learning_rate_final: float = 3e-6
-    memory_capacity: int = 10_000
+    memory_capacity: int = 100_000
     memory_exclusion_window: int = 50
     collision_penalty: float = 0.0
     existential_tax: float = -0.01

@@ -788,8 +788,8 @@ class MeshSceneBackend(SimulatorBackend):
             return
 
         n_faces = len(self._mesh.faces)
-        if n_faces > 150_000:
-            _log.warning("Scene %s is too complex (%d faces > 150k limit). Skipping to prevent simulation hang.", Path(scene_path).stem, n_faces)
+        if n_faces > 500_000:
+            _log.warning("Scene %s is too complex (%d faces > 500k limit). Skipping to prevent simulation hang.", Path(scene_path).stem, n_faces)
             self._cycle_to_next_scene_recursively()
             return
 
@@ -813,7 +813,8 @@ class MeshSceneBackend(SimulatorBackend):
     def _cycle_to_next_scene_recursively(self) -> None:
         """Helper to cycle past broken or extremely dense meshes."""
         if not self._scene_pool:
-            raise RuntimeError("Cannot skip dense mesh without a scene pool.")
+            _log.error("Dense mesh encountered but NO SCENE POOL available to cycle. Forced to continue with high latency.")
+            return
         self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
         next_path = self._scene_pool[self._scene_pool_idx]
         self._load_scene(next_path)

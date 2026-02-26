@@ -201,27 +201,29 @@ class EnvironmentServer:
                         observations=observations,
                     )
                     self._rep_socket.send(serialize(batch_result))
-                    # Publish each actor's observation + telemetry
-                    for obs, action in zip(observations, msg.actions, strict=True):
-                        self._publish(obs)
-                        actor_id = (
-                            int(action.env_ids[0])
-                            if len(action.env_ids) > 0
-                            else 0
-                        )
-                        pose = (
-                            self._backend.actor_pose(actor_id)
-                            if hasattr(self._backend, "actor_pose")
-                            else self._backend.pose
-                        )
-                        self._publish_telemetry(
-                            event_type="environment.step",
-                            step_id=msg.step_id,
-                            payload=np.array([
-                                pose.x, pose.y, pose.z, pose.yaw,
-                            ], dtype=np.float32),
-                            actor_id=actor_id,
-                        )
+                    # MUTE PUBLISH STORM: Only publish every 100 steps during training
+                    # ALWAYS publish step 0 to ensure actor initialization
+                    if msg.step_id == 0 or msg.step_id % 100 == 0:
+                        for obs, action in zip(observations, msg.actions, strict=True):
+                            self._publish(obs)
+                            actor_id = (
+                                int(action.env_ids[0])
+                                if len(action.env_ids) > 0
+                                else 0
+                            )
+                            pose = (
+                                self._backend.actor_pose(actor_id)
+                                if hasattr(self._backend, "actor_pose")
+                                else self._backend.pose
+                            )
+                            self._publish_telemetry(
+                                event_type="environment.step",
+                                step_id=msg.step_id,
+                                payload=np.array([
+                                    pose.x, pose.y, pose.z, pose.yaw,
+                                ], dtype=np.float32),
+                                actor_id=actor_id,
+                            )
                     self._step_id = msg.step_id
                 elif isinstance(msg, StepRequest):
                     # Extract actor_id from action env_ids (default 0)

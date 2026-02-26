@@ -21,7 +21,7 @@ from navi_actor.learner_ppo import PpoLearner, PpoMetrics
 from navi_actor.memory.episodic import EpisodicMemory
 from navi_actor.reward_shaping import RewardShaper
 from navi_actor.rnd import RNDModule
-from navi_actor.rollout_buffer import PPOTransition, TrajectoryBuffer
+from navi_actor.rollout_buffer import PPOTransition, TrajectoryBuffer, MultiTrajectoryBuffer
 from navi_contracts import (
     TOPIC_ACTION,
     TOPIC_DISTANCE_MATRIX,
@@ -117,16 +117,13 @@ class PpoTrainer:
             input_dim=config.embedding_dim,
         ).to(self._device)
 
-        # Per-actor episodic memories
-        self._memories: dict[int, EpisodicMemory] = {
-            i: EpisodicMemory(
-                embedding_dim=config.embedding_dim,
-                capacity=config.memory_capacity,
-                exclusion_window=config.memory_exclusion_window,
-                similarity_threshold=config.loop_threshold,
-            )
-            for i in range(self._n_actors)
-        }
+        # SHARED episodic memory for all actors (High Efficiency)
+        self._memory = EpisodicMemory(
+            embedding_dim=config.embedding_dim,
+            capacity=config.memory_capacity,
+            exclusion_window=config.memory_exclusion_window,
+            similarity_threshold=config.loop_threshold,
+        )
 
         # Shared reward shaper with annealing
         self._reward_shaper = RewardShaper(
@@ -149,16 +146,18 @@ class PpoTrainer:
             learning_rate=config.learning_rate,
         )
 
-        # Trajectory buffers
-        self._buffers_a: dict[int, TrajectoryBuffer] = {
-            i: TrajectoryBuffer(gamma=config.gamma, gae_lambda=config.gae_lambda)
-            for i in range(self._n_actors)
-        }
-        self._buffers_b: dict[int, TrajectoryBuffer] = {
-            i: TrajectoryBuffer(gamma=config.gamma, gae_lambda=config.gae_lambda)
-            for i in range(self._n_actors)
-        }
-        self._buffers: dict[int, TrajectoryBuffer] = self._buffers_a
+        # Multi-Trajectory buffers
+        self._multi_buffer_a = MultiTrajectoryBuffer(
+            n_actors=self._n_actors,
+            gamma=config.gamma,
+            gae_lambda=config.gae_lambda
+        )
+        self._multi_buffer_b = MultiTrajectoryBuffer(
+            n_actors=self._n_actors,
+            gamma=config.gamma,
+            gae_lambda=config.gae_lambda
+        )
+        self._multi_buffers = self._multi_buffer_a
 
         # ── Async optimisation thread ──
         self._opt_event = threading.Event()
@@ -168,7 +167,7 @@ class PpoTrainer:
         self._opt_thread: threading.Thread | None = None
         self._opt_stop = threading.Event()
 
-        self._opt_buffers: dict[int, TrajectoryBuffer] | None = None
+        self._opt_multi_buffer: MultiTrajectoryBuffer | None = None
         self._opt_obs: dict[int, DistanceMatrix] | None = None
         self._opt_hiddens: dict[int, torch.Tensor | None] | None = None
         self._opt_aux: dict[int, torch.Tensor] | None = None
@@ -200,8 +199,8 @@ class PpoTrainer:
                 continue
             self._opt_event.clear()
             
-            buffers, obs_dict, hiddens, aux_dict = self._opt_buffers, self._opt_obs, self._opt_hiddens, self._opt_aux
-            if not all([buffers, obs_dict, hiddens, aux_dict]):
+            multi_buffer, obs_dict, hiddens, aux_dict = self._opt_multi_buffer, self._opt_obs, self._opt_hiddens, self._opt_aux
+            if not all([multi_buffer, obs_dict, hiddens, aux_dict]):
                 self._opt_done.set()
                 continue
                 
@@ -209,36 +208,23 @@ class PpoTrainer:
                 t_opt = time.perf_counter()
                 # Compute returns/advantages for the buffer we just swapped out
                 with torch.no_grad():
-                    active = [aid for aid in range(self._n_actors) if buffers and len(buffers[aid]) > 0]
-                    if active and buffers and obs_dict and hiddens and aux_dict:
-                        b_obs = torch.stack([self._obs_to_tensor(obs_dict[aid]) for aid in active]).to(self._device)
-                        b_hid = self._stack_hiddens({i: hiddens[active[i]] for i in range(len(active))}, len(active))
-                        b_aux = torch.stack([aux_dict[active[i]] for i in range(len(active))]).to(self._device)
-                        
-                        # Use learner_policy for advantage estimation
-                        self._learner_policy.eval()
-                        _, _, b_val, _, _ = self._learner_policy.forward(b_obs, b_hid, aux_tensor=b_aux)
-                        
-                        for k, aid in enumerate(active):
-                            buffers[aid].compute_returns_and_advantages(last_value=b_val[k].item())
-
-                # Merge and Train
-                merged = None
-                if buffers:
-                    for aid in range(self._n_actors):
-                        if len(buffers[aid]) == 0:
-                            continue
-                        if merged is None:
-                            merged = buffers[aid]
-                        else:
-                            merged.extend_from(buffers[aid])
-                
-                if merged and len(merged) > 0:
-                    self._learner_policy.train()
-                    self._last_opt_metrics = self._learner.train_ppo_epoch(self._learner_policy, merged, ppo_epochs=ppo_epochs, minibatch_size=minibatch_size, seq_len=seq_len, rnd=self._rnd)
+                    # We need values for the next state for EACH actor
+                    b_obs = torch.stack([self._obs_to_tensor(obs_dict[aid]) for aid in range(self._n_actors)]).to(self._device)
+                    b_hid = self._stack_hiddens({i: hiddens[i] for i in range(self._n_actors)}, self._n_actors)
+                    b_aux = torch.stack([aux_dict[i] for i in range(self._n_actors)]).to(self._device)
                     
-                    # Push new weights to the rollout policy
-                    self._sync_rollout_policy()
+                    # Use learner_policy for advantage estimation
+                    self._learner_policy.eval()
+                    _, _, b_val, _, _ = self._learner_policy.forward(b_obs, b_hid, aux_tensor=b_aux)
+                    
+                    multi_buffer.compute_returns_and_advantages(last_values=b_val)
+
+                # Train using MultiTrajectoryBuffer's sequence-preserving sampler
+                self._learner_policy.train()
+                self._last_opt_metrics = self._learner.train_ppo_epoch(self._learner_policy, multi_buffer, ppo_epochs=ppo_epochs, minibatch_size=minibatch_size, seq_len=seq_len, rnd=self._rnd)
+                
+                # Push new weights to the rollout policy
+                self._sync_rollout_policy()
                 
                 ms = (time.perf_counter() - t_opt) * 1000
                 self._last_opt_duration_ms = ms
@@ -246,9 +232,7 @@ class PpoTrainer:
                 self._opt_duration_count += 1
                 _LOGGER.info(f"Async PPO Optimization completed in {ms:.2f}ms. Weights synced.")
                 
-                if buffers:
-                    for buf in buffers.values():
-                        buf.clear()
+                multi_buffer.clear()
             except Exception:
                 _LOGGER.exception("Opt error")
             finally:
@@ -397,7 +381,7 @@ class PpoTrainer:
     def _stack_hiddens(self, hiddens: dict[int, torch.Tensor | None], n: int) -> torch.Tensor | None:
         if all(h is None for h in hiddens.values()):
             return None
-        dim = self._policy.temporal_core.d_model
+        dim = self._rollout_policy.temporal_core.d_model
         parts = []
         for i in range(n):
             h_state = hiddens[i]
@@ -456,11 +440,14 @@ class PpoTrainer:
                 a_np, z_np, now = a_t.cpu().numpy(), z_t.cpu().numpy(), time.time()
                 actions = [Action(env_ids=np.array([i], dtype=np.int32), linear_velocity=np.array([[a[0], a[1], a[2]]], dtype=np.float32),
                            angular_velocity=np.array([[0.0, 0.0, a[3]]], dtype=np.float32), policy_id="ppo", step_id=step_id, timestamp=now) for i, a in enumerate(a_np)]
-                for a in actions:
-                    self._publish_action(a)
+                # MUTE ACTION PUB: Disabled for high-speed training
+                # for a in actions:
+                #     self._publish_action(a)
 
                 t_mem_start = time.perf_counter()
-                sims = [self._memories[i].query(z_np[i])[0] for i in range(n)]
+                # BATCHED MEMORY QUERY: O(1) vectorized search
+                mem_results = self._memory.query_batch(z_np)
+                sims = [res[0] for res in mem_results]
                 mem_ms = (time.perf_counter() - t_mem_start) * 1000
 
                 t_step_start = time.perf_counter()
@@ -480,8 +467,9 @@ class PpoTrainer:
                                                      intrinsic_reward=intr_r[i].item(), loop_similarity=sims[i], is_loop=(sims[i] > self._config.loop_threshold),
                                                      beta=self._reward_shaper.beta, done=d or tr, forward_vel=float(a_np[i, 0]), yaw_vel=float(a_np[i, 3]))
                     
-                    self._memories[i].add(z_np[i])
-                    self._buffers[i].append(PPOTransition(observation=o_tens[i], action=a_t[i].cpu(), log_prob=lp_t[i].item(),
+                    # Add to shared memory
+                    self._memory.add(z_np[i])
+                    self._multi_buffers.append(i, PPOTransition(observation=o_tens[i], action=a_t[i].cpu(), log_prob=lp_t[i].item(),
                                                           value=v_t[i].item(), reward=sh.total, done=d, truncated=tr, hidden_state=self._extract_hidden(h_batch, i), aux_tensor=aux_batch[i].cpu()))
                     r_sum += r
                     r_ema = 0.01 * sh.total + 0.99 * r_ema
@@ -494,7 +482,8 @@ class PpoTrainer:
                         r_acc[i] = 0.0
                         s_acc[i] = 0
                         hids[i] = None
-                        self._memories[i].reset()
+                        # Epidsodic memory is now SHARED across all actors and episodes for maximum diversity signal
+                        # self._memory.reset()
                         aux_states[i] = torch.zeros(3, dtype=torch.float32, device=self._device)
                     else:
                         hids[i] = self._extract_hidden(n_h_batch, i)
@@ -535,11 +524,11 @@ class PpoTrainer:
                 self._publish_update_telemetry(step_id, r_ema, self._last_opt_metrics)
             
             # Swap active buffers
-            f = self._buffers
-            self._buffers = self._buffers_b if f is self._buffers_a else self._buffers_a
+            f = self._multi_buffers
+            self._multi_buffers = self._multi_buffer_b if f is self._multi_buffer_a else self._multi_buffer_a
             
             # Offload full buffer to background worker
-            self._opt_buffers = f
+            self._opt_multi_buffer = f
             self._opt_obs = dict(obs_dict)
             self._opt_hiddens = dict(hids)
             self._opt_aux = {k: v.clone() for k, v in aux_states.items()}

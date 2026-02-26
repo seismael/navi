@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random as _random
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
@@ -17,6 +18,115 @@ __all__: list[str] = [
 # ---------------------------------------------------------------------------
 # PPO trajectory types
 # ---------------------------------------------------------------------------
+
+
+class MultiTrajectoryBuffer:
+    """Buffer that manages multiple independent actor trajectories.
+
+    Prevents 'Cross-Actor Bleed' by keeping actor rollout sequences separate
+    during BPTT sampling.
+    """
+
+    def __init__(self, n_actors: int, gamma: float = 0.99, gae_lambda: float = 0.95) -> None:
+        self._buffers = {
+            i: TrajectoryBuffer(gamma=gamma, gae_lambda=gae_lambda)
+            for i in range(n_actors)
+        }
+        self._n_actors = n_actors
+
+    def append(self, actor_id: int, transition: PPOTransition) -> None:
+        self._buffers[actor_id].append(transition)
+
+    def compute_returns_and_advantages(self, last_values: Tensor) -> None:
+        """Compute GAE for all buffers using per-actor bootstrap values."""
+        for i in range(self._n_actors):
+            self._buffers[i].compute_returns_and_advantages(last_value=float(last_values[i]))
+
+    def clear(self) -> None:
+        for buf in self._buffers.values():
+            buf.clear()
+
+    def sample_minibatches(
+        self, batch_size: int = 64, seq_len: int = 32
+    ) -> Generator[TrajectoryBuffer.MiniBatch, None, None]:
+        """Sample minibatches across all actors while preserving sequences."""
+        # 1. Build tensor cache for each actor
+        for buf in self._buffers.values():
+            buf._build_tensor_cache()
+        
+        # 2. Stack into (Actor, Time, ...) tensors
+        # Assumes all actors have SAME rollout length!
+        all_obs = torch.stack([b._t_obs for b in self._buffers.values()]) # (N, L, 3, Az, El)
+        all_acts = torch.stack([b._t_actions for b in self._buffers.values()]) # (N, L, 4)
+        all_lps = torch.stack([b._t_log_probs for b in self._buffers.values()]) # (N, L)
+        all_vals = torch.stack([b._t_values for b in self._buffers.values()]) # (N, L)
+        all_advs = torch.stack([b._advantages for b in self._buffers.values()]) # (N, L)
+        all_rets = torch.stack([b._returns for b in self._buffers.values()]) # (N, L)
+        all_dones = torch.stack([b._t_dones for b in self._buffers.values()]) # (N, L)
+        
+        n_actors, rollout_len = all_obs.shape[:2]
+        
+        if seq_len > 0:
+            # BPTT sampling: (N, L) -> (N * L/seq_len, seq_len) sequences
+            n_seqs_per_actor = rollout_len // seq_len
+            total_seqs = n_actors * n_seqs_per_actor
+            
+            obs_seqs = all_obs[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len, *all_obs.shape[2:])
+            acts_seqs = all_acts[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len, -1)
+            lps_seqs = all_lps[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
+            vals_seqs = all_vals[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
+            advs_seqs = all_advs[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
+            rets_seqs = all_rets[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
+            dones_seqs = all_dones[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
+            
+            # Shuffle sequences
+            perm = torch.randperm(total_seqs)
+            
+            seqs_per_minibatch = max(1, batch_size // seq_len)
+            for i in range(0, total_seqs, seqs_per_minibatch):
+                idx = perm[i : i + seqs_per_minibatch]
+                
+                # Hidden states at start of sequences
+                # We need to map linear index back to (actor, time)
+                h0 = []
+                for j in idx:
+                    actor_idx = j // n_seqs_per_actor
+                    seq_idx = j % n_seqs_per_actor
+                    h0.append(self._buffers[int(actor_idx)]._transitions[int(seq_idx * seq_len)].hidden_state)
+
+                yield TrajectoryBuffer.MiniBatch(
+                    observations=obs_seqs[idx].reshape(-1, *obs_seqs.shape[2:]),
+                    actions=acts_seqs[idx].reshape(-1, acts_seqs.shape[-1]),
+                    old_log_probs=lps_seqs[idx].flatten(),
+                    old_values=vals_seqs[idx].flatten(),
+                    advantages=advs_seqs[idx].flatten(),
+                    returns=rets_seqs[idx].flatten(),
+                    hidden_states=h0,
+                    dones=dones_seqs[idx], # (n_seqs, seq_len)
+                )
+        else:
+            # Flat random shuffle
+            flat_indices = torch.randperm(n_actors * rollout_len)
+            obs_flat = all_obs.view(-1, *all_obs.shape[2:])
+            acts_flat = all_acts.view(-1, all_acts.shape[-1])
+            lps_flat = all_lps.flatten()
+            vals_flat = all_vals.flatten()
+            advs_flat = all_advs.flatten()
+            rets_flat = all_rets.flatten()
+            
+            for i in range(0, len(flat_indices), batch_size):
+                idx = flat_indices[i : i + batch_size]
+                yield TrajectoryBuffer.MiniBatch(
+                    observations=obs_flat[idx],
+                    actions=acts_flat[idx],
+                    old_log_probs=lps_flat[idx],
+                    old_values=vals_flat[idx],
+                    advantages=advs_flat[idx],
+                    returns=rets_flat[idx],
+                )
+
+    def __len__(self) -> int:
+        return sum(len(b) for b in self._buffers.values())
 
 
 @dataclass
@@ -178,9 +288,8 @@ class TrajectoryBuffer:
 
             if tr.truncated and not tr.done:
                 # Time-limit: episode was artificially ended.  Bootstrap
-                # from V(s_T) as a proxy for V(s_{T+1}).  The GAE trace
-                # is cut so advantages from the next episode don't leak.
-                delta = tr.reward + self.gamma * tr.value - tr.value
+                # from V(s_{t+1}) as a proxy for the next state value.
+                delta = tr.reward + self.gamma * prev_value - tr.value
                 last_gae = delta
             elif tr.done:
                 # True termination (collision): future value is 0.

@@ -169,6 +169,9 @@ class PpoLearner:
                 else:
                     new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
 
+                # Squeeze outputs from policy to ensure they are 1D (B,)
+                new_vals = new_vals.squeeze(-1)
+
                 # PPO losses
                 ratio = (new_lp - old_lp).exp()
                 surr1 = ratio * adv

@@ -121,6 +121,76 @@ class EpisodicMemory:
 
         return self._query_numpy(vec, searchable)
 
+    def add_batch(self, embeddings: np.ndarray[Any, Any]) -> None:
+        """Add a batch of embeddings to the memory buffer.
+
+        Args:
+            embeddings: (B, D) float32 vectors.
+        """
+        # Ensure normalized
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        vecs = embeddings / np.maximum(norms, 1e-8)
+
+        for i in range(vecs.shape[0]):
+            self._embeddings.append(vecs[i])
+
+        if self._use_faiss and self._faiss_index is not None:
+            self._faiss_index.add(vecs.astype(np.float32))
+
+        # Enforce capacity (simple pop for now, could be optimized)
+        while len(self._embeddings) > self.capacity:
+            self._embeddings.pop(0)
+            if self._use_faiss:
+                self._rebuild_faiss_index()
+
+    def query_batch(
+        self, embeddings: np.ndarray[Any, Any],
+    ) -> list[tuple[float, np.ndarray[Any, Any] | None, bool]]:
+        """Query the memory for a batch of embeddings.
+
+        Args:
+            embeddings: (B, D) float32 query vectors.
+
+        Returns:
+            List of (similarity, matched_embedding, is_loop) tuples.
+        """
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        vecs = (embeddings / np.maximum(norms, 1e-8)).astype(np.float32)
+
+        n = len(self._embeddings)
+        searchable = n - self.exclusion_window
+        if searchable <= 0:
+            return [(0.0, None, False)] * vecs.shape[0]
+
+        if self._use_faiss and self._faiss_index is not None:
+            # Batched FAISS search
+            k = min(searchable, 10)
+            distances, indices = self._faiss_index.search(vecs, k)
+            
+            results = []
+            for b in range(vecs.shape[0]):
+                best_sim = -1.0
+                best_vec = None
+                for i in range(k):
+                    idx = int(indices[b, i])
+                    if 0 <= idx < searchable:
+                        sim = float(distances[b, i])
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_vec = self._embeddings[idx]
+                
+                if best_sim < 0:
+                    results.append((0.0, None, False))
+                else:
+                    results.append((best_sim, best_vec, best_sim >= self.similarity_threshold))
+            return results
+
+        # Fallback to loop for numpy
+        results = []
+        for i in range(vecs.shape[0]):
+            results.append(self._query_numpy(vecs[i], searchable))
+        return results
+
     def _query_faiss(
         self,
         vec: np.ndarray[Any, Any],
