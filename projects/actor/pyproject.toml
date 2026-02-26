@@ -20,6 +20,7 @@ dependencies = [
     "msgpack-numpy>=0.4",
     "torchvision>=0.17.0",
     "torchaudio>=2.2.0",
+    "faiss-cpu>=1.13.2",
 ]
 
 [project.optional-dependencies]

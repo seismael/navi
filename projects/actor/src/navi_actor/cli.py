@@ -6,6 +6,7 @@ import logging
 
 import typer
 
+from navi_contracts import setup_logging
 from navi_actor.config import ActorConfig
 from navi_actor.server import ActorServer
 
@@ -31,11 +32,7 @@ def serve(
     elevation_bins: int = typer.Option(24, help="Expected distance-matrix elevation resolution"),
 ) -> None:
     """Start the Actor service (always uses CognitiveMambaPolicy)."""
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
-    else:
-        root_logger.setLevel(logging.INFO)
+    setup_logging("navi_actor")
 
     default_config = ActorConfig()
 
@@ -125,11 +122,7 @@ def train_ppo(
     checkpoint: str = typer.Option("", help="Resume from checkpoint path (.pt)"),
 ) -> None:
     """Train a CognitiveMambaPolicy using PPO with RND curiosity and episodic memory."""
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
-    else:
-        root_logger.setLevel(logging.INFO)
+    setup_logging("navi_actor_ppo_trainer")
 
     default_config = ActorConfig()
 
@@ -240,11 +233,7 @@ def train_sequential(
     import random as _random
     from pathlib import Path
 
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
-    else:
-        root_logger.setLevel(logging.INFO)
+    setup_logging("navi_actor_sequential_trainer")
 
     default_config = ActorConfig()
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import typer
 
+from navi_contracts import setup_logging
 from navi_environment.config import EnvironmentConfig
 from navi_environment.generators.arena import ArenaGenerator
 from navi_environment.generators.city import CityGenerator
@@ -136,6 +137,7 @@ def serve(
     actors: int = typer.Option(1, help="Number of actors sharing the scene"),
 ) -> None:
     """Start the Environment service."""
+    setup_logging("navi_environment")
     default_config = EnvironmentConfig()
 
     config = EnvironmentConfig(
@@ -193,6 +195,7 @@ def compile_world(
     semantic_id: int = typer.Option(6, help="Semantic ID to assign to occupied voxels"),
 ) -> None:
     """Compile a source world model into canonical sparse voxel chunks."""
+    setup_logging("navi_environment_compiler")
     compiler = WorldModelCompiler()
     result = compiler.compile(
         source_path=source,

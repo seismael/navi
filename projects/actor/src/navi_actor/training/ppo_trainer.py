@@ -86,8 +86,10 @@ class PpoTrainer:
         # Compute device
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Shared policy
-        self._policy = CognitiveMambaPolicy(
+        # Double-buffered policy architecture:
+        # 1. learner_policy: updated by the background optimizer
+        # 2. rollout_policy: used by the main thread for rollout (inference only)
+        self._learner_policy = CognitiveMambaPolicy(
             embedding_dim=config.embedding_dim,
             azimuth_bins=config.azimuth_bins,
             elevation_bins=config.elevation_bins,
@@ -96,6 +98,19 @@ class PpoTrainer:
             max_lateral=config.max_lateral,
             max_yaw=config.max_yaw,
         ).to(self._device)
+        
+        self._rollout_policy = CognitiveMambaPolicy(
+            embedding_dim=config.embedding_dim,
+            azimuth_bins=config.azimuth_bins,
+            elevation_bins=config.elevation_bins,
+            max_forward=config.max_forward,
+            max_vertical=config.max_vertical,
+            max_lateral=config.max_lateral,
+            max_yaw=config.max_yaw,
+        ).to(self._device)
+        
+        # Initial sync
+        self._sync_rollout_policy()
 
         # Shared RND curiosity module
         self._rnd = RNDModule(
@@ -171,6 +186,74 @@ class PpoTrainer:
             if self._n_actors > 1 else None
         )
 
+    def _sync_rollout_policy(self) -> None:
+        """Copy weights from learner_policy to rollout_policy."""
+        self._rollout_policy.load_state_dict(self._learner_policy.state_dict())
+        self._rollout_policy.eval()
+
+    def _optimisation_worker(self, ppo_epochs: int, minibatch_size: int, seq_len: int) -> None:
+        while not self._opt_stop.is_set():
+            self._opt_event.wait(timeout=0.5)
+            if self._opt_stop.is_set():
+                break
+            if not self._opt_event.is_set():
+                continue
+            self._opt_event.clear()
+            
+            buffers, obs_dict, hiddens, aux_dict = self._opt_buffers, self._opt_obs, self._opt_hiddens, self._opt_aux
+            if not all([buffers, obs_dict, hiddens, aux_dict]):
+                self._opt_done.set()
+                continue
+                
+            try:
+                t_opt = time.perf_counter()
+                # Compute returns/advantages for the buffer we just swapped out
+                with torch.no_grad():
+                    active = [aid for aid in range(self._n_actors) if buffers and len(buffers[aid]) > 0]
+                    if active and buffers and obs_dict and hiddens and aux_dict:
+                        b_obs = torch.stack([self._obs_to_tensor(obs_dict[aid]) for aid in active]).to(self._device)
+                        b_hid = self._stack_hiddens({i: hiddens[active[i]] for i in range(len(active))}, len(active))
+                        b_aux = torch.stack([aux_dict[active[i]] for i in range(len(active))]).to(self._device)
+                        
+                        # Use learner_policy for advantage estimation
+                        self._learner_policy.eval()
+                        _, _, b_val, _, _ = self._learner_policy.forward(b_obs, b_hid, aux_tensor=b_aux)
+                        
+                        for k, aid in enumerate(active):
+                            buffers[aid].compute_returns_and_advantages(last_value=b_val[k].item())
+
+                # Merge and Train
+                merged = None
+                if buffers:
+                    for aid in range(self._n_actors):
+                        if len(buffers[aid]) == 0:
+                            continue
+                        if merged is None:
+                            merged = buffers[aid]
+                        else:
+                            merged.extend_from(buffers[aid])
+                
+                if merged and len(merged) > 0:
+                    self._learner_policy.train()
+                    self._last_opt_metrics = self._learner.train_ppo_epoch(self._learner_policy, merged, ppo_epochs=ppo_epochs, minibatch_size=minibatch_size, seq_len=seq_len, rnd=self._rnd)
+                    
+                    # Push new weights to the rollout policy
+                    self._sync_rollout_policy()
+                
+                ms = (time.perf_counter() - t_opt) * 1000
+                self._last_opt_duration_ms = ms
+                self._opt_duration_acc += ms
+                self._opt_duration_count += 1
+                _LOGGER.info(f"Async PPO Optimization completed in {ms:.2f}ms. Weights synced.")
+                
+                if buffers:
+                    for buf in buffers.values():
+                        buf.clear()
+            except Exception:
+                _LOGGER.exception("Opt error")
+            finally:
+                self._opt_done.set()
+
     def start(self) -> None:
         """Open ZMQ sockets."""
         sub = self._ctx.socket(zmq.SUB)
@@ -204,36 +287,38 @@ class PpoTrainer:
     def save_training_state(self, path: str | Path) -> None:
         """Save complete training state."""
         save_path = Path(path)
+        _LOGGER.info("Saving training checkpoint to %s", save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         state = {
             "version": 2,
-            "policy_state_dict": self._policy.state_dict(),
+            "policy_state_dict": self._learner_policy.state_dict(),
             "rnd_state_dict": self._rnd.state_dict(),
             "reward_shaper_step": self._reward_shaper._global_step,
         }
         if self._learner._optimizer:
             state["optimizer_state_dict"] = self._learner._optimizer.state_dict()
-        if self._learner._value_optimizer:
-            state["value_optimizer_state_dict"] = self._learner._value_optimizer.state_dict()
         if self._learner._rnd_optimizer:
             state["rnd_optimizer_state_dict"] = self._learner._rnd_optimizer.state_dict()
         torch.save(state, save_path)
 
     def load_training_state(self, path: str | Path) -> None:
         """Restore training state."""
+        _LOGGER.info("Loading training checkpoint from %s", path)
         data = torch.load(path, weights_only=False, map_location="cpu")
         if isinstance(data, dict) and data.get("version") == 2:
-            self._policy.load_state_dict(data["policy_state_dict"])
+            self._learner_policy.load_state_dict(data["policy_state_dict"])
             self._rnd.load_state_dict(data["rnd_state_dict"])
             self._reward_shaper._global_step = int(data.get("reward_shaper_step", 0))
             if "optimizer_state_dict" in data:
-                self._learner._get_optimizer(self._policy).load_state_dict(data["optimizer_state_dict"])
-            if "value_optimizer_state_dict" in data:
-                self._learner._get_value_optimizer(self._policy).load_state_dict(data["value_optimizer_state_dict"])
+                self._learner._get_optimizer(self._learner_policy).load_state_dict(data["optimizer_state_dict"])
             if "rnd_optimizer_state_dict" in data:
                 self._learner._get_rnd_optimizer(self._rnd).load_state_dict(data["rnd_optimizer_state_dict"])
+            
+            # Sync weights to rollout policy after loading
+            self._sync_rollout_policy()
         else:
-            self._policy.load_state_dict(data)
+            self._learner_policy.load_state_dict(data)
+            self._sync_rollout_policy()
 
     def _recv_matrix(self, timeout_ms: int = 3000, *, expected_actor_id: int | None = None) -> DistanceMatrix | None:
         if expected_actor_id in self._pending_obs:
@@ -325,55 +410,6 @@ class PpoTrainer:
     def _extract_hidden(self, batched: torch.Tensor | None, actor_id: int) -> torch.Tensor | None:
         return batched[:, actor_id : actor_id + 1, :].clone() if batched is not None else None
 
-    def _optimisation_worker(self, ppo_epochs: int, minibatch_size: int, seq_len: int, step_ref: list[int], reward_ema_ref: list[float]) -> None:
-        while not self._opt_stop.is_set():
-            self._opt_event.wait(timeout=0.5)
-            if self._opt_stop.is_set():
-                break
-            if not self._opt_event.is_set():
-                continue
-            self._opt_event.clear()
-            buffers, obs_dict, hiddens, aux_dict = self._opt_buffers, self._opt_obs, self._opt_hiddens, self._opt_aux
-            if not all([buffers, obs_dict, hiddens, aux_dict]):
-                self._opt_done.set()
-                continue
-            try:
-                t_opt = time.perf_counter()
-                self._policy.eval()
-                active = [aid for aid in range(self._n_actors) if buffers and len(buffers[aid]) > 0]
-                if active and buffers and obs_dict and hiddens and aux_dict:
-                    with torch.no_grad():
-                        b_obs = torch.stack([self._obs_to_tensor(obs_dict[aid]) for aid in active]).to(self._device)
-                        b_hid = self._stack_hiddens({i: hiddens[active[i]] for i in range(len(active))}, len(active))
-                        b_aux = torch.stack([aux_dict[active[i]] for i in range(len(active))]).to(self._device)
-                        _, _, b_val, _, _ = self._policy.forward(b_obs, b_hid, aux_tensor=b_aux)
-                    for k, aid in enumerate(active):
-                        buffers[aid].compute_returns_and_advantages(last_value=b_val[k].item())
-                merged = None
-                if buffers:
-                    for aid in range(self._n_actors):
-                        if len(buffers[aid]) == 0:
-                            continue
-                        if merged is None:
-                            merged = buffers[aid]
-                        else:
-                            merged.extend_from(buffers[aid])
-                if merged and len(merged) > 0:
-                    with self._opt_lock:
-                        self._policy.train()
-                        self._last_opt_metrics = self._learner.train_ppo_epoch(self._policy, merged, ppo_epochs=ppo_epochs, minibatch_size=minibatch_size, seq_len=seq_len, rnd=self._rnd)
-                ms = (time.perf_counter() - t_opt) * 1000
-                self._last_opt_duration_ms = ms
-                self._opt_duration_acc += ms
-                self._opt_duration_count += 1
-                if buffers:
-                    for buf in buffers.values():
-                        buf.clear()
-            except Exception:
-                _LOGGER.exception("Opt error")
-            finally:
-                self._opt_done.set()
-
     def train(self, total_steps: int, *, log_every: int = 100, checkpoint_every: int = 0, checkpoint_dir: str = "checkpoints") -> PpoTrainingMetrics:
         n = self._n_actors
         rl, ep, mb, sl = self._config.rollout_length, self._config.ppo_epochs, self._config.minibatch_size, self._config.bptt_len
@@ -389,17 +425,17 @@ class PpoTrainer:
                 raise RuntimeError(f"Failed to receive initial observation for actor {i} after 15s")
             obs_dict[i] = obs
 
-        s_ref, r_ema_ref = [0], [0.0]
+        # Start background worker
         self._opt_stop.clear()
         self._opt_done.set()
-        self._opt_thread = threading.Thread(target=self._optimisation_worker, args=(ep, mb, sl, s_ref, r_ema_ref), daemon=True)
+        self._opt_thread = threading.Thread(target=self._optimisation_worker, args=(ep, mb, sl), daemon=True)
         self._opt_thread.start()
-        t_start = time.perf_counter()
 
+        t_start = time.perf_counter()
         acc_fwd, acc_step, acc_mem, acc_trans, acc_tick, t_cnt = 0.0, 0.0, 0.0, 0.0, 0.0, 0
 
         while step_id < total_steps:
-            self._policy.eval()
+            # Rollout Phase
             for _ in range(rl):
                 if step_id >= total_steps:
                     break
@@ -411,7 +447,9 @@ class PpoTrainer:
 
                 t_fwd_start = time.perf_counter()
                 with torch.no_grad():
-                    a_t, lp_t, v_t, n_h_batch, z_t = self._policy.forward(o_batch, h_batch, aux_tensor=aux_batch)
+                    # Non-blocking rollout inference
+                    self._rollout_policy.eval()
+                    a_t, lp_t, v_t, n_h_batch, z_t = self._rollout_policy.forward(o_batch, h_batch, aux_tensor=aux_batch)
                     intr_r = self._rnd.intrinsic_reward(z_t)
                 fwd_ms = (time.perf_counter() - t_fwd_start) * 1000
 
@@ -435,11 +473,13 @@ class PpoTrainer:
                     sh = self._reward_shaper.shape(raw_reward=r, done=d, forward_velocity=float(a_np[i, 0]), angular_velocity=float(a_np[i, 3]),
                                                   intrinsic_reward=intr_r[i].item(), loop_similarity=sims[i])
                     self._reward_shaper.step()
-                    # Send coarse-grained telemetry to trigger dashboard TRAINING mode
+                    
+                    # Periodic step telemetry (to keep dashboard training mode alive)
                     if step_id % log_every == 0:
                         self._publish_step_telemetry(step_id=step_id, episode_id=obs_dict[i].episode_id, actor_id=i, raw_reward=r, shaped_reward=sh.total,
                                                      intrinsic_reward=intr_r[i].item(), loop_similarity=sims[i], is_loop=(sims[i] > self._config.loop_threshold),
                                                      beta=self._reward_shaper.beta, done=d or tr, forward_vel=float(a_np[i, 0]), yaw_vel=float(a_np[i, 3]))
+                    
                     self._memories[i].add(z_np[i])
                     self._buffers[i].append(PPOTransition(observation=o_tens[i], action=a_t[i].cpu(), log_prob=lp_t[i].item(),
                                                           value=v_t[i].item(), reward=sh.total, done=d, truncated=tr, hidden_state=self._extract_hidden(h_batch, i), aux_tensor=aux_batch[i].cpu()))
@@ -462,8 +502,6 @@ class PpoTrainer:
                 trans_ms = (time.perf_counter() - t_trans_start) * 1000
 
                 step_id += n
-                s_ref[0] = step_id
-                r_ema_ref[0] = r_ema
                 if not self._opt_done.is_set():
                     self._sim_steps_during_opt += n
                 self._total_sim_steps += n
@@ -477,7 +515,9 @@ class PpoTrainer:
                 t_cnt += 1
 
                 if log_every > 0 and step_id % log_every < n:
-                    sps = step_id / max(0.001, time.perf_counter() - t_start)
+                    now_perf = time.perf_counter()
+                    sps = log_every / max(0.001, now_perf - getattr(self, '_last_log_time', t_start))
+                    self._last_log_time = now_perf
                     zw = self._sim_steps_during_opt / max(1, self._total_sim_steps)
                     _LOGGER.info(
                         "[step %d] reward_ema=%.4f episodes=%d | sps=%.1f zw=%.1f%% | "
@@ -487,17 +527,31 @@ class PpoTrainer:
                     )
                     self._publish_perf_telemetry(step_id=step_id, sps=sps, forward_pass_ms=fwd_ms, batch_step_ms=step_ms, memory_query_ms=mem_ms,
                                                  transition_ms=trans_ms, tick_total_ms=tick_ms, zero_wait_ratio=zw, ppo_update_ms=self._last_opt_duration_ms)
+
+            # --- Rollout Loop Finished ---
+            # Wait for previous optimization to finish (Double Buffer Sync)
             self._opt_done.wait()
             if self._last_opt_metrics:
                 self._publish_update_telemetry(step_id, r_ema, self._last_opt_metrics)
+            
+            # Swap active buffers
             f = self._buffers
             self._buffers = self._buffers_b if f is self._buffers_a else self._buffers_a
-            self._opt_buffers, self._opt_obs, self._opt_hiddens, self._opt_aux = f, dict(obs_dict), dict(hids), {k: v.clone() for k, v in aux_states.items()}
+            
+            # Offload full buffer to background worker
+            self._opt_buffers = f
+            self._opt_obs = dict(obs_dict)
+            self._opt_hiddens = dict(hids)
+            self._opt_aux = {k: v.clone() for k, v in aux_states.items()}
+            
             self._opt_done.clear()
             self._opt_event.set()
+            
             if checkpoint_every > 0 and step_id % checkpoint_every < n:
+                # Synchronize before saving to ensure checkpoint is consistent
                 self._opt_done.wait()
                 self.save_training_state(Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt")
+
         self._opt_stop.set()
         self._opt_event.set()
         return PpoTrainingMetrics(total_steps=step_id, episodes=ep_cnt, reward_mean=r_sum/max(1, step_id), reward_ema=r_ema,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,8 @@ if TYPE_CHECKING:
     from navi_actor.rollout_buffer import TrajectoryBuffer
 
 __all__: list[str] = ["PpoLearner", "PpoMetrics"]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,33 +77,15 @@ class PpoLearner:
                 param_group["lr"] = self._rnd_learning_rate
 
     def _get_optimizer(self, policy: CognitiveMambaPolicy) -> torch.optim.Adam:
-        """Lazily create or return the policy optimizer.
+        """Lazily create or return the unified policy optimizer.
 
-        Covers encoder + temporal core + actor head + log_std.
-        The critic head has a *separate* optimizer so that value-loss
-        gradients never flow through the shared backbone.
+        Covers the entire model: encoder + temporal core + actor head + critic head.
         """
         if self._optimizer is None:
-            policy_params = (
-                list(policy.encoder.parameters())
-                + list(policy.temporal_core.parameters())
-                + list(policy.heads.actor.parameters())
-                + [policy.heads.log_std]
-            )
             self._optimizer = torch.optim.Adam(
-                policy_params, lr=self._learning_rate
+                policy.parameters(), lr=self._learning_rate
             )
         return self._optimizer
-
-    def _get_value_optimizer(
-        self, policy: CognitiveMambaPolicy
-    ) -> torch.optim.Adam:
-        """Lazily create or return the critic-head optimizer."""
-        if self._value_optimizer is None:
-            self._value_optimizer = torch.optim.Adam(
-                policy.heads.critic.parameters(), lr=self._learning_rate
-            )
-        return self._value_optimizer
 
     def _get_rnd_optimizer(self, rnd: RNDModule) -> torch.optim.Adam:
         """Lazily create or return the RND predictor optimizer."""
@@ -120,29 +105,17 @@ class PpoLearner:
         seq_len: int = 32,
         rnd: RNDModule | None = None,
     ) -> PpoMetrics:
-        """Run multiple PPO mini-batch updates on a filled trajectory buffer.
-
-        Args:
-            policy: the neural policy to train.
-            buffer: trajectory buffer with computed advantages/returns.
-            ppo_epochs: number of passes over the data.
-            minibatch_size: transitions per minibatch.
-            seq_len: BPTT window length (0 for random shuffle).
-            rnd: optional RND module for distillation loss.
-
-        Returns:
-            Aggregated PpoMetrics from the epoch.
-
-        """
-        policy_optimizer = self._get_optimizer(policy)
-        value_optimizer = self._get_value_optimizer(policy)
+        """Run multiple PPO mini-batch updates on a filled trajectory buffer."""
+        optimizer = self._get_optimizer(policy)
         rnd_optimizer = self._get_rnd_optimizer(rnd) if rnd is not None else None
         device = policy.device
         policy.train()
 
-        # Collect param lists for per-group gradient clipping
-        policy_params = list(policy_optimizer.param_groups[0]["params"])
-        value_params = list(value_optimizer.param_groups[0]["params"])
+        _LOGGER.debug("Starting PPO epoch with %d samples (epochs=%d, batch=%d)", 
+                      len(buffer), ppo_epochs, minibatch_size)
+
+        # For gradient clipping
+        params = list(policy.parameters())
 
         running_policy_loss = 0.0
         running_value_loss = 0.0
@@ -163,47 +136,28 @@ class PpoLearner:
                 old_vals = mb.old_values.to(device)
                 aux_tensor = mb.aux_tensors.to(device) if mb.aux_tensors is not None else None
 
-                # Forward pass — evaluate current policy
+                # Forward pass
                 if seq_len > 0 and obs.shape[0] >= seq_len:
-                    # Reshape into (num_seqs, seq_len, ...) for BPTT
                     total = obs.shape[0]
                     n_seqs = total // seq_len
                     usable = n_seqs * seq_len
-                    obs_seq = obs[:usable].reshape(
-                        n_seqs, seq_len, *obs.shape[1:]
-                    )
+                    obs_seq = obs[:usable].reshape(n_seqs, seq_len, *obs.shape[1:])
                     acts_seq = acts[:usable].reshape(n_seqs, seq_len, -1)
                     aux_seq = aux_tensor[:usable].reshape(n_seqs, seq_len, -1) if aux_tensor is not None else None
 
-                    # Stack chunk-start hidden states → (1, n_seqs, D)
-                    # and build dones mask → (n_seqs, seq_len)
                     h0: Tensor | None = None
                     dones_mask: Tensor | None = None
                     if mb.hidden_states:
-                        # Filter out None entries (episode starts)
-                        first_h = next(
-                            (h for h in mb.hidden_states if h is not None),
-                            None,
-                        )
+                        first_h = next((h for h in mb.hidden_states if h is not None), None)
                         if first_h is not None:
-                            stacked = [
-                                h if h is not None
-                                else torch.zeros_like(first_h)
-                                for h in mb.hidden_states
-                            ]
-                            # Each h is (1, 1, D) → cat → (1, n_seqs, D)
+                            stacked = [h if h is not None else torch.zeros_like(first_h) for h in mb.hidden_states]
                             h0 = torch.cat(stacked, dim=1).to(device)
-                        # else: all None → leave h0 = None
                     if mb.dones is not None:
                         dones_mask = mb.dones.to(device)
 
                     new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
-                        obs_seq, acts_seq,
-                        hidden=h0,
-                        dones=dones_mask,
-                        aux_seq=aux_seq,
+                        obs_seq, acts_seq, hidden=h0, dones=dones_mask, aux_seq=aux_seq,
                     )
-                    # Handle remainder (if any) with single-step evaluate
                     if usable < total:
                         rem_lp, rem_v, rem_e, _, rem_z = policy.evaluate(
                             obs[usable:], acts[usable:], aux_tensor=aux_tensor[usable:] if aux_tensor is not None else None
@@ -215,95 +169,55 @@ class PpoLearner:
                 else:
                     new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
 
-                # Policy (actor) loss — clipped surrogate
+                # PPO losses
                 ratio = (new_lp - old_lp).exp()
                 surr1 = ratio * adv
-                surr2 = torch.clamp(
-                    ratio, 1.0 - self._clip_ratio, 1.0 + self._clip_ratio
-                ) * adv
+                surr2 = torch.clamp(ratio, 1.0 - self._clip_ratio, 1.0 + self._clip_ratio) * adv
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Value (critic) loss — clipped value
-                value_pred_clipped = old_vals + torch.clamp(
-                    new_vals - old_vals, -self._clip_ratio, self._clip_ratio
-                )
-                vf_loss1 = (new_vals - ret) ** 2
-                vf_loss2 = (value_pred_clipped - ret) ** 2
-                value_loss: Tensor = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
+                value_pred_clipped = old_vals + torch.clamp(new_vals - old_vals, -self._clip_ratio, self._clip_ratio)
+                vf_loss = 0.5 * torch.max((new_vals - ret)**2, (value_pred_clipped - ret)**2).mean()
 
-                # Entropy bonus
-                entropy_loss = -ent
+                total_loss = policy_loss + self._value_coeff * vf_loss - self._entropy_coeff * ent
 
-                # ── Gradient-isolated updates ──
-                # Both backward passes run BEFORE any optimizer step
-                # to avoid in-place modification of shared parameters.
-                actor_loss: Tensor = (
-                    policy_loss + self._entropy_coeff * entropy_loss
-                )
-                critic_loss: Tensor = self._value_coeff * value_loss
+                # Optimization step
+                optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(params, self._max_grad_norm)
+                optimizer.step()
 
-                policy_optimizer.zero_grad()
-                value_optimizer.zero_grad()
-                actor_loss.backward(retain_graph=True)
-                critic_loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(
-                    policy_params, self._max_grad_norm
-                )
-                torch.nn.utils.clip_grad_norm_(
-                    value_params, self._max_grad_norm
-                )
-                policy_optimizer.step()
-                value_optimizer.step()
-
-                # Composite metric for logging (not used for backprop)
-                total_loss_val = actor_loss.item() + critic_loss.item()
-
-                # RND distillation loss (separate optimizer)
+                # RND distillation
                 rnd_loss_val = 0.0
                 if rnd is not None and rnd_optimizer is not None:
-                    # Use z_t from evaluate/evaluate_sequence (no extra CNN pass)
-                    with torch.no_grad():
-                        z_rnd = z_mb.detach()
+                    z_rnd = z_mb.detach()
                     rnd_loss = rnd.distillation_loss(z_rnd)
                     rnd_optimizer.zero_grad()
                     rnd_loss.backward()
                     rnd_optimizer.step()
                     rnd_loss_val = rnd_loss.item()
 
-                # Approximate KL divergence (always non-negative)
                 with torch.no_grad():
-                    approx_kl = (
-                        ((ratio - 1.0) - (ratio.log())).mean().item()
-                    )
-                    clip_frac = (
-                        ((ratio - 1.0).abs() > self._clip_ratio)
-                        .float()
-                        .mean()
-                        .item()
-                    )
+                    approx_kl = ((ratio - 1.0) - (ratio.log())).mean().item()
+                    clip_frac = ((ratio - 1.0).abs() > self._clip_ratio).float().mean().item()
 
                 running_policy_loss += policy_loss.item()
-                running_value_loss += value_loss.item()
+                running_value_loss += vf_loss.item()
                 running_entropy += ent.item()
                 running_kl += approx_kl
                 running_clip += clip_frac
-                running_total += total_loss_val
+                running_total += total_loss.item()
                 running_rnd_loss += rnd_loss_val
                 n_updates += 1
 
         if n_updates == 0:
             return PpoMetrics(
-                policy_loss=0.0,
-                value_loss=0.0,
-                entropy=0.0,
-                approx_kl=0.0,
-                clip_fraction=0.0,
-                total_loss=0.0,
-                rnd_loss=0.0,
-                learning_rate=self._learning_rate,
-                rnd_learning_rate=self._rnd_learning_rate,
+                policy_loss=0.0, value_loss=0.0, entropy=0.0, approx_kl=0.0,
+                clip_fraction=0.0, total_loss=0.0, rnd_loss=0.0,
+                learning_rate=self._learning_rate, rnd_learning_rate=self._rnd_learning_rate,
             )
+
+        _LOGGER.debug("PPO epoch completed: loss=%0.4f, kl=%0.4f, entropy=%0.4f",
+                      running_total / n_updates, running_kl / n_updates, running_entropy / n_updates)
 
         return PpoMetrics(
             policy_loss=running_policy_loss / n_updates,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from typing import TYPE_CHECKING
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     from navi_auditor.storage.base import AbstractStorageBackend
 
 __all__: list[str] = ["LiveDashboard", "Recorder"]
+
+_LOGGER = logging.getLogger(__name__)
 
 # ── visual constants ─────────────────────────────────────────────────
 # Main-first layout at 1920x1080:
@@ -84,9 +87,11 @@ class Recorder:
 
     def start(self) -> None:
         """Open storage and connect to publishers."""
+        _LOGGER.info("Starting Recorder, output: %s", self._config.output_path)
         self._backend.open(self._config.output_path, mode="w")
 
         for addr in self._config.sub_addresses:
+            _LOGGER.debug("Connecting to publisher: %s", addr)
             sock = self._context.socket(zmq.SUB)
             sock.connect(addr)
             sock.setsockopt(zmq.SUBSCRIBE, TOPIC_DISTANCE_MATRIX.encode("utf-8"))
@@ -122,6 +127,7 @@ class Recorder:
 
     def stop(self) -> None:
         """Close storage and sockets."""
+        _LOGGER.info("Stopping Recorder.")
         self._backend.close()
         for sock in self._sockets:
             sock.close()
@@ -153,6 +159,7 @@ class LiveDashboard:
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
     ) -> None:
+        _LOGGER.info("Initializing LiveDashboard, matrix_sub=%s", matrix_sub)
         self._context: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._matrix_sub = self._context.socket(zmq.SUB)
         self._matrix_sub.connect(matrix_sub)

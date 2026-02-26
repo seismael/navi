@@ -47,7 +47,7 @@ Thumbs.db
 # but .venv directories are ignored
 
 # Runtime artifacts
-scripts/logs/
+*logs/
 projects/*/artifacts/
 .tmp_test_outputs/
 

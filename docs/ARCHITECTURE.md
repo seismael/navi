@@ -392,6 +392,12 @@ types may appear in canonical contracts — ever.
 
 See [CONTRACTS.md](CONTRACTS.md) for full field-by-field specifications.
 
+### 7.2. Telemetry & Logging Architecture
+
+- **Unified Standard:** All console and file logging is strictly centralized through `navi_contracts.logging.setup_logging()`.
+- **Cyclic Bounds:** File logs are perpetually capped (RotatingFileHandler, e.g., 1MB chunks, 10-file retention) to ensure infinite uptime without disk bloat.
+- **Professional Tracing:** Standardized log formats provide deterministic timestamps, sub-module precision, and level-aligned text for rapid regex analysis.
+
 ---
 
 ## 8. Roadmap: Future Architecture

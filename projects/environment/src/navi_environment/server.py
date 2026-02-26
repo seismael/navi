@@ -189,25 +189,49 @@ class EnvironmentServer:
                             )
                 continue
 
-            data = self._rep_socket.recv()
-            msg = deserialize(data)
-            if isinstance(msg, BatchStepRequest):
-                observations, results = self._backend.batch_step(
-                    msg.actions, msg.step_id,
-                )
-                batch_result = BatchStepResult(
-                    results=results,
-                    observations=observations,
-                )
-                self._rep_socket.send(serialize(batch_result))
-                # Publish each actor's observation + telemetry
-                for obs, action in zip(observations, msg.actions, strict=True):
-                    self._publish(obs)
-                    actor_id = (
-                        int(action.env_ids[0])
-                        if len(action.env_ids) > 0
-                        else 0
+            try:
+                data = self._rep_socket.recv()
+                msg = deserialize(data)
+                if isinstance(msg, BatchStepRequest):
+                    observations, results = self._backend.batch_step(
+                        msg.actions, msg.step_id,
                     )
+                    batch_result = BatchStepResult(
+                        results=results,
+                        observations=observations,
+                    )
+                    self._rep_socket.send(serialize(batch_result))
+                    # Publish each actor's observation + telemetry
+                    for obs, action in zip(observations, msg.actions, strict=True):
+                        self._publish(obs)
+                        actor_id = (
+                            int(action.env_ids[0])
+                            if len(action.env_ids) > 0
+                            else 0
+                        )
+                        pose = (
+                            self._backend.actor_pose(actor_id)
+                            if hasattr(self._backend, "actor_pose")
+                            else self._backend.pose
+                        )
+                        self._publish_telemetry(
+                            event_type="environment.step",
+                            step_id=msg.step_id,
+                            payload=np.array([
+                                pose.x, pose.y, pose.z, pose.yaw,
+                            ], dtype=np.float32),
+                            actor_id=actor_id,
+                        )
+                    self._step_id = msg.step_id
+                elif isinstance(msg, StepRequest):
+                    # Extract actor_id from action env_ids (default 0)
+                    actor_id = int(msg.action.env_ids[0]) if len(msg.action.env_ids) > 0 else 0
+                    obs, result = self._backend.step(
+                        msg.action, msg.step_id, actor_id=actor_id,
+                    )
+                    self._last_obs = obs
+                    self._rep_socket.send(serialize(result))
+                    self._publish(obs)
                     pose = (
                         self._backend.actor_pose(actor_id)
                         if hasattr(self._backend, "actor_pose")
@@ -221,30 +245,15 @@ class EnvironmentServer:
                         ], dtype=np.float32),
                         actor_id=actor_id,
                     )
-                self._step_id = msg.step_id
-            elif isinstance(msg, StepRequest):
-                # Extract actor_id from action env_ids (default 0)
-                actor_id = int(msg.action.env_ids[0]) if len(msg.action.env_ids) > 0 else 0
-                obs, result = self._backend.step(
-                    msg.action, msg.step_id, actor_id=actor_id,
-                )
-                self._last_obs = obs
-                self._rep_socket.send(serialize(result))
-                self._publish(obs)
-                pose = (
-                    self._backend.actor_pose(actor_id)
-                    if hasattr(self._backend, "actor_pose")
-                    else self._backend.pose
-                )
-                self._publish_telemetry(
-                    event_type="environment.step",
-                    step_id=msg.step_id,
-                    payload=np.array([
-                        pose.x, pose.y, pose.z, pose.yaw,
-                    ], dtype=np.float32),
-                    actor_id=actor_id,
-                )
-                self._step_id = msg.step_id
+                    self._step_id = msg.step_id
+            except Exception as e:
+                import traceback
+                print(f"CRITICAL ERROR in Environment Step Loop: {e}", flush=True)
+                traceback.print_exc()
+                # To prevent total deadlock, we must reply or close. But REQ/REP is strictly ping-pong.
+                # If we crashed before sending a reply, the Actor is permanently stuck.
+                # We will just break to let the thread die and the system reboot if handled.
+                break
 
     # ------------------------------------------------------------------
     # Async mode (SUB Action → PUB DistanceMatrix)

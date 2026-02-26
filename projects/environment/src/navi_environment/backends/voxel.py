@@ -11,6 +11,7 @@ to ``[0, 1]``.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
     from navi_environment.generators.base import AbstractWorldGenerator
 
 __all__: list[str] = ["VoxelBackend"]
+
+_LOGGER = logging.getLogger(__name__)
 
 # ── Reward constants ─────────────────────────────────────────────────
 _SEM_TARGET: int = 10
@@ -76,6 +79,7 @@ class VoxelBackend(SimulatorBackend):
         config: EnvironmentConfig,
         generator: AbstractWorldGenerator,
     ) -> None:
+        _LOGGER.info("Initializing VoxelBackend with %d actors.", config.n_actors)
         self._config = config
         self._generator = generator
         self._n_actors = config.n_actors
@@ -126,6 +130,7 @@ class VoxelBackend(SimulatorBackend):
             spawn[0], spawn[1], spawn[2],
             self._generator.generate_chunk,
         )
+        _LOGGER.debug("VoxelBackend initialized successfully.")
 
     # ------------------------------------------------------------------
     # SimulatorBackend interface
@@ -152,6 +157,7 @@ class VoxelBackend(SimulatorBackend):
             roll=0.0, pitch=0.0, yaw=0.0,
             timestamp=time.time(),
         )
+        _LOGGER.debug("Actor %d reset to %s (Episode %d)", actor_id, spawn, episode_id)
         self._window.shift(
             a.pose.x, a.pose.y, a.pose.z,
             self._generator.generate_chunk,
@@ -188,6 +194,10 @@ class VoxelBackend(SimulatorBackend):
         effective_speed = abs(linear_cmd) * self._mjx_env._speed_fwd * speed_factor
         expected_motion = max(1e-3, effective_speed) * self._mjx_env.dt
         collided = linear_cmd > 0.5 and expected_motion > 1e-6 and proposed_motion / expected_motion < 0.15
+
+        if collided:
+            _LOGGER.debug("Actor %d collision detected at (%0.2f, %0.2f, %0.2f)", 
+                         actor_id, new_pose.x, new_pose.y, new_pose.z)
 
         a.pose = new_pose
         a.episode_step += 1
@@ -226,10 +236,18 @@ class VoxelBackend(SimulatorBackend):
         a.episode_return += reward
         a.step_id = step_id
 
-        done = collided
+        # GHOST-MATRIX PERSISTENCE: Collided no longer ends the episode.
+        # This allows Mamba memory to persist and learn recovery maneuvers.
+        done = False 
         truncated = a.episode_step >= self._max_steps_per_episode
-        if done or truncated:
+        if truncated:
+            _LOGGER.info("Actor %d episode truncated: steps=%d, reward=%0.2f",
+                        actor_id, a.episode_step, a.episode_return)
             a.needs_reset = True
+
+        if collided:
+            _LOGGER.debug("Actor %d in persistent collision standoff. Reward: %0.2f", 
+                         actor_id, reward)
 
         result = StepResult(
             step_id=step_id,

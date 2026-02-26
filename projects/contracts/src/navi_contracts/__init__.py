@@ -12,6 +12,7 @@ from navi_contracts.models import (
     StepResult,
     TelemetryEvent,
 )
+from navi_contracts.logging import setup_logging
 from navi_contracts.serialization import deserialize, serialize
 from navi_contracts.topics import (
     TOPIC_ACTION,
@@ -59,4 +60,5 @@ __all__: list[str] = [
     "deserialize",
     # Serialization
     "serialize",
+    "setup_logging",
 ]

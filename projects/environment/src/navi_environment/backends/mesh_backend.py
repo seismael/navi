@@ -93,7 +93,7 @@ _CIRCLING_WINDOW: int = 200  # physics ticks (~4 s at dt=0.02)
 _PROXIMITY_CLEAR_BONUS: float = 0.15
 
 # ── Episode limits ───────────────────────────────────────────────────
-_MAX_STEPS_PER_EPISODE: int = 50_000
+_MAX_STEPS_PER_EPISODE: int = 2_000
 _STUCK_CONSECUTIVE: int = 8
 
 # ── Drone physics ────────────────────────────────────────────────────
@@ -366,11 +366,16 @@ class MeshSceneBackend(SimulatorBackend):
         # 4. Reward & Done
         a.step_count += 1
         truncated = a.step_count >= _MAX_STEPS_PER_EPISODE
-        done = collision or truncated or a.scene_changed
+        # GHOST-MATRIX PERSISTENCE: Collision no longer ends the episode.
+        # This forces the agent to learn to escape geometry using its temporal context.
+        done = truncated or a.scene_changed
 
         reward = self._compute_reward(actor_id, depth_2d, valid_2d, collision)
         a.episode_return += reward
         a.needs_reset = done
+
+        if collision:
+            _log.debug("Actor %d in persistent collision. Reward: %0.2f", actor_id, reward)
 
         now = time.time()
         # Update timestamp by creating new pose (frozen)
@@ -449,16 +454,23 @@ class MeshSceneBackend(SimulatorBackend):
         all_origins = np.empty((total_rays, 3), dtype=np.float32)
         all_dirs = np.empty((total_rays, 3), dtype=np.float32)
 
-        for idx, aid in enumerate(actor_ids):
-            a = self._actors[aid]
-            pos = np.array([a.pose.x, a.pose.y, a.pose.z], dtype=np.float32)
-            yaw = a.pose.yaw
-            cos_y, sin_y = math.cos(yaw), math.sin(yaw)
-            rot = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]], dtype=np.float32)
-
-            start, end = idx * n_rays_per_actor, (idx + 1) * n_rays_per_actor
-            np.dot(self._ray_dirs, rot.T, out=all_dirs[start:end])
-            all_origins[start:end] = pos
+        # Vectorized generation of origins and ray directions
+        poses = np.array([[self._actors[aid].pose.x, self._actors[aid].pose.y, self._actors[aid].pose.z] for aid in actor_ids], dtype=np.float32)
+        yaws = np.array([self._actors[aid].pose.yaw for aid in actor_ids], dtype=np.float32)
+        
+        all_origins = np.repeat(poses, n_rays_per_actor, axis=0)
+        
+        cos_y = np.cos(yaws)
+        sin_y = np.sin(yaws)
+        
+        rot = np.zeros((n, 3, 3), dtype=np.float32)
+        rot[:, 0, 0] = cos_y
+        rot[:, 0, 2] = sin_y
+        rot[:, 1, 1] = 1.0
+        rot[:, 2, 0] = -sin_y
+        rot[:, 2, 2] = cos_y
+        
+        all_dirs = np.einsum('rj,ncj->nrc', self._ray_dirs, rot).reshape(total_rays, 3)
 
         try:
             locations, index_ray, index_tri = self._mesh.ray.intersects_location(
@@ -734,10 +746,13 @@ class MeshSceneBackend(SimulatorBackend):
         a.yaw_history.append(a.pose.yaw)
         if len(a.yaw_history) > _CIRCLING_WINDOW:
             a.yaw_history.pop(0)
-            # Net displacement over window
-            if len(a.pos_history) >= 2:
-                # Approximate circling detection
-                pass
+            # Net displacement over the position history
+            if len(a.pos_history) > 10:
+                dx = a.pose.x - a.pos_history[0][0]
+                dz = a.pose.z - a.pos_history[0][1]
+                net_displacement = math.sqrt(dx*dx + dz*dz)
+                if net_displacement < 1.0:
+                    reward += _CIRCLING_PENALTY
 
         return reward
 
@@ -765,11 +780,21 @@ class MeshSceneBackend(SimulatorBackend):
         """Load a triangle mesh and pre-calculate face semantics."""
         import trimesh
         _log.info("Loading scene: %s", scene_path)
-        self._mesh = trimesh.load(scene_path, force="mesh")
+        try:
+            self._mesh = trimesh.load(scene_path, force="mesh")
+        except Exception as e:
+            _log.error("Failed to load scene %s: %s", scene_path, e)
+            self._cycle_to_next_scene_recursively()
+            return
+
+        n_faces = len(self._mesh.faces)
+        if n_faces > 150_000:
+            _log.warning("Scene %s is too complex (%d faces > 150k limit). Skipping to prevent simulation hang.", Path(scene_path).stem, n_faces)
+            self._cycle_to_next_scene_recursively()
+            return
 
         # Simple semantic heuristic if not present
         # floor = lowest Y, ceiling = highest Y, walls = everything else
-        n_faces = len(self._mesh.faces)
         self._face_semantics = np.full(n_faces, _SEM_WALL, dtype=np.int32)
 
         # Find floor (heuristic: normals pointing up + low Y)
@@ -784,6 +809,14 @@ class MeshSceneBackend(SimulatorBackend):
 
         _log.info("Scene loaded: %s (%d faces, %d vertices)",
                  Path(scene_path).stem, n_faces, len(self._mesh.vertices))
+
+    def _cycle_to_next_scene_recursively(self) -> None:
+        """Helper to cycle past broken or extremely dense meshes."""
+        if not self._scene_pool:
+            raise RuntimeError("Cannot skip dense mesh without a scene pool.")
+        self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
+        next_path = self._scene_pool[self._scene_pool_idx]
+        self._load_scene(next_path)
 
     def _find_spawns(self, n: int) -> list[tuple[float, float, float]]:
         """Find N valid spawn points on the floor."""

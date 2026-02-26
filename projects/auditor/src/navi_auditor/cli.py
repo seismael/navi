@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from navi_contracts import setup_logging
 from navi_auditor.config import AuditorConfig
 from navi_auditor.matrix_viewer import MatrixViewer
 from navi_auditor.recorder import Recorder
@@ -24,6 +25,7 @@ def record(
     out: str = typer.Option(None, help="Output path"),
 ) -> None:
     """Record DistanceMatrix v2 and Action v2 messages to storage."""
+    setup_logging("navi_auditor_recorder")
     config = AuditorConfig()
 
     final_out = out or config.output_path
@@ -48,6 +50,7 @@ def replay(
     speed: float = typer.Option(1.0, help="Playback speed multiplier"),
 ) -> None:
     """Replay a recorded session via ZMQ PUB."""
+    setup_logging("navi_auditor_rewinder")
     config = AuditorConfig()
     final_pub = pub or config.pub_address
 
@@ -84,6 +87,7 @@ def dashboard(
     ),
 ) -> None:
     """Run live high-performance RL training visualiser (PyQtGraph)."""
+    setup_logging("navi_auditor_dashboard")
     config = AuditorConfig()
 
     # CLI overrides

@@ -40,7 +40,13 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
   - **OBSERVER:** Default state when no actor telemetry is present.
 - Training mode MUST be detectable even when high-frequency per-step telemetry is disabled for performance.
 
-### 2.3 Non-Negotiables
+### 2.4 Logging Architecture Standard
+- **Unified Logging:** All projects MUST use the standardized `setup_logging` utility provided by `navi-contracts`.
+- **Cyclic Logs:** File logging MUST be cyclic (RotatingFileHandler) with a strict cap to prevent disk explosion (e.g., max 1MB per file, max 10 backups).
+- **Format:** Logs must use a professional, high-quality structure: `[%(asctime)s] [%(levelname)-8s] [%(name)s:%(lineno)d] - %(message)s`.
+- **Enforcement:** Each project's CLI entry point (`cli.py`) MUST invoke this setup immediately upon startup.
+
+### 2.5 Non-Negotiables
 1. **Wire Contracts:** v2 only (`RobotPose`, `DistanceMatrix`, `Action`, etc.).
 2. **Sacred Brain:** The cognitive pipeline (`RayViTEncoder` → `Mamba2` → `EpisodicMemory` → `ActorCriticHeads`) is **immutable**.
 3. **No Stall Mandate:** High-throughput training is the primary success metric. Optimization must never stall rollout.
@@ -61,6 +67,12 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 ### 3.3 Zero-Stall Telemetry
 - High-frequency per-actor per-step telemetry is forbidden during training as it bottlenecks the CPU rollout loop.
 - Use coarse-grained metrics (every 100 steps) for performance tracking.
+
+### 3.4 Ghost-Matrix Persistence
+- **No Collision Death:** Simulation backends MUST NOT trigger `done=True` on collision during training.
+- **Continuous Learning:** Agents must learn to "escape" or "fly away" from geometry through continuous per-step negative rewards.
+- **Context Preservation:** Temporal hidden states (Mamba) MUST NOT be reset upon grazing geometry, preserving situational awareness.
+- **Hard Truncation:** A hard step limit (e.g., 2000 steps) MUST be enforced to ensure episodic diversity.
 
 ## 4) Resilient Diagnostic Standard
 - Gallery Layer tools (Dashboard, Recorder) MUST be operational independent of Simulation/Brain layers.

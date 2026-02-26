@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from navi_auditor.dashboard.app import run_dashboard
 
 __all__: list[str] = ["MatrixViewer"]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MatrixViewer:
@@ -30,6 +34,8 @@ class MatrixViewer:
 
     def run(self) -> None:
         """Launch the PyQtGraph RL Dashboard."""
+        _LOGGER.info("Starting Ghost-Matrix Dashboard (hz=%0.1f, matrix_sub=%s)", 
+                     self._hz, self._matrix_sub)
         run_dashboard(
             matrix_sub=self._matrix_sub,
             actor_sub=self._actor_sub,
