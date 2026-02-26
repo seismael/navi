@@ -1,12 +1,11 @@
 param(
     [string]$ManifestPath = "",
-    [int]$TotalSteps = 10000000,
+    [int]$TotalSteps = 500000,
     [string]$CheckpointDir = "checkpoints/all_night",
     [string]$ResumeCheckpoint = "",
     [string]$Backend = "mesh",
-    [int]$NumActors = 4,
-    [int]$AzimuthBins = 64,
-    [int]$ElevationBins = 32,
+    [int]$AzimuthBins = 256,
+    [int]$ElevationBins = 48,
     [int]$MinibatchSize = 32,
     [int]$PpoEpochs = 2,
     [double]$ExistentialTax = -0.02,
@@ -16,6 +15,9 @@ param(
     [int]$CheckpointEvery = 25000,
     [string]$LogDir = "scripts/logs/all_night"
 )
+
+# Standard Ghost-Matrix Fleet Size
+$NumActors = 4
 
 $ErrorActionPreference = "Stop"
 
@@ -47,7 +49,7 @@ Write-Host "========================================================"
 Write-Host "  Navi All-Night Continuous Training"
 Write-Host "  Manifest   : $ManifestPath"
 Write-Host "  Steps      : $TotalSteps (Total)"
-Write-Host "  Actors     : $NumActors"
+Write-Host "  Actors     : $NumActors (Standard Fleet)"
 Write-Host "  Resolution : ${AzimuthBins}x${ElevationBins}"
 Write-Host "  Backend    : $Backend"
 Write-Host "  Checkpoint : $CheckpointDir (every $CheckpointEvery)"
@@ -104,7 +106,8 @@ $actorArgs = @(
     "--entropy-coeff", "$EntropyCoeff",
     "--learning-rate", "$LearningRate",
     "--bptt-len", "$BpttLen",
-    "--backend", $Backend
+    "--backend", $Backend,
+    "--shuffle"
 )
 
 

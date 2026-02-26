@@ -10,18 +10,19 @@
   .\run-ghost-stack.ps1 -Backend voxel
 
   # Multi-scene PPO training with live dashboard
-  .\run-ghost-stack.ps1 -Train -Actors 4 -TotalSteps 500000
+  .\run-ghost-stack.ps1 -Train -TotalSteps 500000
 
   # Resume from checkpoint
-  .\run-ghost-stack.ps1 -Train -Actors 4 -TotalSteps 500000 -Checkpoint "checkpoints\policy_step_0010000.pt"
+  .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint "checkpoints\policy_step_0010000.pt"
 #>
 param(
     # ── Mode ──
     [switch]$Train,
 
     # ── Common ──
-    [string]$Backend = "voxel",
-    [int]$Actors = 4,
+    [string]$Backend = "mesh",
+    [int]$AzimuthBins = 256,
+    [int]$ElevationBins = 48,
     [string]$HabitatScene = "",
     [string]$HabitatDatasetConfig = "",
     [switch]$NoPreKill,
@@ -30,7 +31,7 @@ param(
     # ── Training params ──
     [string]$Manifest = "",
     [int]$TotalSteps = 500000,
-    [int]$CheckpointEvery = 5000,
+    [int]$CheckpointEvery = 25000,
     [string]$CheckpointDir = "checkpoints",
     [string]$Checkpoint = "",
     [int]$LogEvery = 100,
@@ -44,6 +45,9 @@ param(
     [string]$ActorStepEndpoint = "tcp://localhost:5560",
     [string]$ActorPolicyCheckpoint = ""
 )
+
+# Standard Ghost-Matrix Fleet Size
+$NumActors = 4
 
 $ErrorActionPreference = "Stop"
 
@@ -122,14 +126,16 @@ if ($Train) {
         "--project", (Join-Path $repoRoot "projects\actor"),
         "navi-actor", "train-sequential",
         "--manifest", $Manifest,
-        "--actors", $Actors,
+        "--actors", "$NumActors",
         "--total-steps", $TotalSteps,
         "--shuffle",
         "--backend", $Backend,
         "--checkpoint-every", $CheckpointEvery,
         "--checkpoint-dir", $CheckpointDir,
         "--log-every", $LogEvery,
-        "--rollout-length", $RolloutLength
+        "--rollout-length", $RolloutLength,
+        "--azimuth-bins", "$AzimuthBins",
+        "--elevation-bins", "$ElevationBins"
     )
 
     if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
@@ -144,7 +150,7 @@ if ($Train) {
         Write-Host "========================================================"
         Write-Host "  Navi Ghost-Matrix Training"
         Write-Host "  Backend    : $Backend"
-        Write-Host "  Actors     : $Actors"
+        Write-Host "  Actors     : $NumActors (Standard Fleet)"
         Write-Host "  Total Steps: $TotalSteps"
         Write-Host "  Checkpoints: every $CheckpointEvery → $CheckpointDir"
         Write-Host "  Dashboard  : $(if ($NoDashboard) { 'disabled' } else { 'enabled' })"
@@ -167,8 +173,7 @@ if ($Train) {
                 navi-auditor dashboard `
                 --matrix-sub "tcp://localhost:5559" `
                 --actor-sub "tcp://localhost:5557" `
-                --step-endpoint "tcp://localhost:5560" `
-                --actors $Actors
+                --step-endpoint "tcp://localhost:5560"
         }
         else {
             Write-Host "`nDashboard disabled. Training runs in background."
@@ -197,7 +202,9 @@ if ($Train) {
         "--pub", $EnvironmentPub,
         "--rep", $EnvironmentRep,
         "--backend", $Backend,
-        "--actors", $Actors
+        "--actors", "$NumActors",
+        "--azimuth-bins", "$AzimuthBins",
+        "--elevation-bins", "$ElevationBins"
     )
 
 if ($Backend -eq "voxel") {
@@ -231,7 +238,9 @@ $actorArgs = @(
     "--sub", $ActorSub,
     "--pub", $ActorPub,
     "--mode", "step",
-    "--step-endpoint", $ActorStepEndpoint
+    "--step-endpoint", $ActorStepEndpoint,
+    "--azimuth-bins", "$AzimuthBins",
+    "--elevation-bins", "$ElevationBins"
 )
 
 if (-not [string]::IsNullOrWhiteSpace($ActorPolicyCheckpoint)) {
@@ -262,7 +271,7 @@ try {
         Write-Host "  $envLogOut"
         Write-Host "  $actorLogOut"
 
-        & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560" --actors $Actors $(if (-not [string]::IsNullOrWhiteSpace($HabitatScene)) { "--scene"; $HabitatScene })
+        & uv run --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560" $(if (-not [string]::IsNullOrWhiteSpace($HabitatScene)) { "--scene"; $HabitatScene })
     }
     else {
         Write-Host "Dashboard disabled. Processes running in background."

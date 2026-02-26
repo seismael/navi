@@ -125,7 +125,7 @@ def serve(
         1.5, help="Collision probe radius around candidate pose"
     ),
     azimuth_bins: int = typer.Option(256, help="Distance-matrix azimuth bins"),
-    elevation_bins: int = typer.Option(128, help="Distance-matrix elevation bins"),
+    elevation_bins: int = typer.Option(48, help="Distance-matrix elevation bins"),
     max_distance: float = typer.Option(30.0, help="Distance normalization range"),
     backend: str = typer.Option("voxel", help="Simulator backend: voxel or habitat"),
     habitat_scene: str = typer.Option("", help="Habitat scene file (.glb)"),

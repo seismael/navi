@@ -401,13 +401,22 @@ class PpoTrainer:
         r_acc, s_acc, hids = {i: 0.0 for i in range(n)}, {i: 0 for i in range(n)}, {i: None for i in range(n)}
         aux_states = {i: torch.zeros(3, dtype=torch.float32, device=self._device) for i in range(n)}
 
-        _LOGGER.info("Waiting for initial observations from all actors...")
+        _LOGGER.info("Waiting for initial observations from %d actors (ZMQ SUB %s)...", n, self._config.sub_address)
         obs_dict: dict[int, DistanceMatrix] = {}
+        wait_start = time.monotonic()
         for i in range(n):
-            obs = self._recv_matrix(timeout_ms=15000, expected_actor_id=i)
-            if obs is None:
-                raise RuntimeError(f"Failed to receive initial observation for actor {i} after 15s")
-            obs_dict[i] = obs
+            while True:
+                obs = self._recv_matrix(timeout_ms=5000, expected_actor_id=i)
+                if obs is not None:
+                    obs_dict[i] = obs
+                    _LOGGER.info("Received initial observation for actor %d.", i)
+                    break
+                
+                elapsed = time.monotonic() - wait_start
+                if elapsed > 120:
+                    raise RuntimeError(f"FATAL: Failed to receive initial observation for actor {i} after 120s. Is the Environment running?")
+                
+                _LOGGER.info("Still waiting for actor %d... (%ds elapsed)", i, int(elapsed))
 
         # Start background worker
         self._opt_stop.clear()

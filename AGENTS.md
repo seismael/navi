@@ -29,11 +29,15 @@ Navi is a modular ecosystem of isolated projects. Each project is a sovereign en
 
 ### 2.2 Simple Launch Commands
 Each project must provide a dedicated `uv run` shortcut and a corresponding wrapper script in `scripts/`:
-- **Dashboard:** `uv run dashboard` → `scripts/run-dashboard.ps1`
+- **Dashboard:** `uv run dashboard` → `scripts/run-dashboard.ps1` (Dynamic actor detection, no fleet size required).
 - **Environment:** `uv run environment` → `scripts/run-environment.ps1`
 - **Brain (Actor):** `uv run brain` → `scripts/run-brain.ps1`
 
-### 2.3 Mode Detection Standard
+### 2.3 Fleet Size Standard
+- **Standard Fleet:** Training scripts and backends default to **4 parallel actors** for optimal hardware utilization.
+- **Dynamic Dashboard:** The Auditor Dashboard MUST NOT be configured with an actor count; it MUST discover actors dynamically from the ZMQ stream.
+
+### 2.4 Mode Detection Standard
 - The Dashboard MUST detect mode dynamically:
   - **TRAINING:** Triggered by `actor.training.*` telemetry events.
   - **INFERENCE:** Triggered by `actor.inference.*` events.
@@ -58,7 +62,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 ### 3.1 Batched Raycasting (Mesh Backend)
 - The `MeshSceneBackend` MUST use batched raycasting in `batch_step`.
 - Individual actor rays must be concatenated into a single `intersects_location` call to leverage SIMD/Parallel throughput.
-- **Benchmark:** Target ≥ 66 SPS for 4 actors at 128x24 on standard hardware.
+- **Benchmark:** Target ≥ 15 SPS for 4 actors at 256x48 on standard hardware.
 
 ### 3.2 Vision Transformer Optimization
 - `RayViTEncoder` MUST cache fixed spherical positional encodings.

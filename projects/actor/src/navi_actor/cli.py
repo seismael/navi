@@ -28,8 +28,8 @@ def serve(
         "",
         help="Checkpoint path (.pt) to load pre-trained weights",
     ),
-    azimuth_bins: int = typer.Option(128, help="Expected distance-matrix azimuth resolution"),
-    elevation_bins: int = typer.Option(24, help="Expected distance-matrix elevation resolution"),
+    azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
+    elevation_bins: int = typer.Option(48, help="Expected distance-matrix elevation resolution"),
 ) -> None:
     """Start the Actor service (always uses CognitiveMambaPolicy)."""
     setup_logging("navi_actor")
@@ -84,8 +84,8 @@ def train_ppo(
     step_endpoint: str = typer.Option(
         None, help="Environment REP address",
     ),
-    azimuth_bins: int = typer.Option(128, help="Expected distance-matrix azimuth resolution"),
-    elevation_bins: int = typer.Option(24, help="Expected distance-matrix elevation resolution"),
+    azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
+    elevation_bins: int = typer.Option(48, help="Expected distance-matrix elevation resolution"),
     actors: int = typer.Option(1, help="Number of parallel environments"),
     steps: int = typer.Option(10000, help="Total environment steps"),
     log_every: int = typer.Option(100, help="Log interval in steps"),
@@ -188,8 +188,8 @@ def train_sequential(
     min_scene_bytes: int = typer.Option(1000, help="Ignore small scene files"),
     backend: str = typer.Option("mesh", help="Simulator backend: mesh, voxel, or habitat"),
     shuffle: bool = typer.Option(True, help="Shuffle scene pool"),
-    azimuth_bins: int = typer.Option(128, help="Expected azimuth resolution"),
-    elevation_bins: int = typer.Option(24, help="Expected elevation resolution"),
+    azimuth_bins: int = typer.Option(256, help="Expected azimuth resolution"),
+    elevation_bins: int = typer.Option(48, help="Expected elevation resolution"),
     embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
     learning_rate: float = typer.Option(3e-4, help="Adam learning rate"),
     learning_rate_final: float = typer.Option(3e-5, help="Final annealed learning rate"),

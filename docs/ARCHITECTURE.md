@@ -82,7 +82,7 @@ multidimensional tensor of normalized distances along $N$ directional rays
 $\hat{d}_i$ radiating from the actor's position.
 
 **Current implementation:** Rays are projected into a uniform 3-channel 2D 
-spherical grid with shape `(azimuth_bins, elevation_bins)`, default `(64, 32)`, 
+spherical grid with shape `(azimuth_bins, elevation_bins)`, default `(256, 48)`, 
 via the `RaycastEngine`.
 - Channel 0: Normalized Depth $[0, 1]$
 - Channel 1: Semantic Class ID

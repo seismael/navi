@@ -56,8 +56,8 @@ class EnvironmentConfig(BaseSettings):
     barrier_distance: float = 1.0
     collision_probe_radius: float = 1.5
     max_steps_per_episode: int = 50_000
-    azimuth_bins: int = Field(default=128, validation_alias="NAVI_AZIMUTH_BINS")
-    elevation_bins: int = Field(default=24, validation_alias="NAVI_ELEVATION_BINS")
+    azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")
+    elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS")
     max_distance: float = 30.0
     physics_dt: float = 0.02
     steps_per_decision: int = 1

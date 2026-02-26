@@ -108,11 +108,20 @@ uv run navi-actor train-ppo --sub tcp://localhost:5559 \
 ./scripts/train-habitat-sequential.ps1
 ```
 
+### All-Night Continuous Training (Optimized)
+
+Run the fully-optimized continuous training engine that cycles through 48 scenes with Ghost-Matrix Persistence:
+
+```powershell
+./scripts/train-all-night.ps1
+```
+
 ### Live Dashboard (standalone — decoupled via ZMQ PUB/SUB)
 
-```bash
-cd projects/auditor
-uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559
+Monitor training progress, real-time depth views, and PPO curves:
+
+```powershell
+./scripts/run-dashboard.ps1
 ```
 
 The dashboard runs independently from training. Connect it to any running

@@ -46,8 +46,8 @@ class ActorConfig(BaseSettings):
     )
 
     mode: str = "async"
-    azimuth_bins: int = Field(default=128, validation_alias="NAVI_AZIMUTH_BINS")
-    elevation_bins: int = Field(default=24, validation_alias="NAVI_ELEVATION_BINS")
+    azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")
+    elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS")
     embedding_dim: int = 128
     learning_rate: float = 3e-4
     learning_rate_final: float = 3e-5
