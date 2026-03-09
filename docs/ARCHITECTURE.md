@@ -47,6 +47,8 @@ Canonical training integrates environment stepping at the CLI boundary only. The
 - actor wire contract remains `DistanceMatrix`
 - corpus defaults are full-discovery and continuous training
 - runtime depends on the compiled corpus, not retained raw downloads
+- promoted compiled manifests rewrite `source_path` to the live `.gmdag` asset because transient raw downloads are removed after refresh
+- TSDF-inspired performance work is staged: canonical runtime first aligns the CUDA ray horizon with the configured environment horizon, while compiler-side truncation and Morton-style layout changes remain benchmark-gated experiments until proven
 
 ## 5. Performance Direction
 

@@ -1,0 +1,188 @@
+"""Canonical SDF/DAG observation convention tests."""
+
+from __future__ import annotations
+
+import math
+from typing import Any, cast
+
+import numpy as np
+import torch
+
+from navi_environment.backends.sdfdag_backend import (
+    SdfDagBackend,
+    _observation_profile,
+    _obstacle_clearance_reward,
+    _proximity_penalty,
+    _starvation_penalty,
+    build_spherical_ray_directions,
+)
+
+
+def test_build_spherical_ray_directions_uses_forward_at_azimuth_zero() -> None:
+    dirs = build_spherical_ray_directions(8, 3)
+
+    forward = dirs[1]
+    rear = dirs[(4 * 3) + 1]
+
+    np.testing.assert_allclose(forward, np.array([0.0, 0.0, -1.0], dtype=np.float32), atol=1e-6)
+    np.testing.assert_allclose(rear, np.array([0.0, 0.0, 1.0], dtype=np.float32), atol=1e-6)
+
+
+def test_build_spherical_ray_directions_span_up_and_down() -> None:
+    dirs = build_spherical_ray_directions(8, 3)
+
+    up = dirs[0]
+    down = dirs[2]
+
+    np.testing.assert_allclose(up, np.array([0.0, 1.0, 0.0], dtype=np.float32), atol=1e-6)
+    np.testing.assert_allclose(down, np.array([0.0, -1.0, 0.0], dtype=np.float32), atol=1e-6)
+
+
+def test_obstacle_clearance_reward_is_positive_when_moving_away_near_geometry() -> None:
+    reward = _obstacle_clearance_reward(
+        0.2,
+        0.8,
+        proximity_window=1.5,
+        reward_scale=0.6,
+    )
+
+    assert reward > 0.0
+
+
+def test_obstacle_clearance_reward_is_zero_when_both_clearances_are_far() -> None:
+    reward = _obstacle_clearance_reward(
+        2.0,
+        2.4,
+        proximity_window=1.5,
+        reward_scale=0.6,
+    )
+
+    assert reward == 0.0
+
+
+def test_observation_profile_tracks_starvation_and_near_geometry() -> None:
+    depth = np.array([[1.0, 0.02], [1.0, 0.50]], dtype=np.float32)
+    valid = np.array([[False, True], [False, True]], dtype=np.bool_)
+
+    starvation_ratio, proximity_ratio = _observation_profile(
+        depth,
+        valid,
+        max_distance=30.0,
+        proximity_distance_threshold=1.0,
+    )
+
+    assert math.isclose(starvation_ratio, 0.5)
+    assert math.isclose(proximity_ratio, 0.25)
+
+
+def test_starvation_penalty_triggers_only_beyond_threshold() -> None:
+    assert _starvation_penalty(0.7, ratio_threshold=0.8, penalty_scale=1.5) == 0.0
+    assert _starvation_penalty(0.9, ratio_threshold=0.8, penalty_scale=1.5) < 0.0
+
+
+def test_proximity_penalty_scales_with_near_field_ratio() -> None:
+    assert _proximity_penalty(0.0, penalty_scale=0.8) == 0.0
+    assert _proximity_penalty(0.5, penalty_scale=0.8) == -0.4
+
+
+def test_scene_rotation_waits_for_configured_episode_budget() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._scene_pool = ["scene_a.gmdag", "scene_b.gmdag"]
+    backend._scene_pool_idx = 0
+    backend._episodes_in_scene = 15
+    backend._scene_episodes_per_scene = 16
+    backend._n_actors = 2
+    backend._actors = {
+        0: type("ActorState", (), {"spawn_position": (0.0, 0.0, 0.0)})(),
+        1: type("ActorState", (), {"spawn_position": (0.0, 0.0, 0.0)})(),
+    }
+
+    def _load_scene(_scene_path: str) -> list[tuple[float, float, float]]:
+        return [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
+
+    backend._load_scene = _load_scene  # type: ignore[method-assign]
+
+    backend._maybe_rotate_scene(is_natural=True)
+
+    assert backend._scene_pool_idx == 1
+    assert backend._episodes_in_scene == 0
+    assert backend._actors[0].spawn_position == (1.0, 2.0, 3.0)
+    assert backend._actors[1].spawn_position == (4.0, 5.0, 6.0)
+
+
+def test_cast_actor_batch_tensors_passes_environment_horizon() -> None:
+    backend = object.__new__(SdfDagBackend)
+
+    class _FakeSdf:
+        def __init__(self) -> None:
+            self.args: tuple[object, ...] | None = None
+
+        def cast_rays(self, *args: object) -> None:
+            self.args = args
+            out_distances = cast(torch.Tensor, args[3])
+            out_semantics = cast(torch.Tensor, args[4])
+            out_distances.zero_()
+            out_semantics.zero_()
+
+    fake_sdf = _FakeSdf()
+    backend._torch = torch
+    backend._torch_sdf = fake_sdf
+    backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
+    backend._max_distance = 17.5
+    backend._bbox_min = [0.0, 0.0, 0.0]
+    backend._bbox_max = [1.0, 1.0, 1.0]
+    backend._az_bins = 1
+    backend._el_bins = 1
+    backend._n_rays = 1
+    backend._device = torch.device("cpu")
+    backend._ray_dirs_local = torch.zeros((1, 3), dtype=torch.float32)
+    backend._ray_origins = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
+    backend._out_semantics = torch.empty((1, 1), dtype=torch.int32)
+    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._require_dag_tensor = lambda: "dag"  # type: ignore[assignment]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[assignment]
+
+    backend._cast_actor_batch_tensors((0,))
+
+    assert fake_sdf.args is not None
+    assert fake_sdf.args[6] == 17.5
+
+
+def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon() -> None:
+    backend = object.__new__(SdfDagBackend)
+
+    class _FakeSdf:
+        def cast_rays(self, *args: object) -> None:
+            out_distances = cast(torch.Tensor, args[3])
+            out_semantics = cast(torch.Tensor, args[4])
+            out_distances.copy_(torch.tensor([[5.0, 25.0]], dtype=torch.float32))
+            out_semantics.copy_(torch.tensor([[1, 2]], dtype=torch.int32))
+
+    backend._torch = torch
+    backend._torch_sdf = _FakeSdf()
+    backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
+    backend._max_distance = 10.0
+    backend._bbox_min = [0.0, 0.0, 0.0]
+    backend._bbox_max = [1.0, 1.0, 1.0]
+    backend._az_bins = 2
+    backend._el_bins = 1
+    backend._n_rays = 2
+    backend._device = torch.device("cpu")
+    backend._ray_dirs_local = torch.zeros((2, 3), dtype=torch.float32)
+    backend._ray_origins = torch.empty((1, 2, 3), dtype=torch.float32)
+    backend._ray_dirs_world = torch.empty((1, 2, 3), dtype=torch.float32)
+    backend._out_distances = torch.empty((1, 2), dtype=torch.float32)
+    backend._out_semantics = torch.empty((1, 2), dtype=torch.int32)
+    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._require_dag_tensor = lambda: "dag"  # type: ignore[assignment]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[assignment]
+
+    depth_2d, semantic_2d, valid_2d = backend._cast_actor_batch_tensors((0,))
+
+    assert depth_2d.shape == (1, 2, 1)
+    assert semantic_2d.shape == (1, 2, 1)
+    assert valid_2d.shape == (1, 2, 1)
+    assert torch.allclose(depth_2d[0, :, 0], torch.tensor([0.5, 1.0], dtype=torch.float32))
+    assert torch.equal(valid_2d[0, :, 0], torch.tensor([True, False]))

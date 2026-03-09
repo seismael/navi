@@ -22,6 +22,7 @@ This component strictly adheres to the following agnostic design principles:
 *   **Intelligent Initialization:** Robust triangle-to-voxel seeding that guarantees mathematical convergence even for non-manifold or zero-thickness geometry.
 *   **Aggressive Deduplication:** MurmurHash3-based DAG folding achieving **>5,000x compression** for uniform spatial regions and **>7x** for highly complex, non-convex environments.
 *   **Dual-Language Strategy:** Provides a high-performance Python compiler for rapid development and a full C++17 source tree for native deployment.
+*   **Repository Test Surface:** Exposes a `voxel_dag.compiler` Python package so monorepo tests can validate compiler/runtime integration without shelling out to the native CLI.
 
 ---
 
@@ -30,6 +31,15 @@ This component strictly adheres to the following agnostic design principles:
 ### Python Environment (High-Performance Backend)
 *   Python 3.10+
 *   Dependencies: `numpy`, `numba`, `pytest`
+
+The repository-local Python package exposes:
+
+```python
+from voxel_dag.compiler import MeshIngestor, compute_dense_sdf, compress_to_dag, write_gmdag
+```
+
+This surface is used by `projects/voxel-dag` verification tests and by
+`projects/torch-sdf` integration tests.
 
 ```bash
 pip install numpy numba pytest

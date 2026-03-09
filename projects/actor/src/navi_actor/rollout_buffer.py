@@ -40,9 +40,19 @@ class MultiTrajectoryBuffer:
             for i in range(n_actors)
         }
         self._n_actors = n_actors
+        self._cache_valid = False
+        self._all_obs: Tensor | None = None
+        self._all_actions: Tensor | None = None
+        self._all_log_probs: Tensor | None = None
+        self._all_values: Tensor | None = None
+        self._all_advantages: Tensor | None = None
+        self._all_returns: Tensor | None = None
+        self._all_dones: Tensor | None = None
+        self._all_aux: Tensor | None = None
 
     def append(self, actor_id: int, transition: PPOTransition) -> None:
         self._buffers[actor_id].append(transition)
+        self._cache_valid = False
 
     def append_batch(
         self,
@@ -74,35 +84,78 @@ class MultiTrajectoryBuffer:
                 hidden_state=hidden_state,
                 aux_tensor=aux_tensor,
             )
+            self._cache_valid = False
 
     def compute_returns_and_advantages(self, last_values: Tensor) -> None:
         """Compute GAE for all buffers using per-actor bootstrap values."""
         for i in range(self._n_actors):
             self._buffers[i].compute_returns_and_advantages(last_value=last_values[i].detach())
+        self._cache_valid = False
 
     def clear(self) -> None:
         for buf in self._buffers.values():
             buf.clear()
+        self._cache_valid = False
+        self._all_obs = None
+        self._all_actions = None
+        self._all_log_probs = None
+        self._all_values = None
+        self._all_advantages = None
+        self._all_returns = None
+        self._all_dones = None
+        self._all_aux = None
+
+    def _ensure_batch_cache(self) -> None:
+        """Build stacked actor tensors once per PPO update and reuse them across epochs."""
+        if self._cache_valid:
+            return
+
+        for buf in self._buffers.values():
+            buf._build_tensor_cache()
+
+        self._all_obs = torch.stack([cast("Tensor", b._t_obs) for b in self._buffers.values()])
+        self._all_actions = torch.stack([cast("Tensor", b._t_actions) for b in self._buffers.values()])
+        self._all_log_probs = torch.stack([cast("Tensor", b._t_log_probs) for b in self._buffers.values()])
+        self._all_values = torch.stack([cast("Tensor", b._t_values) for b in self._buffers.values()])
+        self._all_advantages = torch.stack([b._advantages for b in self._buffers.values()])
+        self._all_returns = torch.stack([b._returns for b in self._buffers.values()])
+        self._all_dones = torch.stack([cast("Tensor", b._t_dones) for b in self._buffers.values()])
+
+        first_aux = next((b._t_aux for b in self._buffers.values() if b._t_aux is not None), None)
+        if first_aux is not None:
+            self._all_aux = torch.stack([
+                cast("Tensor", b._t_aux) if b._t_aux is not None else torch.zeros_like(first_aux)
+                for b in self._buffers.values()
+            ])
+        else:
+            self._all_aux = None
+
+        self._cache_valid = True
 
     def sample_minibatches(
         self, batch_size: int = 64, seq_len: int = 32
     ) -> Generator[TrajectoryBuffer.MiniBatch, None, None]:
         """Sample minibatches across all actors while preserving sequences."""
-        # 1. Build tensor cache for each actor
-        for buf in self._buffers.values():
-            buf._build_tensor_cache()
+        self._ensure_batch_cache()
+        assert self._all_obs is not None
+        assert self._all_actions is not None
+        assert self._all_log_probs is not None
+        assert self._all_values is not None
+        assert self._all_advantages is not None
+        assert self._all_returns is not None
+        assert self._all_dones is not None
 
-        # 2. Stack into (Actor, Time, ...) tensors
-        # Assumes all actors have SAME rollout length!
-        all_obs = torch.stack([cast("Tensor", b._t_obs) for b in self._buffers.values()]) # (N, L, 3, Az, El)
-        all_acts = torch.stack([cast("Tensor", b._t_actions) for b in self._buffers.values()]) # (N, L, 4)
-        all_lps = torch.stack([cast("Tensor", b._t_log_probs) for b in self._buffers.values()]) # (N, L)
-        all_vals = torch.stack([cast("Tensor", b._t_values) for b in self._buffers.values()]) # (N, L)
-        all_advs = torch.stack([b._advantages for b in self._buffers.values()]) # (N, L)
-        all_rets = torch.stack([b._returns for b in self._buffers.values()]) # (N, L)
-        all_dones = torch.stack([cast("Tensor", b._t_dones) for b in self._buffers.values()]) # (N, L)
+        all_obs = self._all_obs
+        all_acts = self._all_actions
+        all_lps = self._all_log_probs
+        all_vals = self._all_values
+        all_advs = self._all_advantages
+        all_rets = self._all_returns
+        all_dones = self._all_dones
+        all_aux = self._all_aux
 
         n_actors, rollout_len = all_obs.shape[:2]
+        index_device = all_obs.device
 
         if seq_len > 0:
             # BPTT sampling: (N, L) -> (N * L/seq_len, seq_len) sequences
@@ -120,7 +173,7 @@ class MultiTrajectoryBuffer:
             dones_seqs = all_dones[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
 
             # Shuffle sequences
-            perm = torch.randperm(total_seqs)
+            perm = torch.randperm(total_seqs, device=index_device)
 
             seqs_per_minibatch = max(1, batch_size // seq_len)
             for i in range(0, total_seqs, seqs_per_minibatch):
@@ -143,16 +196,24 @@ class MultiTrajectoryBuffer:
                     returns=rets_seqs[idx].flatten(),
                     hidden_states=h0,
                     dones=dones_seqs[idx], # (n_seqs, seq_len)
+                    aux_tensors=(
+                        all_aux[:, :n_seqs_per_actor * seq_len]
+                        .reshape(total_seqs, seq_len, -1)[idx]
+                        .reshape(-1, all_aux.shape[-1])
+                        if all_aux is not None
+                        else None
+                    ),
                 )
         else:
             # Flat random shuffle
-            flat_indices = torch.randperm(n_actors * rollout_len)
+            flat_indices = torch.randperm(n_actors * rollout_len, device=index_device)
             obs_flat = all_obs.view(-1, *all_obs.shape[2:])
             acts_flat = all_acts.view(-1, all_acts.shape[-1])
             lps_flat = all_lps.flatten()
             vals_flat = all_vals.flatten()
             advs_flat = all_advs.flatten()
             rets_flat = all_rets.flatten()
+            aux_flat = all_aux.view(-1, all_aux.shape[-1]) if all_aux is not None else None
 
             for i in range(0, len(flat_indices), batch_size):
                 idx = flat_indices[i : i + batch_size]
@@ -163,6 +224,7 @@ class MultiTrajectoryBuffer:
                     old_values=vals_flat[idx],
                     advantages=advs_flat[idx],
                     returns=rets_flat[idx],
+                    aux_tensors=aux_flat[idx] if aux_flat is not None else None,
                 )
 
     def __len__(self) -> int:
@@ -659,7 +721,7 @@ class TrajectoryBuffer:
         if seq_len > 0 and n >= seq_len:
             # Sequential chunks for BPTT
             starts = list(range(0, n - seq_len + 1, seq_len))
-            perm = torch.randperm(len(starts)).tolist()
+            perm = torch.randperm(len(starts), device=obs.device).tolist()
             for i in range(0, len(perm), max(1, batch_size // seq_len)):
                 selected: list[int] = perm[
                     i : i + max(1, batch_size // seq_len)
@@ -690,7 +752,7 @@ class TrajectoryBuffer:
                 )
         else:
             # Random shuffle
-            indices = torch.randperm(n)
+            indices = torch.randperm(n, device=obs.device)
             for start in range(0, n, batch_size):
                 idx = indices[start : start + batch_size]
                 yield TrajectoryBuffer.MiniBatch(

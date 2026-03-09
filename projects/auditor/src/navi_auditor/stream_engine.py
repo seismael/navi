@@ -399,6 +399,7 @@ class StreamEngine:
                 return
             state = self._resolve_state(actor_id)
             state.latest_action = msg
+            state.last_rx_time = time.time()
 
         elif topic == TOPIC_TELEMETRY_EVENT and isinstance(msg, TelemetryEvent):
             actor_id = msg.env_id
@@ -406,6 +407,7 @@ class StreamEngine:
                 self._drop_total += 1
                 return
             state = self._resolve_state(actor_id)
+            state.last_rx_time = time.time()
             state.telemetry_buffer.append(msg)
             self._route_telemetry(msg, state)
 

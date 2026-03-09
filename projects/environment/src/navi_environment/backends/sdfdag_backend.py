@@ -25,7 +25,7 @@ from navi_environment.mjx_env import MjxEnvironment
 if TYPE_CHECKING:
     from navi_environment.config import EnvironmentConfig
 
-__all__: list[str] = ["SdfDagBackend", "SdfDagPerfSnapshot", "SdfDagTensorStepBatch"]
+__all__: list[str] = ["SdfDagBackend", "SdfDagPerfSnapshot", "SdfDagTensorStepBatch", "build_spherical_ray_directions"]
 
 _LOG = logging.getLogger(__name__)
 
@@ -34,9 +34,104 @@ _EXPLORATION_REWARD: float = 0.3
 _PROGRESS_REWARD_SCALE: float = 0.8
 _COLLISION_PENALTY: float = -2.0
 _MAX_STEPS_PER_EPISODE: int = 2_000
+_SCENE_EPISODES_PER_SCENE: int = 16
+_OBSTACLE_CLEARANCE_REWARD_SCALE: float = 0.6
+_OBSTACLE_CLEARANCE_WINDOW: float = 1.5
+_STARVATION_RATIO_THRESHOLD: float = 0.8
+_STARVATION_PENALTY_SCALE: float = 1.5
+_PROXIMITY_DISTANCE_THRESHOLD: float = 1.0
+_PROXIMITY_PENALTY_SCALE: float = 0.8
 _SPAWN_CANDIDATES_PER_AXIS: int = 3
 _SPAWN_HEIGHT_SAMPLES: int = 5
 _PERF_EMA_ALPHA: float = 0.1
+
+
+def _obstacle_clearance_reward(
+    previous_clearance: float | None,
+    current_clearance: float,
+    *,
+    proximity_window: float,
+    reward_scale: float,
+) -> float:
+    """Reward increasing obstacle clearance while near geometry.
+
+    The signal is intentionally local: once both clearances are comfortably
+    outside the proximity window, no extra reward is applied.
+    """
+    if previous_clearance is None or proximity_window <= 0.0 or reward_scale == 0.0:
+        return 0.0
+    if previous_clearance > proximity_window and current_clearance > proximity_window:
+        return 0.0
+    normalized_delta = (current_clearance - previous_clearance) / proximity_window
+    normalized_delta = max(-1.0, min(1.0, normalized_delta))
+    return reward_scale * float(normalized_delta)
+
+
+def _starvation_penalty(
+    starvation_ratio: float,
+    *,
+    ratio_threshold: float,
+    penalty_scale: float,
+) -> float:
+    """Penalize frames where too much of the sphere sees only horizon-saturated space."""
+    if penalty_scale <= 0.0:
+        return 0.0
+    overflow = starvation_ratio - max(0.0, ratio_threshold)
+    if overflow <= 0.0:
+        return 0.0
+    return -penalty_scale * float(min(overflow, 1.0))
+
+
+def _proximity_penalty(
+    proximity_ratio: float,
+    *,
+    penalty_scale: float,
+) -> float:
+    """Penalize observations dominated by very near geometry."""
+    if penalty_scale <= 0.0 or proximity_ratio <= 0.0:
+        return 0.0
+    return -penalty_scale * float(min(proximity_ratio, 1.0))
+
+
+def _observation_profile(
+    depth_2d: np.ndarray,
+    valid_2d: np.ndarray,
+    *,
+    max_distance: float,
+    proximity_distance_threshold: float,
+) -> tuple[float, float]:
+    """Return `(starvation_ratio, proximity_ratio)` for one spherical observation."""
+    valid_ratio = float(np.mean(valid_2d, dtype=np.float32))
+    starvation_ratio = max(0.0, min(1.0, 1.0 - valid_ratio))
+    if proximity_distance_threshold <= 0.0 or max_distance <= 0.0:
+        return starvation_ratio, 0.0
+    near_mask = np.logical_and(valid_2d, depth_2d * max_distance <= proximity_distance_threshold)
+    proximity_ratio = float(np.mean(near_mask, dtype=np.float32))
+    return starvation_ratio, max(0.0, min(1.0, proximity_ratio))
+
+
+def build_spherical_ray_directions(azimuth_bins: int, elevation_bins: int) -> np.ndarray:
+    """Return canonical local ray directions for `(azimuth, elevation)` bins.
+
+    Contract:
+    - azimuth bin `0` points forward along `-Z`
+    - azimuth increases clockwise when viewed from above
+    - elevation spans from `+pi/2` (up) to `-pi/2` (down)
+    """
+    az = np.linspace(0.0, 2.0 * math.pi, azimuth_bins, endpoint=False, dtype=np.float32)
+    el = np.linspace(math.pi / 2.0, -math.pi / 2.0, elevation_bins, endpoint=True, dtype=np.float32)
+    az_grid, el_grid = np.meshgrid(az, el, indexing="ij")
+    az_flat = az_grid.reshape(-1)
+    el_flat = el_grid.reshape(-1)
+    cos_el = np.cos(el_flat)
+    return np.stack(
+        [
+            cos_el * np.sin(az_flat),
+            np.sin(el_flat),
+            -cos_el * np.cos(az_flat),
+        ],
+        axis=-1,
+    ).astype(np.float32)
 
 
 @dataclass
@@ -48,6 +143,7 @@ class _ActorState:
     step_count: int = 0
     prev_depth: np.ndarray | None = None
     prev_depth_tensor: Any | None = None
+    prev_min_distance: float | None = None
     episode_return: float = 0.0
     visited_cells: set[tuple[int, int]] = field(default_factory=set)
     needs_reset: bool = False
@@ -97,7 +193,29 @@ class SdfDagBackend(SimulatorBackend):
         self._max_distance = config.max_distance
         self._n_actors = config.n_actors
         self._n_rays = self._az_bins * self._el_bins
-        self._max_steps_per_episode = _MAX_STEPS_PER_EPISODE
+        self._max_steps_per_episode = max(1, int(getattr(config, "max_steps_per_episode", _MAX_STEPS_PER_EPISODE)))
+        self._scene_episodes_per_scene = max(
+            1,
+            int(getattr(config, "scene_episodes_per_scene", _SCENE_EPISODES_PER_SCENE)),
+        )
+        self._obstacle_clearance_reward_scale = float(
+            getattr(config, "obstacle_clearance_reward_scale", _OBSTACLE_CLEARANCE_REWARD_SCALE)
+        )
+        self._obstacle_clearance_window = float(
+            getattr(config, "obstacle_clearance_window", _OBSTACLE_CLEARANCE_WINDOW)
+        )
+        self._starvation_ratio_threshold = float(
+            getattr(config, "starvation_ratio_threshold", _STARVATION_RATIO_THRESHOLD)
+        )
+        self._starvation_penalty_scale = float(
+            getattr(config, "starvation_penalty_scale", _STARVATION_PENALTY_SCALE)
+        )
+        self._proximity_distance_threshold = float(
+            getattr(config, "proximity_distance_threshold", _PROXIMITY_DISTANCE_THRESHOLD)
+        )
+        self._proximity_penalty_scale = float(
+            getattr(config, "proximity_penalty_scale", _PROXIMITY_PENALTY_SCALE)
+        )
         self._scene_pool: list[str] = list(config.scene_pool) if config.scene_pool else []
         self._scene_pool_idx: int = 0
         self._episodes_in_scene: int = 0
@@ -164,24 +282,33 @@ class SdfDagBackend(SimulatorBackend):
 
         if self._scene_pool:
             _LOG.info(
-                "SdfDagBackend scene pool: %d scenes, starting with %s",
+                "SdfDagBackend scene pool: %d scenes, starting with %s (episode budget per scene=%d, max_steps=%d)",
                 len(self._scene_pool),
                 Path(scene_path).name,
+                self._scene_episodes_per_scene,
+                self._max_steps_per_episode,
             )
+
+    def _maybe_rotate_scene(self, *, is_natural: bool) -> None:
+        if not is_natural or not self._scene_pool:
+            return
+
+        self._episodes_in_scene += 1
+        if self._episodes_in_scene < self._scene_episodes_per_scene:
+            return
+
+        self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
+        spawns = self._load_scene(self._scene_pool[self._scene_pool_idx])
+        for idx in range(self._n_actors):
+            self._actors[idx].spawn_position = spawns[idx % len(spawns)]
+        self._episodes_in_scene = 0
 
     def reset(self, episode_id: int, *, actor_id: int = 0) -> DistanceMatrix:
         is_natural = self._initial_resets_remaining <= 0
         if not is_natural:
             self._initial_resets_remaining -= 1
 
-        if is_natural and self._scene_pool:
-            self._episodes_in_scene += 1
-            if self._episodes_in_scene >= self._n_actors:
-                self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
-                spawns = self._load_scene(self._scene_pool[self._scene_pool_idx])
-                for idx in range(self._n_actors):
-                    self._actors[idx].spawn_position = spawns[idx % len(spawns)]
-                self._episodes_in_scene = 0
+        self._maybe_rotate_scene(is_natural=is_natural)
 
         actor = self._actors[actor_id]
         spawn = actor.spawn_position
@@ -199,6 +326,7 @@ class SdfDagBackend(SimulatorBackend):
         actor.step_count = 0
         actor.prev_depth = None
         actor.prev_depth_tensor = None
+        actor.prev_min_distance = None
         actor.episode_return = 0.0
         actor.visited_cells.clear()
         actor.needs_reset = False
@@ -233,14 +361,7 @@ class SdfDagBackend(SimulatorBackend):
         if not is_natural:
             self._initial_resets_remaining -= 1
 
-        if is_natural and self._scene_pool:
-            self._episodes_in_scene += 1
-            if self._episodes_in_scene >= self._n_actors:
-                self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
-                spawns = self._load_scene(self._scene_pool[self._scene_pool_idx])
-                for idx in range(self._n_actors):
-                    self._actors[idx].spawn_position = spawns[idx % len(spawns)]
-                self._episodes_in_scene = 0
+        self._maybe_rotate_scene(is_natural=is_natural)
 
         actor = self._actors[actor_id]
         spawn = actor.spawn_position
@@ -258,6 +379,7 @@ class SdfDagBackend(SimulatorBackend):
         actor.step_count = 0
         actor.prev_depth = None
         actor.prev_depth_tensor = None
+        actor.prev_min_distance = None
         actor.episode_return = 0.0
         actor.visited_cells.clear()
         actor.needs_reset = False
@@ -339,6 +461,7 @@ class SdfDagBackend(SimulatorBackend):
 
                 min_distance = float(np.min(depth_2d)) * self._max_distance
                 collision = min_distance < _COLLISION_CLEARANCE
+                previous_clearance = actor.prev_min_distance
                 if collision:
                     actor.pose = previous_pose
                     corrected_depth, corrected_semantic, corrected_valid = self._cast_actor_batch(
@@ -347,6 +470,14 @@ class SdfDagBackend(SimulatorBackend):
                     depth_2d = corrected_depth[0]
                     semantic_2d = corrected_semantic[0]
                     valid_2d = corrected_valid[0]
+                    min_distance = float(np.min(depth_2d)) * self._max_distance
+
+                starvation_ratio, proximity_ratio = _observation_profile(
+                    depth_2d,
+                    valid_2d,
+                    max_distance=self._max_distance,
+                    proximity_distance_threshold=self._proximity_distance_threshold,
+                )
 
                 obs = self._build_observation(
                     actor_id=actor_id,
@@ -363,6 +494,10 @@ class SdfDagBackend(SimulatorBackend):
                     previous_pose=previous_pose,
                     current_pose=actor.pose,
                     collision=collision,
+                    previous_clearance=previous_clearance,
+                    current_clearance=min_distance,
+                    starvation_ratio=starvation_ratio,
+                    proximity_ratio=proximity_ratio,
                 )
                 actor.episode_return += reward
                 actor.needs_reset = truncated
@@ -447,6 +582,20 @@ class SdfDagBackend(SimulatorBackend):
             min_distances = (
                 depth_batch.amin(dim=(1, 2)).mul(self._max_distance).detach().cpu().tolist()
             )
+            starvation_ratios = valid_batch.logical_not().to(dtype=self._torch.float32).mean(dim=(1, 2)).detach().cpu().tolist()
+            if self._proximity_distance_threshold > 0.0 and self._max_distance > 0.0:
+                proximity_threshold = self._proximity_distance_threshold / self._max_distance
+                proximity_ratios = (
+                    depth_batch.le(proximity_threshold)
+                    .logical_and(valid_batch)
+                    .to(dtype=self._torch.float32)
+                    .mean(dim=(1, 2))
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+            else:
+                proximity_ratios = [0.0] * len(active_actor_ids)
 
             for batch_idx, actor_id in enumerate(active_actor_ids):
                 actor = self._actors[actor_id]
@@ -456,6 +605,8 @@ class SdfDagBackend(SimulatorBackend):
                 valid_2d = valid_batch[batch_idx]
 
                 collision = float(min_distances[batch_idx]) < _COLLISION_CLEARANCE
+                previous_clearance = actor.prev_min_distance
+                current_clearance = float(min_distances[batch_idx])
                 if collision:
                     actor.pose = previous_pose
                     corrected_depth, corrected_semantic, corrected_valid = self._cast_actor_batch_tensors(
@@ -464,6 +615,13 @@ class SdfDagBackend(SimulatorBackend):
                     depth_2d = corrected_depth[0]
                     semantic_2d = corrected_semantic[0]
                     valid_2d = corrected_valid[0]
+                    current_clearance = float(depth_2d.amin().detach().cpu()) * self._max_distance
+                    starvation_ratios[batch_idx], proximity_ratios[batch_idx] = _observation_profile(
+                        depth_2d.detach().cpu().numpy().astype(np.float32, copy=False),
+                        valid_2d.detach().cpu().numpy().astype(np.bool_, copy=False),
+                        max_distance=self._max_distance,
+                        proximity_distance_threshold=self._proximity_distance_threshold,
+                    )
 
                 obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
                     actor_id=actor_id,
@@ -491,6 +649,10 @@ class SdfDagBackend(SimulatorBackend):
                     previous_pose=previous_pose,
                     current_pose=actor.pose,
                     collision=collision,
+                    previous_clearance=previous_clearance,
+                    current_clearance=current_clearance,
+                    starvation_ratio=float(starvation_ratios[batch_idx]),
+                    proximity_ratio=float(proximity_ratios[batch_idx]),
                 )
                 actor.episode_return += reward
                 actor.needs_reset = truncated
@@ -590,6 +752,20 @@ class SdfDagBackend(SimulatorBackend):
             min_distances = (
                 depth_batch.amin(dim=(1, 2)).mul(self._max_distance).detach().cpu().tolist()
             )
+            starvation_ratios = valid_batch.logical_not().to(dtype=self._torch.float32).mean(dim=(1, 2)).detach().cpu().tolist()
+            if self._proximity_distance_threshold > 0.0 and self._max_distance > 0.0:
+                proximity_threshold = self._proximity_distance_threshold / self._max_distance
+                proximity_ratios = (
+                    depth_batch.le(proximity_threshold)
+                    .logical_and(valid_batch)
+                    .to(dtype=self._torch.float32)
+                    .mean(dim=(1, 2))
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+            else:
+                proximity_ratios = [0.0] * len(active_actor_ids)
 
             for batch_idx, actor_id in enumerate(active_actor_ids):
                 actor = self._actors[actor_id]
@@ -599,6 +775,8 @@ class SdfDagBackend(SimulatorBackend):
                 valid_2d = valid_batch[batch_idx]
 
                 collision = float(min_distances[batch_idx]) < _COLLISION_CLEARANCE
+                previous_clearance = actor.prev_min_distance
+                current_clearance = float(min_distances[batch_idx])
                 if collision:
                     actor.pose = previous_pose
                     corrected_depth, corrected_semantic, corrected_valid = self._cast_actor_batch_tensors(
@@ -607,6 +785,13 @@ class SdfDagBackend(SimulatorBackend):
                     depth_2d = corrected_depth[0]
                     semantic_2d = corrected_semantic[0]
                     valid_2d = corrected_valid[0]
+                    current_clearance = float(depth_2d.amin().detach().cpu()) * self._max_distance
+                    starvation_ratios[batch_idx], proximity_ratios[batch_idx] = _observation_profile(
+                        depth_2d.detach().cpu().numpy().astype(np.float32, copy=False),
+                        valid_2d.detach().cpu().numpy().astype(np.bool_, copy=False),
+                        max_distance=self._max_distance,
+                        proximity_distance_threshold=self._proximity_distance_threshold,
+                    )
 
                 obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
                     actor_id=actor_id,
@@ -634,6 +819,10 @@ class SdfDagBackend(SimulatorBackend):
                     previous_pose=previous_pose,
                     current_pose=actor.pose,
                     collision=collision,
+                    previous_clearance=previous_clearance,
+                    current_clearance=current_clearance,
+                    starvation_ratio=float(starvation_ratios[batch_idx]),
+                    proximity_ratio=float(proximity_ratios[batch_idx]),
                 )
                 actor.episode_return += reward
                 actor.needs_reset = truncated
@@ -771,21 +960,7 @@ class SdfDagBackend(SimulatorBackend):
         return self._find_spawns(self._n_actors)
 
     def _build_ray_directions(self) -> Any:
-        az = np.linspace(0.0, 2.0 * math.pi, self._az_bins, endpoint=False, dtype=np.float32)
-        el = np.linspace(math.pi / 2.0, -math.pi / 2.0, self._el_bins, endpoint=True, dtype=np.float32)
-        az_grid, el_grid = np.meshgrid(az, el, indexing="ij")
-        az_flat = az_grid.reshape(-1)
-        el_flat = el_grid.reshape(-1)
-        cos_el = np.cos(el_flat)
-        dirs = np.stack(
-            [
-                cos_el * np.sin(az_flat),
-                np.sin(el_flat),
-                -cos_el * np.cos(az_flat),
-            ],
-            axis=-1,
-        ).astype(np.float32)
-        return self._torch.from_numpy(dirs)
+        return self._torch.from_numpy(build_spherical_ray_directions(self._az_bins, self._el_bins))
 
     def _cast_actor_batch(
         self,
@@ -842,6 +1017,7 @@ class SdfDagBackend(SimulatorBackend):
             out_distances,
             out_semantics,
             self._config.sdf_max_steps,
+            self._max_distance,
             self._bbox_min,
             self._bbox_max,
             self._require_asset().resolution,
@@ -887,6 +1063,7 @@ class SdfDagBackend(SimulatorBackend):
         actor.prev_depth_tensor = depth_2d.detach().clone()
         depth_cpu = depth_2d.detach().cpu().numpy().astype(np.float32, copy=False)
         actor.prev_depth = depth_cpu.copy()
+        actor.prev_min_distance = float(depth_cpu.min()) * self._max_distance
 
         observation_tensor = self._torch.stack(
             (
@@ -935,6 +1112,7 @@ class SdfDagBackend(SimulatorBackend):
         actor = self._actors[actor_id]
         delta = depth_2d - actor.prev_depth if actor.prev_depth is not None else np.zeros_like(depth_2d)
         actor.prev_depth = depth_2d.copy()
+        actor.prev_min_distance = float(depth_2d.min()) * self._max_distance
         actor.prev_depth_tensor = self._torch.from_numpy(actor.prev_depth).to(
             device=self._device,
             dtype=self._torch.float32,
@@ -955,6 +1133,10 @@ class SdfDagBackend(SimulatorBackend):
         previous_pose: RobotPose,
         current_pose: RobotPose,
         collision: bool,
+        previous_clearance: float | None,
+        current_clearance: float,
+        starvation_ratio: float,
+        proximity_ratio: float,
     ) -> float:
         actor = self._actors[actor_id]
         reward = 0.0
@@ -967,6 +1149,21 @@ class SdfDagBackend(SimulatorBackend):
         dy = current_pose.y - previous_pose.y
         dz = current_pose.z - previous_pose.z
         reward += _PROGRESS_REWARD_SCALE * float(math.sqrt(dx * dx + dy * dy + dz * dz))
+        reward += _obstacle_clearance_reward(
+            previous_clearance,
+            current_clearance,
+            proximity_window=self._obstacle_clearance_window,
+            reward_scale=self._obstacle_clearance_reward_scale,
+        )
+        reward += _starvation_penalty(
+            starvation_ratio,
+            ratio_threshold=self._starvation_ratio_threshold,
+            penalty_scale=self._starvation_penalty_scale,
+        )
+        reward += _proximity_penalty(
+            proximity_ratio,
+            penalty_scale=self._proximity_penalty_scale,
+        )
         if collision:
             reward += _COLLISION_PENALTY
         return reward
@@ -1033,6 +1230,7 @@ class SdfDagBackend(SimulatorBackend):
             out_distances,
             out_semantics,
             max(32, min(self._config.sdf_max_steps, 128)),
+            self._max_distance,
             self._bbox_min,
             self._bbox_max,
             asset.resolution,

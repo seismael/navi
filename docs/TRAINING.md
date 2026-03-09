@@ -84,5 +84,9 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - wrappers default to the throughput-safe profile (`128x24`, minibatch `64`, BPTT `8`, rollout `512`)
 - corpus compilation defaults to `512`, aligned with the canonical `256x48` environment observation contract
 - `refresh-scene-corpus.ps1` stages downloads and removes transient source assets after a successful corpus promotion
+- the promoted live `gmdag_manifest.json` is compiled-only metadata: `source_path` is rewritten to the live `.gmdag` asset path after transient source cleanup
+- canonical scene-pool training keeps actors on each scene for multiple completed episodes before rotation; the default budget is `16` completed episodes per scene across the fleet
+- collision remains non-terminal in canonical training, with negative collision reward plus positive reward for increasing obstacle clearance after near-contact
+- canonical environment shaping also penalizes starvation-heavy views and persistent near-field wall-hugging using ratios derived from the current spherical observation
 - use explicit overrides only for deliberate experiments
 - dashboard mode detection stays on low-volume telemetry to avoid rollout stalls

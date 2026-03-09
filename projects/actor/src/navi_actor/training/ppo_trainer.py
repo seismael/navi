@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 import logging
 import time
 from dataclasses import dataclass
@@ -82,6 +83,7 @@ _LOGGER = logging.getLogger(__name__)
 _SOFT_WARN_MIN_SPS: float = 15.0
 _SOFT_WARN_MAX_ZERO_WAIT: float = 0.20
 _SOFT_WARN_MAX_OPT_MS: float = 30_000.0
+_DASHBOARD_HEARTBEAT_SECONDS: float = 0.5
 
 
 def _safe_pub_send(
@@ -177,6 +179,8 @@ class PpoTrainer:
         self._runtime = runtime
         self._gmdag_file = gmdag_file
         self._scene_pool = scene_pool
+        self._last_dashboard_observation: DistanceMatrix | None = None
+        self._last_dashboard_heartbeat_at: float = 0.0
 
         self._n_actors = config.n_actors
 
@@ -312,6 +316,7 @@ class PpoTrainer:
             minibatch_size=minibatch_size,
             seq_len=seq_len,
             rnd=self._rnd,
+            progress_callback=lambda: self._maybe_publish_dashboard_heartbeat(step_id=self._total_sim_steps),
         )
         self._sync_rollout_policy()
 
@@ -476,6 +481,8 @@ class PpoTrainer:
         """Publish a low-volume live observation for dashboard rendering."""
         if not self._config.emit_observation_stream:
             return
+        self._last_dashboard_observation = observation
+        self._last_dashboard_heartbeat_at = time.perf_counter()
         if self._pub_socket:
             _safe_pub_send(
                 self._pub_socket,
@@ -483,6 +490,39 @@ class PpoTrainer:
                 payload=serialize(observation),
                 label="observation",
             )
+
+    def _should_publish_dashboard_observation(self) -> bool:
+        """Return True when a fresh dashboard frame should be materialized."""
+        if not self._config.emit_observation_stream:
+            return False
+        return (time.perf_counter() - self._last_dashboard_heartbeat_at) >= _DASHBOARD_HEARTBEAT_SECONDS
+
+    def _maybe_publish_dashboard_heartbeat(self, *, step_id: int) -> None:
+        """Re-publish the last observation while PPO optimization is running."""
+        if not self._config.emit_observation_stream:
+            return
+        if not self._pub_socket:
+            return
+        observation = self._last_dashboard_observation
+        if observation is None:
+            return
+        now_perf = time.perf_counter()
+        if (now_perf - self._last_dashboard_heartbeat_at) < _DASHBOARD_HEARTBEAT_SECONDS:
+            return
+
+        heartbeat = replace(
+            observation,
+            step_id=step_id,
+            timestamp=time.time(),
+        )
+        self._last_dashboard_observation = heartbeat
+        self._last_dashboard_heartbeat_at = now_perf
+        _safe_pub_send(
+            self._pub_socket,
+            topic=TOPIC_DISTANCE_MATRIX,
+            payload=serialize(heartbeat),
+            label="dashboard heartbeat",
+        )
 
     def _should_publish_actor_telemetry(self, actor_id: int) -> bool:
         if self._config.telemetry_all_actors:
@@ -719,9 +759,7 @@ class PpoTrainer:
                 publish_step_telemetry = bool(
                     self._config.emit_training_telemetry and log_every > 0 and step_id % log_every == 0
                 )
-                publish_observations = bool(
-                    self._config.emit_observation_stream and log_every > 0 and step_id % log_every == 0
-                )
+                publish_observations = self._should_publish_dashboard_observation()
                 if publish_observations:
                     publish_actor_ids = tuple(
                         actor_id

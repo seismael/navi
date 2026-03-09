@@ -20,6 +20,7 @@ from navi_auditor.dashboard.panels import (
 from navi_auditor.dashboard.renderers import (
     add_orientation_guides,
     depth_to_viridis,
+    extract_forward_fov,
 )
 from navi_auditor.dashboard.status_line import build_status_metrics_line
 from navi_auditor.stream_engine import StreamEngine
@@ -200,17 +201,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         from navi_contracts import DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
-        # Roll so bin 0 (Forward) is in the middle of the azimuth range
-        depth_2d = np.roll(dm.depth[0], shift=dm.depth[0].shape[0] // 2, axis=0)
-        valid_2d = np.roll(dm.valid_mask[0], shift=dm.valid_mask[0].shape[0] // 2, axis=0)
-        az_bins = depth_2d.shape[0]
-
-        fov_bins = max(1, int(az_bins * _FOV_FRACTION))
-        centre_bin = az_bins // 2
-        fov_lo = centre_bin - fov_bins // 2
-        fov_hi = fov_lo + fov_bins
-        fov_depth = depth_2d[fov_lo:fov_hi, :]
-        fov_valid = valid_2d[fov_lo:fov_hi, :]
+        fov_depth, fov_valid = extract_forward_fov(
+            dm.depth[0],
+            dm.valid_mask[0],
+            fov_degrees=_FOV_FRACTION * 360.0,
+        )
 
         # Raw depth (Viridis) — transpose to put Azimuth on X and Elevation on Y
         viridis_img = depth_to_viridis(fov_depth.T, fov_valid.T)

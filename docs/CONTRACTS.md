@@ -1,3 +1,10 @@
+## Spherical Observation Convention
+
+- Canonical `DistanceMatrix` layout is `(azimuth, elevation)`.
+- Environment azimuth bin `0` is the forward ray along local `-Z`.
+- Dashboard and replay tools must roll the azimuth axis before center-cropping a forward FOV; otherwise the forward seam is split across the panorama edges and front-view panels appear distorted.
+- Canonical training/runtime datasets come only from the downloaded corpus compiled into `artifacts/gmdag/corpus`; no generated or procedural scene source is allowed in the canonical path.
+
 # CONTRACTS.md — Canonical Wire Format Specification
 
 **Package:** `navi-contracts`  

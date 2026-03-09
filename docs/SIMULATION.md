@@ -47,6 +47,7 @@ Key runtime properties:
 - no procedural generators
 - no mesh, habitat, or voxel fallback runtime
 - no sparse-Zarr world format in the active environment surface
+- the CUDA ray tracer must stop at the configured environment horizon rather than a separate hardcoded kernel limit
 
 ## 4. Corpus Preparation
 
@@ -61,6 +62,22 @@ Canonical refresh policy:
 - compiled assets with the wrong stored resolution are rebuilt automatically during refresh
 - `scripts/refresh-scene-corpus.ps1` stages source downloads and only promotes the compiled corpus after a full successful rebuild
 - transient source downloads are removed after successful promotion so the persistent runtime depends on the compiled corpus, not raw meshes
+- promoted `gmdag_manifest.json` files rewrite `source_path` to the live compiled asset path; deleted scratch download paths must not remain in the live corpus metadata
+
+Canonical scene/episode policy:
+
+- collision during training remains non-terminal; the backend reverts the pose, applies a penalty, and continues the episode
+- hard truncation remains `2000` steps by default
+- scene-pool rotation defaults to `16` completed episodes per scene across the fleet, reducing expensive scene swaps and giving actors more time to recover and explore locally
+- near-obstacle reward includes a positive clearance-delta signal when an actor increases free space after getting close to geometry
+- horizon-saturated observations now incur a starvation penalty once invalid rays dominate the sphere beyond the configured threshold
+- very near valid hits now incur a proximity penalty so persistent wall-hugging is discouraged without changing collision non-terminal behavior
+
+TSDF-derived integration policy:
+
+- the first accepted TSDF-derived runtime change is horizon alignment between `EnvironmentConfig.max_distance` and `torch-sdf` kernel termination
+- starvation/proximity reward shaping is implemented at the environment reward seam using already-produced batched depth/validity tensors
+- compiler-side truncation radius and Morton/Z-order storage remain benchmark-gated experiments until they prove better than the current `.gmdag` path
 
 Canonical roots:
 

@@ -1,5 +1,6 @@
 import torch
 
+torch_sdf_backend = None
 try:
     import torch_sdf_backend
     HAS_CUDA_BACKEND = True
@@ -8,7 +9,18 @@ except ImportError:
 
 # --- PYTHON API ---
 
-def cast_rays(dag_tensor, origins, dirs, out_distances, out_semantics, max_steps, bbox_min, bbox_max, resolution):
+def cast_rays(
+    dag_tensor,
+    origins,
+    dirs,
+    out_distances,
+    out_semantics,
+    max_steps,
+    max_distance,
+    bbox_min,
+    bbox_max,
+    resolution,
+):
     """
     Top-level API for TopoNav Sphere Tracing.
     Strict CUDA-only path. CPU fallback is intentionally disabled.
@@ -23,14 +35,18 @@ def cast_rays(dag_tensor, origins, dirs, out_distances, out_semantics, max_steps
         raise RuntimeError("dag_tensor must be on CUDA. CPU tensors are not supported.")
     if not origins.is_cuda or not dirs.is_cuda or not out_distances.is_cuda or not out_semantics.is_cuda:
         raise RuntimeError("All ray tensors must be CUDA tensors. CPU tensors are not supported.")
+    backend = torch_sdf_backend
+    if backend is None:
+        raise RuntimeError("torch_sdf_backend import unexpectedly resolved to None.")
 
-    torch_sdf_backend.cast_rays(
+    backend.cast_rays(
         dag_tensor,
         origins.contiguous(),
         dirs.contiguous(),
         out_distances.contiguous(),
         out_semantics.contiguous(),
         max_steps,
+        max_distance,
         bbox_min,
         bbox_max,
         resolution

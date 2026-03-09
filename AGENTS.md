@@ -103,6 +103,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Observation adaptation back to `(1, Az, El)` `DistanceMatrix` format MUST be vectorized and must not introduce avoidable CPU copies in the hot path.
 - The SDF/DAG backend MUST expose one canonical rolling perf snapshot surface consumed by both runtime telemetry and direct benchmarking; duplicate timing paths are forbidden.
 - `uv run navi-environment bench-sdfdag --gmdag-file ...` is the canonical environment-layer throughput command for the compiled path.
+- Any TSDF-derived runtime changes MUST be benchmark-gated. The first accepted canonical step is aligning the CUDA sphere-tracing horizon with the configured environment horizon before any `.gmdag` format or storage-layout redesign work.
 - **Benchmark Gate:** The SDF/DAG path is accepted only if it meets or exceeds current fleet rollout throughput and materially advances the repository toward the `>= 60 SPS` 4-actor floor.
 
 ### 3.2 Vision Transformer Optimization
@@ -139,8 +140,11 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 ### 3.4 Ghost-Matrix Persistence
 - **No Collision Death:** Simulation backends MUST NOT trigger `done=True` on collision during training.
 - **Continuous Learning:** Agents must learn to "escape" or "fly away" from geometry through continuous per-step negative rewards.
+- **Escape Incentive:** Canonical environment reward MUST provide a positive shaping signal when an actor increases obstacle clearance while near geometry so recovery behavior is learned in-scene instead of via reset churn.
+- **Information Foraging Incentive:** Canonical environment reward MUST penalize overly blind horizon-saturated views and near-field wall-hugging using starvation/proximity ratios derived from the already-produced spherical observation.
 - **Context Preservation:** Temporal hidden states (selected canonical temporal core) MUST NOT be reset upon grazing geometry, preserving situational awareness.
 - **Hard Truncation:** A hard step limit (e.g., 2000 steps) MUST be enforced to ensure episodic diversity.
+- **Scene Residency:** Canonical scene-pool training MUST keep actors on each compiled scene for multiple completed episodes before rotation; switching after only one episode per actor is too eager for both throughput and local scene mastery.
 
 ## 4) Resilient Diagnostic Standard
 - Gallery Layer tools (Dashboard, Recorder) MUST be operational independent of Simulation/Brain layers.

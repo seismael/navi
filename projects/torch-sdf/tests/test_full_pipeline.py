@@ -3,8 +3,13 @@ import numpy as np
 import pytest
 import os
 import time
-from voxel_dag.compiler import MeshIngestor, compute_dense_sdf, compress_to_dag
+from typing import Any, cast
 import torch_sdf
+
+
+def _require_voxel_dag() -> tuple[Any, Any, Any]:
+    compiler = pytest.importorskip("voxel_dag.compiler")
+    return compiler.MeshIngestor, compiler.compute_dense_sdf, compiler.compress_to_dag
 
 def test_full_pipeline_integrity():
     """
@@ -13,6 +18,10 @@ def test_full_pipeline_integrity():
     2. Compile to .gmdag.
     3. Run raycasting and verify results.
     """
+    MeshIngestor, compute_dense_sdf, compress_to_dag = _require_voxel_dag()
+    MeshIngestor = cast(Any, MeshIngestor)
+    compute_dense_sdf = cast(Any, compute_dense_sdf)
+    compress_to_dag = cast(Any, compress_to_dag)
     # 1. Create a "Hallway" Mesh
     hallway_obj = "hallway.obj"
     with open(hallway_obj, 'w') as f:
@@ -55,7 +64,7 @@ def test_full_pipeline_integrity():
     bbox_max = cmin + (res * h)
     
     torch_sdf.cast_rays(
-        dag_torch, origins, dirs, out_d, out_s, 128, cmin.tolist(), bbox_max.tolist(), res
+        dag_torch, origins, dirs, out_d, out_s, 128, 30.0, cmin.tolist(), bbox_max.tolist(), res
     )
     
     # Hit wall logic verification
@@ -85,14 +94,14 @@ def benchmark_throughput():
     out_s = torch.zeros((batch_size, rays_per_actor), dtype=torch.int32, device='cuda')
     
     # Warmup
-    torch_sdf.cast_rays(dag, origins, dirs, out_d, out_s, 64, [0,0,0], [1,1,1], 128)
+    torch_sdf.cast_rays(dag, origins, dirs, out_d, out_s, 64, 30.0, [0,0,0], [1,1,1], 128)
     torch.cuda.synchronize()
     
     print(f"Measuring throughput for {total_rays:,} rays...")
     start = time.time()
     iters = 100
     for _ in range(iters):
-        torch_sdf.cast_rays(dag, origins, dirs, out_d, out_s, 64, [0,0,0], [1,1,1], 128)
+        torch_sdf.cast_rays(dag, origins, dirs, out_d, out_s, 64, 30.0, [0,0,0], [1,1,1], 128)
     torch.cuda.synchronize()
     end = time.time()
     

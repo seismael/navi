@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import torch
 from torch import Tensor
@@ -63,6 +63,7 @@ class PpoLearner:
         self._rnd_learning_rate = rnd_learning_rate
         self._optimizer: torch.optim.Adam | None = None
         self._rnd_optimizer: torch.optim.Adam | None = None
+        self._policy_param_cache: tuple[Tensor, ...] | None = None
 
     def set_learning_rate(
         self, lr: float, rnd_lr: float | None = None
@@ -85,11 +86,11 @@ class PpoLearner:
         Covers the entire model: encoder + temporal core + actor head + critic head.
         """
         if self._optimizer is None:
-            use_foreach = policy.device.type == "cuda"
+            use_cuda = policy.device.type == "cuda"
             self._optimizer = torch.optim.Adam(
                 policy.parameters(),
                 lr=self._learning_rate,
-                foreach=use_foreach,
+                foreach=use_cuda,
             )
         return self._optimizer
 
@@ -104,6 +105,12 @@ class PpoLearner:
             )
         return self._rnd_optimizer
 
+    def _policy_params(self, policy: CognitiveMambaPolicy) -> tuple[Tensor, ...]:
+        """Cache the policy parameter tuple used for gradient clipping."""
+        if self._policy_param_cache is None:
+            self._policy_param_cache = tuple(policy.parameters())
+        return self._policy_param_cache
+
     def train_ppo_epoch(
         self,
         policy: CognitiveMambaPolicy,
@@ -113,6 +120,7 @@ class PpoLearner:
         minibatch_size: int = 64,
         seq_len: int = 32,
         rnd: RNDModule | None = None,
+        progress_callback: Callable[[], None] | None = None,
     ) -> PpoMetrics:
         """Run multiple PPO mini-batch updates on a filled trajectory buffer."""
         optimizer = self._get_optimizer(policy)
@@ -123,8 +131,7 @@ class PpoLearner:
         _LOGGER.debug("Starting PPO epoch with %d samples (epochs=%d, batch=%d)",
                       len(buffer), ppo_epochs, minibatch_size)
 
-        # For gradient clipping
-        params = list(policy.parameters())
+        params = self._policy_params(policy)
 
         running_policy_loss = 0.0
         running_value_loss = 0.0
@@ -199,7 +206,7 @@ class PpoLearner:
                 # Optimization step
                 optimizer.zero_grad(set_to_none=True)
                 total_loss.backward()  # type: ignore[no-untyped-call]
-                torch.nn.utils.clip_grad_norm_(params, self._max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(params, self._max_grad_norm, foreach=(device.type == "cuda"))
                 optimizer.step()
 
                 # RND distillation
@@ -224,6 +231,9 @@ class PpoLearner:
                 running_total += total_loss.item()
                 running_rnd_loss += rnd_loss_val
                 n_updates += 1
+
+                if progress_callback is not None:
+                    progress_callback()
 
         if n_updates == 0:
             return PpoMetrics(

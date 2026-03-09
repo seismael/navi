@@ -6,9 +6,11 @@ import numpy as np
 
 from navi_auditor.dashboard.renderers import (
     add_orientation_guides,
+    center_forward_azimuth,
     compute_nav_metrics,
     depth_to_viridis,
     distance_color,
+    extract_forward_fov,
     overlay_overhead_annotations,
     render_bev_occupancy,
     render_first_person,
@@ -97,6 +99,28 @@ class TestRenderForwardPolar:
         valid = np.ones((32, 16), dtype=bool)
         result = render_forward_polar(depth, valid, 200, 200)
         assert result.shape == (200, 200, 3)
+
+
+class TestPanoramaAlignment:
+    """Tests for canonical forward-centering before dashboard slicing."""
+
+    def test_center_forward_azimuth_moves_bin_zero_to_middle(self) -> None:
+        depth = np.arange(8, dtype=np.float32).reshape(8, 1)
+
+        centered, = center_forward_azimuth(depth)
+
+        assert centered.shape == depth.shape
+        assert centered[depth.shape[0] // 2, 0] == 0.0
+
+    def test_extract_forward_fov_uses_centered_forward_seam(self) -> None:
+        depth = np.arange(12, dtype=np.float32).reshape(12, 1)
+        valid = np.ones((12, 1), dtype=bool)
+
+        fov_depth, fov_valid = extract_forward_fov(depth, valid, fov_degrees=120.0)
+
+        assert fov_depth.shape == (4, 1)
+        assert fov_valid.shape == (4, 1)
+        assert fov_depth[:, 0].tolist() == [10.0, 11.0, 0.0, 1.0]
 
 
 class TestRenderBevOccupancy:

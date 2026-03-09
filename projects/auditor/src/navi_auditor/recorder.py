@@ -589,18 +589,17 @@ class LiveDashboard:
             semantic_2d = dm.semantic[0]  # (azimuth, elevation)
             valid_2d = dm.valid_mask[0]
 
-            az_bins = depth_2d.shape[0]
-
-            # Forward FOV slice (120 degrees)
+            fov_depth = np.roll(depth_2d, shift=depth_2d.shape[0] // 2, axis=0)
+            fov_semantic = np.roll(semantic_2d, shift=semantic_2d.shape[0] // 2, axis=0)
+            fov_valid = np.roll(valid_2d, shift=valid_2d.shape[0] // 2, axis=0)
             fov_fraction = 120.0 / 360.0
-            fov_bins = max(1, int(az_bins * fov_fraction))
-            centre_bin = az_bins // 2
+            fov_bins = max(1, int(fov_depth.shape[0] * fov_fraction))
+            centre_bin = fov_depth.shape[0] // 2
             fov_lo = centre_bin - fov_bins // 2
             fov_hi = fov_lo + fov_bins
-
-            fov_depth = depth_2d[fov_lo:fov_hi, :]
-            fov_semantic = semantic_2d[fov_lo:fov_hi, :]
-            fov_valid = valid_2d[fov_lo:fov_hi, :]
+            fov_depth = fov_depth[fov_lo:fov_hi, :]
+            fov_semantic = fov_semantic[fov_lo:fov_hi, :]
+            fov_valid = fov_valid[fov_lo:fov_hi, :]
 
             # ── top-left: first-person 3D view ──
             fp_img, center_dist_m = self._render_first_person(

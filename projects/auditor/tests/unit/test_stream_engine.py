@@ -214,6 +214,35 @@ class TestStreamEngine:
         assert state.perf_zero_wait_history[-1] == pytest.approx(0.04)
         engine.close()
 
+    def test_action_and_telemetry_update_stream_freshness(self) -> None:
+        engine = StreamEngine(matrix_sub="tcp://localhost:15559", selected_actor_id=0)
+
+        action = Action(
+            env_ids=np.array([0], dtype=np.int32),
+            linear_velocity=np.array([[0.2, 0.0, 0.0]], dtype=np.float32),
+            angular_velocity=np.array([[0.0, 0.0, 0.1]], dtype=np.float32),
+            policy_id="test",
+            step_id=1,
+            timestamp=1.0,
+        )
+        telemetry = TelemetryEvent(
+            event_type="actor.training.ppo.perf",
+            episode_id=0,
+            env_id=0,
+            step_id=1,
+            payload=np.array([18.5, 21.0, 170.0, 1.2, 3.1, 220.0, 0.04, 145.0], dtype=np.float32),
+            timestamp=1.0,
+        )
+
+        engine._dispatch(TOPIC_ACTION, action)
+        action_rx = engine.actor_states[0].last_rx_time
+        assert action_rx > 0.0
+
+        engine._dispatch(TOPIC_TELEMETRY_EVENT, telemetry)
+        telemetry_rx = engine.actor_states[0].last_rx_time
+        assert telemetry_rx >= action_rx
+        engine.close()
+
     def test_environment_sdfdag_perf_updates_environment_histories(self) -> None:
         engine = StreamEngine(matrix_sub="tcp://localhost:15559", selected_actor_id=0)
 

@@ -128,3 +128,25 @@ def test_gradient_isolation_policy_updates_actor() -> None:
     assert not torch.allclose(critic_w_before, critic_w_after), (
         "Critic head should be updated by value loss"
     )
+
+
+def test_ppo_epoch_invokes_progress_callback() -> None:
+    policy = CognitiveMambaPolicy(embedding_dim=128)
+    learner = PpoLearner(learning_rate=1e-3)
+    buf = _fill_buffer(64)
+    callback_calls = 0
+
+    def on_progress() -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+
+    learner.train_ppo_epoch(
+        policy,
+        buf,
+        ppo_epochs=1,
+        minibatch_size=32,
+        seq_len=0,
+        progress_callback=on_progress,
+    )
+
+    assert callback_calls > 0

@@ -81,7 +81,7 @@ class EnvironmentConfig(BaseSettings):
     )
 
     mode: str = "step"
-    max_steps_per_episode: int = 50_000
+    max_steps_per_episode: int = Field(default=2_000, validation_alias="NAVI_MAX_STEPS_PER_EPISODE")
     azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")
     elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS")
     max_distance: float = 30.0
@@ -100,5 +100,30 @@ class EnvironmentConfig(BaseSettings):
     gmdag_resolution: int = Field(
         default=derive_default_gmdag_resolution(),
         validation_alias="NAVI_GMDAG_RESOLUTION",
+    )
+    scene_episodes_per_scene: int = Field(default=16, validation_alias="NAVI_SCENE_EPISODES_PER_SCENE")
+    obstacle_clearance_reward_scale: float = Field(
+        default=0.6,
+        validation_alias="NAVI_OBSTACLE_CLEARANCE_REWARD_SCALE",
+    )
+    obstacle_clearance_window: float = Field(
+        default=1.5,
+        validation_alias="NAVI_OBSTACLE_CLEARANCE_WINDOW",
+    )
+    starvation_ratio_threshold: float = Field(
+        default=0.8,
+        validation_alias="NAVI_STARVATION_RATIO_THRESHOLD",
+    )
+    starvation_penalty_scale: float = Field(
+        default=1.5,
+        validation_alias="NAVI_STARVATION_PENALTY_SCALE",
+    )
+    proximity_distance_threshold: float = Field(
+        default=1.0,
+        validation_alias="NAVI_PROXIMITY_DISTANCE_THRESHOLD",
+    )
+    proximity_penalty_scale: float = Field(
+        default=0.8,
+        validation_alias="NAVI_PROXIMITY_PENALTY_SCALE",
     )
     scene_pool: tuple[str, ...] = ()

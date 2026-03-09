@@ -80,6 +80,7 @@ function Update-CompiledManifestForLiveCorpus {
     $compiledRootPath = [System.IO.Path]::GetFullPath($CompiledRoot)
     $liveRootPath = [System.IO.Path]::GetFullPath($LiveCompiledRoot)
     $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+    $manifest.source_root = $liveRootPath
     $manifest.gmdag_root = $liveRootPath
 
     foreach ($scene in $manifest.scenes) {
@@ -91,7 +92,10 @@ function Update-CompiledManifestForLiveCorpus {
         $fullScenePath = [System.IO.Path]::GetFullPath($scenePath)
         if ($fullScenePath.StartsWith($compiledRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
             $relativePath = $fullScenePath.Substring($compiledRootPath.Length).TrimStart('\', '/')
-            $scene.gmdag_path = (Join-Path $liveRootPath $relativePath)
+            $liveScenePath = (Join-Path $liveRootPath $relativePath)
+            $scene.gmdag_path = $liveScenePath
+            # Live manifests must not retain scratch download paths after promotion.
+            $scene.source_path = $liveScenePath
         }
     }
 

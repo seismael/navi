@@ -18,10 +18,12 @@ __all__: list[str] = [
     "SEMANTIC_COLORS",
     "VIEW_RANGE_M",
     "add_orientation_guides",
+    "center_forward_azimuth",
     "compute_nav_metrics",
     "depth_to_viridis",
     "distance_color",
     "draw_semantic_legend",
+    "extract_forward_fov",
     "overlay_overhead_annotations",
     "render_bev_occupancy",
     "render_first_person",
@@ -195,6 +197,40 @@ _REMAP_CACHE: dict[tuple[int, int, int, int, int], tuple[np.ndarray, np.ndarray]
 _SEMANTIC_LUT: np.ndarray | None = None
 
 _MAX_SEMANTIC_ID: int = 11
+
+
+def center_forward_azimuth(*arrays: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Roll aligned `(azimuth, elevation)` arrays so forward lands at the center.
+
+    The canonical environment convention emits forward-facing rays at azimuth bin
+    `0`. Dashboard panels that take a center-cropped forward view must first roll
+    the panorama so the forward seam is centered before slicing.
+    """
+    if not arrays:
+        return ()
+    az_bins = int(arrays[0].shape[0])
+    shift = az_bins // 2
+    centered: list[np.ndarray] = []
+    for array in arrays:
+        if array.shape[0] != az_bins:
+            msg = "All arrays must share the same azimuth dimension"
+            raise ValueError(msg)
+        centered.append(np.roll(array, shift=shift, axis=0))
+    return tuple(centered)
+
+
+def extract_forward_fov(*arrays: np.ndarray, fov_degrees: float = FWD_FOV_DEG) -> tuple[np.ndarray, ...]:
+    """Return aligned forward-FOV slices from canonical `(azimuth, elevation)` arrays."""
+    if not arrays:
+        return ()
+    centered = center_forward_azimuth(*arrays)
+    az_bins = int(centered[0].shape[0])
+    fov_fraction = float(fov_degrees) / 360.0
+    fov_bins = max(1, int(az_bins * fov_fraction))
+    center_bin = az_bins // 2
+    fov_lo = center_bin - fov_bins // 2
+    fov_hi = fov_lo + fov_bins
+    return tuple(array[fov_lo:fov_hi, :] for array in centered)
 
 
 def _semantic_color_lut() -> np.ndarray:

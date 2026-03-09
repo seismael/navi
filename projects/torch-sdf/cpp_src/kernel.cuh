@@ -13,6 +13,7 @@ namespace cuda {
  * @param out_semantics Pointer to [N] output semantics (int32).
  * @param num_rays      Total number of rays to process (Batch * RaysPerActor).
  * @param max_steps     Maximum sphere-tracing iterations before termination.
+ * @param max_distance  Maximum tracing horizon in metres.
  * @param bbox_min      Absolute spatial minimum [x, y, z].
  * @param bbox_max      Absolute spatial maximum [x, y, z].
  * @param resolution    The DAG resolution (e.g., 2048).
@@ -25,6 +26,7 @@ void launch_sphere_trace_kernel(
     int32_t* out_semantics,
     int num_rays,
     int max_steps,
+    float max_distance,
     const float bbox_min[3],
     const float bbox_max[3],
     int resolution

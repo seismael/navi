@@ -71,7 +71,7 @@ __global__ void sphere_trace_kernel(
     const float* __restrict__ dirs,
     float* __restrict__ out_distances,
     int32_t* __restrict__ out_semantics,
-    int num_rays, int max_steps,
+    int num_rays, int max_steps, float max_distance,
     float bmin_x, float bmin_y, float bmin_z,
     float bmax_x, float bmax_y, float bmax_z,
     int resolution) 
@@ -108,7 +108,7 @@ __global__ void sphere_trace_kernel(
         }
         current_t += dist;
         
-        if (current_t > 100.0f) break;
+        if (current_t > max_distance) break;
     }
 
     out_distances[idx] = current_t;
@@ -118,14 +118,14 @@ __global__ void sphere_trace_kernel(
 void launch_sphere_trace_kernel(
     const uint64_t* dag_memory, const float* origins, const float* dirs,
     float* out_distances, int32_t* out_semantics,
-    int num_rays, int max_steps,
+    int num_rays, int max_steps, float max_distance,
     const float bbox_min[3], const float bbox_max[3], int resolution)
 {
     int threads = 256;
     int blocks = (num_rays + threads - 1) / threads;
 
     sphere_trace_kernel<<<blocks, threads>>>(
-        dag_memory, origins, dirs, out_distances, out_semantics, num_rays, max_steps,
+        dag_memory, origins, dirs, out_distances, out_semantics, num_rays, max_steps, max_distance,
         bbox_min[0], bbox_min[1], bbox_min[2],
         bbox_max[0], bbox_max[1], bbox_max[2],
         resolution

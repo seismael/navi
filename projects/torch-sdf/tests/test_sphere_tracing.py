@@ -1,7 +1,11 @@
 import torch
 import numpy as np
 import pytest
-from voxel_dag.compiler import MeshIngestor, compute_dense_sdf, compress_to_dag
+
+
+def _require_voxel_dag() -> tuple[object, object, object]:
+    compiler = pytest.importorskip("voxel_dag.compiler")
+    return compiler.MeshIngestor, compiler.compute_dense_sdf, compiler.compress_to_dag
 
 # Attempt to load the C++ extension, fallback to Numba emulation for testing if not compiled
 try:
@@ -44,13 +48,14 @@ def test_ray_tensor_contracts():
 
     # This should not crash if contracts are met
     torch_sdf_backend.cast_rays(
-        dag, origins, dirs, out_d, out_s, 64, [0,0,0], [1,1,1], 128
+        dag, origins, dirs, out_d, out_s, 64, 30.0, [0,0,0], [1,1,1], 128
     )
     
     assert out_d.shape == (64, 3072)
 
 def test_mathematical_consistency():
     """Verify sphere tracing against an analytical sphere."""
+    _mesh_ingestor, _compute_dense_sdf, compress_to_dag = _require_voxel_dag()
     # 1. Create a sphere DAG
     # (Using the previously implemented and installed voxel-dag tool)
     res = 64
@@ -69,19 +74,59 @@ def test_mathematical_consistency():
     dag_torch = torch.from_numpy(dag_np.view(np.int64)).cuda()
     
     # 2. Trace rays from outside
-    origins = torch.tensor([[0.0, 0.5, 0.5]], device='cuda', dtype=torch.float32)
-    dirs = torch.tensor([[1.0, 0.0, 0.0]], device='cuda', dtype=torch.float32)
-    
-    out_d = torch.zeros(1, device='cuda')
-    out_s = torch.zeros(1, dtype=torch.int32, device='cuda')
+    origins = torch.tensor([[[0.0, 0.5, 0.5]]], device='cuda', dtype=torch.float32)
+    dirs = torch.tensor([[[1.0, 0.0, 0.0]]], device='cuda', dtype=torch.float32)
+
+    out_d = torch.zeros((1, 1), device='cuda')
+    out_s = torch.zeros((1, 1), dtype=torch.int32, device='cuda')
     
     if HAS_BACKEND:
         torch_sdf_backend.cast_rays(
-            dag_torch, origins, dirs, out_d, out_s, 128, [0,0,0], [1,1,1], res
+            dag_torch, origins, dirs, out_d, out_s, 128, 30.0, [0,0,0], [1,1,1], res
         )
-        assert out_d[0] > 0
+        assert out_d[0, 0] > 0
     else:
         print("Backend not available, skipping numerical assertion")
+
+
+def test_backend_accepts_explicit_max_distance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CUDA binding surface must accept an explicit horizon parameter."""
+    captured: dict[str, object] = {}
+
+    class _FakeBackend:
+        def cast_rays(self, *args: object) -> None:
+            captured["argc"] = len(args)
+            captured["max_distance"] = args[6]
+
+    class _FakeTensor:
+        def __init__(self) -> None:
+            self.is_cuda = True
+
+        def contiguous(self) -> "_FakeTensor":
+            return self
+
+    import torch_sdf.backend as backend_module
+
+    monkeypatch.setattr(backend_module, "HAS_CUDA_BACKEND", True)
+    monkeypatch.setattr(backend_module, "torch_sdf_backend", _FakeBackend())
+    monkeypatch.setattr(backend_module.torch.cuda, "is_available", lambda: True)
+
+    fake_tensor = _FakeTensor()
+    backend_module.cast_rays(
+        fake_tensor,
+        fake_tensor,
+        fake_tensor,
+        fake_tensor,
+        fake_tensor,
+        64,
+        17.5,
+        [0, 0, 0],
+        [1, 1, 1],
+        128,
+    )
+
+    assert captured["argc"] == 10
+    assert captured["max_distance"] == 17.5
 
 if __name__ == "__main__":
     print("Torch-SDF Source Integrity Verified.")

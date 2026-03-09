@@ -11,6 +11,7 @@ void cast_rays_forward(
     torch::Tensor out_distances,
     torch::Tensor out_semantics,
     int max_steps,
+    float max_distance,
     std::vector<float> bbox_min,
     std::vector<float> bbox_max,
     int resolution) 
@@ -40,7 +41,7 @@ void cast_rays_forward(
         cuda::launch_sphere_trace_kernel(
             dag_ptr, origins_ptr, dirs_ptr, 
             out_dist_ptr, out_sem_ptr, 
-            num_rays, max_steps, 
+            num_rays, max_steps, max_distance,
             bbox_min.data(), bbox_max.data(), resolution
         );
     }
