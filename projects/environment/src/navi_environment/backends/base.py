@@ -71,6 +71,10 @@ class SimulatorBackend(ABC):
         """Release simulator resources (GPU contexts, file handles)."""
         ...
 
+    def perf_snapshot(self) -> object | None:
+        """Return an optional coarse performance snapshot for telemetry."""
+        return None
+
     # ------------------------------------------------------------------
     # Batched stepping (default: sequential fallback)
     # ------------------------------------------------------------------

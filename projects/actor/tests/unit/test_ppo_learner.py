@@ -81,36 +81,26 @@ def test_default_value_coeff_is_low() -> None:
     assert cfg.value_coeff == 0.005
 
 
-def test_separate_optimizers_created() -> None:
-    """PpoLearner should create separate optimizers for policy and value."""
+def test_optimizer_covers_full_policy() -> None:
+    """PpoLearner should keep one optimizer over the full policy module."""
     policy = CognitiveMambaPolicy(embedding_dim=128)
     learner = PpoLearner(learning_rate=1e-3)
 
-    policy_opt = learner._get_optimizer(policy)
-    value_opt = learner._get_value_optimizer(policy)
+    optimizer = learner._get_optimizer(policy)
 
-    # Must be distinct optimizer instances
-    assert policy_opt is not value_opt
+    optimizer_param_ids = set()
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            optimizer_param_ids.add(id(parameter))
 
-    # Policy optimizer should NOT contain critic params
-    policy_param_ids = set()
-    for group in policy_opt.param_groups:
-        for p in group["params"]:
-            policy_param_ids.add(id(p))
-
+    all_policy_param_ids = {id(parameter) for parameter in policy.parameters()}
     critic_param_ids = {id(p) for p in policy.heads.critic.parameters()}
-    assert policy_param_ids.isdisjoint(critic_param_ids), (
-        "Policy optimizer must not contain critic parameters"
+
+    assert optimizer_param_ids == all_policy_param_ids, (
+        "Unified PPO optimizer must cover the full policy module"
     )
-
-    # Value optimizer should ONLY contain critic params
-    value_param_ids = set()
-    for group in value_opt.param_groups:
-        for p in group["params"]:
-            value_param_ids.add(id(p))
-
-    assert value_param_ids == critic_param_ids, (
-        "Value optimizer must contain exactly the critic head parameters"
+    assert critic_param_ids.issubset(optimizer_param_ids), (
+        "Unified PPO optimizer must include critic head parameters"
     )
 
 

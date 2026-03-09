@@ -5,9 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from pydantic import Field
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__: list[str] = ["ActorConfig"]
+
 
 def find_root_env() -> Path:
     """Search upwards for the root .env file."""
@@ -20,7 +22,8 @@ def find_root_env() -> Path:
             curr = curr.parent
     except Exception:  # noqa: S110
         pass
-    return Path(".env") # fallback
+    return Path(".env")  # fallback
+
 
 class ActorConfig(BaseSettings):
     """Actor service configuration, loadable from environment or .env."""
@@ -29,6 +32,7 @@ class ActorConfig(BaseSettings):
         env_file=find_root_env(),
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Robust Fallback
@@ -78,3 +82,14 @@ class ActorConfig(BaseSettings):
     intrinsic_anneal_steps: int = 500_000
     loop_penalty_coeff: float = 0.5
     loop_threshold: float = 0.85
+
+    # Telemetry fan-out controls (performance)
+    telemetry_actor_id: int = 0
+    telemetry_all_actors: bool = False
+    emit_observation_stream: bool = True
+    emit_training_telemetry: bool = True
+    emit_perf_telemetry: bool = True
+
+    # Diagnostic ablations on the canonical trainer surface
+    enable_episodic_memory: bool = True
+    enable_reward_shaping: bool = True

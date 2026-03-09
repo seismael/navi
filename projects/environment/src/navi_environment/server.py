@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
     from navi_environment.config import EnvironmentConfig
 
 __all__: list[str] = ["EnvironmentServer"]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class EnvironmentServer:
@@ -89,13 +92,20 @@ class EnvironmentServer:
 
         self._running = True
         self._pub_socket = self._context.socket(zmq.PUB)
+        self._pub_socket.setsockopt(zmq.SNDHWM, 500)
+        self._pub_socket.setsockopt(zmq.LINGER, 0)
         self._pub_socket.bind(cfg.pub_address)
 
         if cfg.mode == "step":
             self._rep_socket = self._context.socket(zmq.REP)
+            self._rep_socket.setsockopt(zmq.RCVHWM, 500)
+            self._rep_socket.setsockopt(zmq.SNDHWM, 500)
+            self._rep_socket.setsockopt(zmq.LINGER, 0)
             self._rep_socket.bind(cfg.rep_address)
         else:
             self._action_sub = self._context.socket(zmq.SUB)
+            self._action_sub.setsockopt(zmq.RCVHWM, 500)
+            self._action_sub.setsockopt(zmq.LINGER, 0)
             self._action_sub.connect(cfg.action_sub_address)
             self._action_sub.setsockopt(zmq.SUBSCRIBE, TOPIC_ACTION.encode("utf-8"))
 
@@ -224,6 +234,7 @@ class EnvironmentServer:
                                 ], dtype=np.float32),
                                 actor_id=actor_id,
                             )
+                        self._publish_backend_perf(step_id=msg.step_id)
                     self._step_id = msg.step_id
                 elif isinstance(msg, StepRequest):
                     # Extract actor_id from action env_ids (default 0)
@@ -248,10 +259,8 @@ class EnvironmentServer:
                         actor_id=actor_id,
                     )
                     self._step_id = msg.step_id
-            except Exception as e:
-                import traceback
-                print(f"CRITICAL ERROR in Environment Step Loop: {e}", flush=True)
-                traceback.print_exc()
+            except Exception:
+                _LOGGER.exception("CRITICAL ERROR in Environment Step Loop")
                 # To prevent total deadlock, we must reply or close. But REQ/REP is strictly ping-pong.
                 # If we crashed before sending a reply, the Actor is permanently stuck.
                 # We will just break to let the thread die and the system reboot if handled.
@@ -349,6 +358,31 @@ class EnvironmentServer:
                 ],
                 flags=zmq.NOBLOCK,
             )
+
+    def _publish_backend_perf(self, *, step_id: int) -> None:
+        """Publish coarse backend perf telemetry for canonical batch runtimes."""
+        snapshot = self._backend.perf_snapshot()
+        if snapshot is None or self._config.backend != "sdfdag":
+            return
+
+        payload = np.array(
+            [
+                float(snapshot.sps),
+                float(snapshot.last_batch_step_ms),
+                float(snapshot.ema_batch_step_ms),
+                float(snapshot.avg_batch_step_ms),
+                float(snapshot.avg_actor_step_ms),
+                float(snapshot.total_batches),
+                float(snapshot.total_actor_steps),
+            ],
+            dtype=np.float32,
+        )
+        self._publish_telemetry(
+            event_type="environment.sdfdag.perf",
+            step_id=step_id,
+            payload=payload,
+            actor_id=0,
+        )
 
     @property
     def pose(self) -> DistanceMatrix | None:

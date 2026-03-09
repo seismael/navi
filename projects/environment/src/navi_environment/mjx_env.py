@@ -120,6 +120,29 @@ class MjxEnvironment:
             else action.angular_velocity
         )
 
+        return self.step_pose_commands(
+            pose,
+            raw_lin,
+            raw_ang,
+            timestamp,
+            prev_depth=prev_depth,
+            max_distance=max_distance,
+        )
+
+    def step_pose_commands(
+        self,
+        pose: RobotPose,
+        linear_velocity: NDArray[np.float32],
+        angular_velocity: NDArray[np.float32],
+        timestamp: float,
+        *,
+        prev_depth: NDArray[np.float32] | None = None,
+        max_distance: float = 30.0,
+    ) -> RobotPose:
+        """Step the robot pose from normalized command vectors directly."""
+        raw_lin = np.asarray(linear_velocity, dtype=np.float32).reshape(-1)
+        raw_ang = np.asarray(angular_velocity, dtype=np.float32).reshape(-1)
+
         # Scale normalised steering → physical velocity
         speed_factor = self._compute_speed_factor(prev_depth, max_distance)
         linear = np.array([

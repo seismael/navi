@@ -33,6 +33,18 @@ cd projects/contracts
 uv sync
 ```
 
+## Run
+
+`navi-contracts` is a shared package (no long-running service process).
+
+Use these checks when validating contracts locally:
+
+```bash
+cd projects/contracts
+uv run pytest tests/test_models.py
+uv run python -c "from navi_contracts import StepResult, serialize, deserialize; s=StepResult(step_id=1, env_id=0, episode_id=1, done=False, truncated=False, reward=0.0, episode_return=0.0, timestamp=0.0); print(type(deserialize(serialize(s))).__name__)"
+```
+
 ## Usage
 
 ```python

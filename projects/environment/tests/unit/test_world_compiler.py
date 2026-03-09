@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-from navi_environment.transformers import PlyCompileConfig, PlyWorldCompiler
+from navi_environment.transformers import WorldCompileConfig, WorldModelCompiler
 
 
 def test_compile_ascii_ply_to_sparse_world() -> None:
@@ -35,11 +35,11 @@ def test_compile_ascii_ply_to_sparse_world() -> None:
         )
 
         output = tmp_path / "compiled_world.zarr"
-        compiler = PlyWorldCompiler()
+        compiler = WorldModelCompiler()
         result = compiler.compile(
             source_path=source,
             output_path=output,
-            config=PlyCompileConfig(chunk_size=8, voxel_size=1.0, semantic_id=6),
+            config=WorldCompileConfig(chunk_size=8, voxel_size=1.0, semantic_id=6),
         )
 
         assert result.occupied_voxels == 4
@@ -71,11 +71,11 @@ def test_compile_obj_to_sparse_world() -> None:
         )
 
         output = tmp_path / "compiled_obj.zarr"
-        compiler = PlyWorldCompiler()
+        compiler = WorldModelCompiler()
         result = compiler.compile(
             source_path=source,
             output_path=output,
-            config=PlyCompileConfig(
+            config=WorldCompileConfig(
                 chunk_size=8,
                 voxel_size=1.0,
                 semantic_id=6,
@@ -110,11 +110,11 @@ def test_compile_ascii_stl_to_sparse_world() -> None:
         )
 
         output = tmp_path / "compiled_stl.zarr"
-        compiler = PlyWorldCompiler()
+        compiler = WorldModelCompiler()
         result = compiler.compile(
             source_path=source,
             output_path=output,
-            config=PlyCompileConfig(
+            config=WorldCompileConfig(
                 chunk_size=8,
                 voxel_size=1.0,
                 semantic_id=6,

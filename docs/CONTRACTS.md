@@ -8,7 +8,7 @@
 
 ## 1. Canonical Models
 
-The following six dataclasses are the **only** models permitted on the
+The following canonical dataclasses are the **only** models permitted on the
 inter-process wire. No additional models may be added without explicit approval.
 Visualization types (RGB frames, camera images) are never part of these
 contracts.
@@ -53,7 +53,7 @@ class DistanceMatrix:
 
 - `matrix_shape[0]` = azimuth bins (rows), `matrix_shape[1]` = elevation bins
   (columns).
-- Default resolution: `(256, 128)`.
+- Default resolution: `(256, 48)`.
 - Single-env backends produce `n_envs = 1` → array shapes `(1, Az, El)`.
 - `depth` is normalized to `[0, 1]` by dividing by `max_distance`.
 - `delta_depth` is the per-bin change since the previous step (temporal
@@ -107,6 +107,8 @@ Step acknowledgement from Simulation Layer to Brain (REQ/REP).
 @dataclass(frozen=True, slots=True)
 class StepResult:
     step_id: int
+    env_id: int
+    episode_id: int
     done: bool
     truncated: bool
     reward: float
@@ -127,6 +129,29 @@ class TelemetryEvent:
     step_id: int
     payload: NDArray[float32]          # generic numeric payload
     timestamp: float
+```
+
+### 1.7. BatchStepRequest
+
+Batched step request from Brain to Simulation Layer (REQ/REP).
+
+```python
+@dataclass(frozen=True, slots=True)
+class BatchStepRequest:
+    actions: tuple[Action, ...]
+    step_id: int
+    timestamp: float
+```
+
+### 1.8. BatchStepResult
+
+Batched step reply from Simulation Layer to Brain (REQ/REP).
+
+```python
+@dataclass(frozen=True, slots=True)
+class BatchStepResult:
+    results: tuple[StepResult, ...]
+    observations: tuple[DistanceMatrix, ...]
 ```
 
 ---

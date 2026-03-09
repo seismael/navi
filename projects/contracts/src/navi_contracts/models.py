@@ -79,6 +79,7 @@ class StepResult:
 
     step_id: int
     env_id: int
+    episode_id: int
     done: bool
     truncated: bool
     reward: float

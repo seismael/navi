@@ -1,19 +1,27 @@
 param(
-    [string]$ManifestPath = "",
-    [int]$TotalSteps = 500000,
+    [string]$Scene = "",
+    [string]$Manifest = "",
+    [string]$CorpusRoot = "",
+    [string]$GmDagRoot = "",
+    [string]$GmDagFile = "",
+    [string]$HabitatScene = "",
+    [switch]$AutoCompileGmDag,
+    [int]$GmDagResolution = 512,
+    [int]$TotalSteps = 0,
     [string]$CheckpointDir = "checkpoints/all_night",
     [string]$ResumeCheckpoint = "",
-    [string]$Backend = "mesh",
-    [int]$AzimuthBins = 256,
-    [int]$ElevationBins = 48,
-    [int]$MinibatchSize = 32,
-    [int]$PpoEpochs = 2,
+    [int]$AzimuthBins = 128,
+    [int]$ElevationBins = 24,
+    [int]$MinibatchSize = 64,
+    [int]$PpoEpochs = 1,
     [double]$ExistentialTax = -0.02,
     [double]$EntropyCoeff = 0.02,
     [double]$LearningRate = 5e-4,
-    [int]$BpttLen = 16,
+    [int]$BpttLen = 8,
+    [int]$RolloutLength = 512,
     [int]$CheckpointEvery = 25000,
-    [string]$LogDir = "scripts/logs/all_night"
+    [string]$LogDir = "scripts/logs/all_night",
+    [string]$PythonVersion = "3.12"
 )
 
 # Standard Ghost-Matrix Fleet Size
@@ -26,39 +34,112 @@ function Get-RepoRoot {
     return $root.Path
 }
 
-$repoRoot = Get-RepoRoot
+function Stop-ProcessTreeById {
+    param([int]$ProcessId)
 
-# ── Resolve defaults ──────────────────────────────────────────────
-if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
-    $ManifestPath = Join-Path $repoRoot "data\scenes\scene_manifest_all.json"
-}
+    if ($ProcessId -le 0) {
+        return
+    }
 
-if (-not (Test-Path $ManifestPath)) {
-    Write-Host "ERROR: Scene manifest not found at $ManifestPath"
-    exit 1
-}
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        return
+    }
 
-# Create output dirs
-foreach ($dir in @($CheckpointDir, $LogDir)) {
-    if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    try {
+        & taskkill /PID $ProcessId /T /F *> $null
+    }
+    catch {
     }
 }
 
-Write-Host "========================================================"
-Write-Host "  Navi All-Night Continuous Training"
-Write-Host "  Manifest   : $ManifestPath"
-Write-Host "  Steps      : $TotalSteps (Total)"
-Write-Host "  Actors     : $NumActors (Standard Fleet)"
-Write-Host "  Resolution : ${AzimuthBins}x${ElevationBins}"
-Write-Host "  Backend    : $Backend"
-Write-Host "  Checkpoint : $CheckpointDir (every $CheckpointEvery)"
-Write-Host "  Optimizer  : LR=$LearningRate, Batch=$MinibatchSize, Epochs=$PpoEpochs"
-Write-Host "  Reward     : Tax=$ExistentialTax, Entropy=$EntropyCoeff"
-Write-Host "========================================================"
-Write-Host ""
+function Initialize-CudaEnvironment {
+    if (-not $env:CUDA_HOME -and $env:CUDA_PATH) {
+        $env:CUDA_HOME = $env:CUDA_PATH
+    }
+    if (-not $env:CUDA_PATH -and $env:CUDA_HOME) {
+        $env:CUDA_PATH = $env:CUDA_HOME
+    }
 
-# ── Helper: kill environment and actor ────────────────────────
+    if (-not $env:CUDA_HOME) {
+        foreach ($candidate in @(
+            "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0",
+            "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4",
+            "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1"
+        )) {
+            if (Test-Path $candidate) {
+                $env:CUDA_HOME = $candidate
+                $env:CUDA_PATH = $candidate
+                break
+            }
+        }
+    }
+
+    if (-not $env:CUDA_HOME) {
+        throw "CUDA_HOME could not be resolved. Install the CUDA toolkit or set CUDA_HOME/CUDA_PATH before launching canonical sdfdag training."
+    }
+
+    $cudaBin = Join-Path $env:CUDA_HOME "bin"
+    $cudaNvvp = Join-Path $env:CUDA_HOME "libnvvp"
+    $env:PATH = "$cudaBin;$cudaNvvp;$env:PATH"
+}
+
+function Resolve-SdfDagAsset {
+    param(
+        [string]$RepoRoot,
+        [string]$GmDagFile,
+        [string]$HabitatScene,
+        [switch]$AutoCompile,
+        [int]$Resolution,
+        [string]$PythonVersion
+    )
+
+    Initialize-CudaEnvironment
+
+    if (-not [string]::IsNullOrWhiteSpace($GmDagFile)) {
+        return (Resolve-Path $GmDagFile).Path
+    }
+
+    $defaultAsset = Join-Path $RepoRoot "artifacts\gmdag\sample_apartment.gmdag"
+    if ((-not $AutoCompile) -and [string]::IsNullOrWhiteSpace($HabitatScene) -and (Test-Path $defaultAsset)) {
+        return (Resolve-Path $defaultAsset).Path
+    }
+
+    if ((-not $AutoCompile) -and [string]::IsNullOrWhiteSpace($HabitatScene)) {
+        $defaultScene = Join-Path $RepoRoot "data\scenes\sample_apartment.glb"
+        if (Test-Path $defaultScene) {
+            $HabitatScene = $defaultScene
+            $AutoCompile = $true
+        }
+    }
+
+    if (-not $AutoCompile) {
+        throw "GmDagFile is required unless -AutoCompileGmDag is set."
+    }
+    if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
+        throw "HabitatScene is required when using -AutoCompileGmDag."
+    }
+
+    $sourcePath = (Resolve-Path $HabitatScene).Path
+    $cacheDir = Join-Path $RepoRoot "artifacts\gmdag"
+    if (-not (Test-Path $cacheDir)) {
+        New-Item -ItemType Directory -Path $cacheDir | Out-Null
+    }
+    $outputPath = Join-Path $cacheDir (([System.IO.Path]::GetFileNameWithoutExtension($sourcePath)) + ".gmdag")
+
+    Write-Host "Compiling canonical gmdag cache..."
+    & uv run --python $PythonVersion --project (Join-Path $RepoRoot "projects\environment") `
+        navi-environment compile-gmdag `
+        --source $sourcePath `
+        --output $outputPath `
+        --resolution $Resolution
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "gmdag compilation failed with exit code $LASTEXITCODE"
+    }
+
+    return $outputPath
+}
+
 function Stop-NaviProcesses {
     Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and (
@@ -66,10 +147,9 @@ function Stop-NaviProcesses {
             $_.CommandLine -like "*navi-actor*"
         )
     } | ForEach-Object {
-        try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-        catch { }
+        Stop-ProcessTreeById -ProcessId $_.ProcessId
     }
-    # Wait for ZMQ ports to be fully released
+
     $deadline = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
         $held = netstat -ano 2>$null | Select-String "5559|5560|5557"
@@ -78,7 +158,7 @@ function Stop-NaviProcesses {
             if ($line -match '\s(\d+)\s*$') {
                 $procId = [int]$Matches[1]
                 if ($procId -gt 0) {
-                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                    Stop-ProcessTreeById -ProcessId $procId
                 }
             }
         }
@@ -86,14 +166,72 @@ function Stop-NaviProcesses {
     }
 }
 
+$repoRoot = Get-RepoRoot
+Initialize-CudaEnvironment
+
+$resolvedGmDagFile = if (-not [string]::IsNullOrWhiteSpace($GmDagFile)) {
+    (Resolve-Path $GmDagFile).Path
+} else {
+    ""
+}
+
+$sceneOverride = if (-not [string]::IsNullOrWhiteSpace($Scene)) {
+    $Scene
+} else {
+    $HabitatScene
+}
+
+$resolvedScene = if (-not [string]::IsNullOrWhiteSpace($sceneOverride)) {
+    (Resolve-Path $sceneOverride).Path
+} else {
+    ""
+}
+
+$resolvedManifest = if (-not [string]::IsNullOrWhiteSpace($Manifest)) {
+    (Resolve-Path $Manifest).Path
+} else {
+    ""
+}
+
+$resolvedCorpusRoot = if (-not [string]::IsNullOrWhiteSpace($CorpusRoot)) {
+    (Resolve-Path $CorpusRoot).Path
+} else {
+    ""
+}
+
+$resolvedGmDagRoot = if (-not [string]::IsNullOrWhiteSpace($GmDagRoot)) {
+    (Resolve-Path $GmDagRoot).Path
+} else {
+    ""
+}
+
+foreach ($dir in @($CheckpointDir, $LogDir)) {
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+
+Write-Host "========================================================"
+Write-Host "  Navi All-Night Continuous Training"
+Write-Host "  Corpus     : $(if ($resolvedGmDagFile) { $resolvedGmDagFile } elseif ($resolvedScene) { $resolvedScene } elseif ($resolvedManifest) { $resolvedManifest } elseif ($resolvedCorpusRoot) { $resolvedCorpusRoot } else { 'auto-discovered canonical corpus' })"
+Write-Host "  Steps      : $(if ($TotalSteps -le 0) { 'continuous until stopped' } else { "$TotalSteps (Total)" })"
+Write-Host "  Actors     : $NumActors (Standard Fleet)"
+Write-Host "  Resolution : ${AzimuthBins}x${ElevationBins}"
+Write-Host "  Runtime    : sdfdag (canonical)"
+Write-Host "  Checkpoint : $CheckpointDir (every $CheckpointEvery)"
+Write-Host "  Optimizer  : LR=$LearningRate, Batch=$MinibatchSize, Epochs=$PpoEpochs"
+Write-Host "  Rollout    : $RolloutLength"
+Write-Host "  Reward     : Tax=$ExistentialTax, Entropy=$EntropyCoeff"
+Write-Host "========================================================"
+Write-Host ""
+
 Stop-NaviProcesses
 
-# ── Start Continuous Training ──
 $actorArgs = @(
     "run",
+    "--python", $PythonVersion,
     "--project", (Join-Path $repoRoot "projects\actor"),
-    "navi-actor", "train-sequential",
-    "--manifest", $ManifestPath,
+    "navi-actor", "train",
     "--actors", "$NumActors",
     "--azimuth-bins", "$AzimuthBins",
     "--elevation-bins", "$ElevationBins",
@@ -106,10 +244,30 @@ $actorArgs = @(
     "--entropy-coeff", "$EntropyCoeff",
     "--learning-rate", "$LearningRate",
     "--bptt-len", "$BpttLen",
-    "--backend", $Backend,
+    "--rollout-length", "$RolloutLength",
+    "--compile-resolution", "$GmDagResolution",
     "--shuffle"
 )
 
+if (-not [string]::IsNullOrWhiteSpace($resolvedGmDagFile)) {
+    $actorArgs += @("--gmdag-file", $resolvedGmDagFile)
+}
+elseif (-not [string]::IsNullOrWhiteSpace($resolvedScene)) {
+    $actorArgs += @("--scene", $resolvedScene)
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedManifest)) {
+    $actorArgs += @("--manifest", $resolvedManifest)
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedCorpusRoot)) {
+    $actorArgs += @("--corpus-root", $resolvedCorpusRoot)
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedGmDagRoot)) {
+    $actorArgs += @("--gmdag-root", $resolvedGmDagRoot)
+}
+if ($AutoCompileGmDag) {
+    $actorArgs += "--force-corpus-refresh"
+}
 
 if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) {
     $actorArgs += @("--checkpoint", $ResumeCheckpoint)

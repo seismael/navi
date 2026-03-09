@@ -1,4 +1,4 @@
-"""Tests for Mamba2TemporalCore (GRU fallback path)."""
+"""Tests for the canonical Mamba2TemporalCore runtime."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def test_forward_sequence_shapes() -> None:
     """forward() with a sequence should return (B, T, D) output."""
     core = _make_core()
     z_seq = torch.randn(2, 8, 128)
-    out, hidden = core.forward(z_seq)
+    out, _ = core.forward(z_seq)
     assert out.shape == (2, 8, 128)
 
 
@@ -23,7 +23,7 @@ def test_forward_step_shapes() -> None:
     """forward_step() should return (B, D) output."""
     core = _make_core()
     z_t = torch.randn(2, 128)
-    out, hidden = core.forward_step(z_t)
+    out, _ = core.forward_step(z_t)
     assert out.shape == (2, 128)
 
 
@@ -40,7 +40,7 @@ def test_hidden_state_continuity() -> None:
     """Hidden state from step 1 should be usable in step 2."""
     core = _make_core()
     z1 = torch.randn(1, 128)
-    out1, h1 = core.forward_step(z1)
+    _, h1 = core.forward_step(z1)
 
     z2 = torch.randn(1, 128)
     out2, h2 = core.forward_step(z2, h1)

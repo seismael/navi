@@ -28,10 +28,10 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
     def __init__(
         self,
         embedding_dim: int = 128,
-        patch_size: int = 4,
-        n_layers: int = 4,
-        n_heads: int = 8,
-        hidden_dim: int = 256,
+        patch_size: int = 8,
+        n_layers: int = 2,
+        n_heads: int = 4,
+        hidden_dim: int = 128,
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim

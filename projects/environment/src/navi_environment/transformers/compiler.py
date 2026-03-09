@@ -11,9 +11,6 @@ __all__: list[str] = [
     "WorldCompileConfig",
     "WorldCompileResult",
     "WorldModelCompiler",
-    "PlyCompileConfig",
-    "PlyCompileResult",
-    "PlyWorldCompiler",
 ]
 
 
@@ -36,29 +33,6 @@ class WorldCompileResult:
     occupied_voxels: int
     chunk_count: int
     spawn_position: tuple[float, float, float]
-
-
-class PlyWorldCompiler:
-    """Compatibility wrapper for PLY-only compilation."""
-
-    def __init__(self) -> None:
-        self._compiler = WorldModelCompiler()
-
-    def compile(
-        self,
-        source_path: str | Path,
-        output_path: str | Path,
-        config: WorldCompileConfig,
-    ) -> WorldCompileResult:
-        """Compile a PLY source asset into a sparse chunk world store."""
-        effective_format = "ply" if config.source_format == "auto" else config.source_format
-        ply_cfg = WorldCompileConfig(
-            chunk_size=config.chunk_size,
-            voxel_size=config.voxel_size,
-            semantic_id=config.semantic_id,
-            source_format=effective_format,
-        )
-        return self._compiler.compile(source_path=source_path, output_path=output_path, config=ply_cfg)
 
 
 class WorldModelCompiler:
@@ -277,7 +251,7 @@ class WorldModelCompiler:
         self,
         output_path: Path,
         sparse_chunks: dict[tuple[int, int, int], np.ndarray],
-        config: PlyCompileConfig,
+        config: WorldCompileConfig,
         spawn_position: tuple[float, float, float],
         world_offset: np.ndarray,
     ) -> None:
@@ -321,8 +295,3 @@ class WorldModelCompiler:
                 overwrite=True,
             )
             arr[:] = data
-
-
-# Compatibility aliases
-PlyCompileConfig = WorldCompileConfig
-PlyCompileResult = WorldCompileResult

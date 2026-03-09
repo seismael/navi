@@ -34,6 +34,14 @@
 - **Status:** Still using GRU fallback (`mamba-ssm` not found).
 - **Goal:** Move to a native PyTorch selective SSM implementation to replace GRU without needing the complex `mamba-ssm` CUDA build dependency, or successfully build and install the C++ kernels for Windows.
 
+### Issue 5: Thread Starvation & Gradient Poisoning (NEW)
+- **Observation:** Async PPO was taking 10 minutes and starving the main thread (SPS dropped to 0.4). Agents were stuck in wall death loops getting -5.0 reward forever.
+- **Action Taken:** 
+    - **RayViT Optimization:** Increased patch size to 8 and reduced layers/heads to speed up CPU inference for 256x48 resolution.
+    - **Collision Nudging:** Agents are now nudged 0.5m backwards upon collision to break death loops while keeping temporal memory.
+    - **Async Fix:** Moved tensor stacking to the background thread and used granular locking for atomic weight swaps.
+    - **Hyperparam Tuning:** Reduced ppo_epochs to 1 and increased minibatch_size to 128 for faster CPU updates.
+
 ---
 
 ## 2. Parallel Multi-Scene Training (Planned)

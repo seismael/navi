@@ -6,15 +6,9 @@ __all__: list[str] = [
     "WorldCompileConfig",
     "WorldCompileResult",
     "WorldModelCompiler",
-    "PlyCompileConfig",
-    "PlyCompileResult",
-    "PlyWorldCompiler",
 ]
 
 from navi_environment.transformers.compiler import (
-    PlyCompileConfig,
-    PlyCompileResult,
-    PlyWorldCompiler,
     WorldCompileConfig,
     WorldCompileResult,
     WorldModelCompiler,

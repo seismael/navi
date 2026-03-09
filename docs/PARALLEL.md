@@ -51,7 +51,7 @@ This paradigm shifts the architecture from standard RL to **Centralized Training
 
 ### 4.2. Architectural Implementation
 
-1. **The Global FAISS / MLX Index:** A singular K-Nearest Neighbors index in Unified Memory accepts concurrent append operations from all  actors.
+1. **The Global Tensor Memory Index:** A singular tensor-native cosine-similarity store accepts concurrent append operations from all actors.
 2. **Cross-Attention Sequence Modeling:** To achieve true swarm intelligence, the Mamba-2 Temporal Core can be modified. Instead of processing  isolated hidden states , the architecture implements a cross-attention layer where Actor A's Ray-ViT output  can attend to Actor B's output  if their absolute mathematical coordinates  are within a specific proximity radius.
 3. **Reward Sharing:** The reward function must be modified. If Actor A finds the objective, a discounted intrinsic reward is propagated to the hidden states of nearby actors, reinforcing cooperative swarm formations.
 

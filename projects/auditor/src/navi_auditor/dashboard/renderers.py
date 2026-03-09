@@ -326,7 +326,7 @@ def render_first_person(
         return img, VIEW_RANGE_M
 
     # Pitch quantisation for remap cache (centidegrees)
-    pitch_q = int(round(float(np.rad2deg(pitch)) * 100.0))
+    pitch_q = round(float(np.rad2deg(pitch)) * 100.0)
     flen = view_w / (2.0 * np.tan(np.deg2rad(MAIN_FOV_DEG) / 2.0))
     horizon_y = int(np.clip(height * 0.54 + pitch * flen, 0, height - 1))
 

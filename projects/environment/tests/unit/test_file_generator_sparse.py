@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from navi_environment.generators.file_loader import FileGenerator
-from navi_environment.transformers import PlyCompileConfig, PlyWorldCompiler
+from navi_environment.transformers import WorldCompileConfig, WorldModelCompiler
 
 
 def test_file_generator_reads_sparse_chunks() -> None:
@@ -33,11 +33,11 @@ def test_file_generator_reads_sparse_chunks() -> None:
         )
 
         output = tmp_path / "world.zarr"
-        compiler = PlyWorldCompiler()
+        compiler = WorldModelCompiler()
         compiler.compile(
             source_path=source,
             output_path=output,
-            config=PlyCompileConfig(chunk_size=8, voxel_size=1.0, semantic_id=4),
+            config=WorldCompileConfig(chunk_size=8, voxel_size=1.0, semantic_id=4),
         )
 
         generator = FileGenerator(path=output, chunk_size=8)

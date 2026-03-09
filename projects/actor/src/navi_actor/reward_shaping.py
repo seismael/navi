@@ -81,6 +81,10 @@ class RewardShaper:
         """Advance the global step counter for annealing."""
         self._global_step += 1
 
+    def step_batch(self, batch_size: int) -> None:
+        """Advance the global step counter by a rollout batch size."""
+        self._global_step += max(0, int(batch_size))
+
     def shape(
         self,
         *,

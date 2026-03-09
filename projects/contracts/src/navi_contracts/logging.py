@@ -44,7 +44,7 @@ def setup_logging(project_name: str, log_dir: str | Path = "logs", level: int = 
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-    
+
     # Remove existing handlers to prevent duplicate logs if called multiple times
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
@@ -56,6 +56,6 @@ def setup_logging(project_name: str, log_dir: str | Path = "logs", level: int = 
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("trimesh").setLevel(logging.WARNING)
     logging.getLogger("numba").setLevel(logging.WARNING)
-    
+
     # Announce
     logging.getLogger(__name__).info("Unified logging initialized for %s.", project_name)

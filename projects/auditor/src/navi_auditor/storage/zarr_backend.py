@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Literal, cast
+
 import numpy as np
 import zarr
 
@@ -17,13 +19,13 @@ class ZarrBackend(AbstractStorageBackend):
         self._store: zarr.Group | None = None
         self._index: int = 0
         self._path: str = ""
-        self._mode: str = "w"
+        self._mode: Literal["w", "r"] = "w"
 
     def open(self, path: str, mode: str = "w") -> None:
         """Open a Zarr store at the given path."""
         self._path = path
-        self._mode = mode
-        store_mode = "w" if mode == "w" else "r"
+        self._mode = "w" if mode == "w" else "r"
+        store_mode: Literal["w", "r"] = "w" if mode == "w" else "r"
         self._store = zarr.open_group(path, mode=store_mode)
         if mode == "w":
             self._index = 0
@@ -60,10 +62,10 @@ class ZarrBackend(AbstractStorageBackend):
         results: list[tuple[str, bytes, float]] = []
         keys = sorted([k for k in self._store if k.startswith("msg_")])
         for key in keys:
-            dataset = self._store[key]
-            topic = str(dataset.attrs["topic"])
-            timestamp = float(dataset.attrs["timestamp"])
-            data = bytes(dataset[:])
+            dataset = cast("zarr.Array[Any]", self._store[key])
+            topic = str(cast("Any", dataset.attrs.get("topic", "")))
+            timestamp = float(cast("float | int | str", dataset.attrs.get("timestamp", 0.0)))
+            data = np.asarray(dataset[:], dtype=np.uint8).tobytes()
             results.append((topic, data, timestamp))
         return results
 

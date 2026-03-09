@@ -45,10 +45,48 @@ class TestStepCycle:
         dm, result = backend.step(action, step_id=1)
 
         assert result.step_id == 1
+        assert result.env_id == 0
+        assert result.episode_id == 0
         assert result.done is False
         assert result.truncated is False
         assert isinstance(result.reward, float)
         assert dm.step_id == 1
+        assert dm.episode_id == result.episode_id
+
+    def test_episode_id_advances_after_truncation_reset(self) -> None:
+        """When an episode truncates and backend resets, StepResult episode_id should advance."""
+        config = EnvironmentConfig(
+            mode="step",
+            generator="arena",
+            seed=7,
+            chunk_size=8,
+            window_radius=1,
+            lookahead_margin=2,
+            barrier_distance=0.0,
+        )
+        gen = ArenaGenerator(seed=config.seed, chunk_size=config.chunk_size)
+        backend = VoxelBackend(config, gen)
+        backend.reset(episode_id=0)
+
+        action = Action(
+            env_ids=np.array([0], dtype=np.int32),
+            linear_velocity=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            angular_velocity=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            policy_id="test-policy",
+            step_id=1,
+            timestamp=time.time(),
+        )
+
+        # Force truncation quickly, then next call should return reset observation with episode+1.
+        backend._max_steps_per_episode = 1  # type: ignore[attr-defined]
+        _dm1, result1 = backend.step(action, step_id=1)
+        assert result1.truncated is True
+        assert result1.episode_id == 0
+
+        dm2, result2 = backend.step(action, step_id=2)
+        assert result2.env_id == 0
+        assert result2.episode_id == 1
+        assert dm2.episode_id == 1
 
     def test_multiple_steps_advance_pose(self) -> None:
         """Multiple steps should move the robot forward."""

@@ -221,6 +221,7 @@ class HabitatBackend(SimulatorBackend):
         result = StepResult(
             step_id=step_id,
             env_id=actor_id,
+            episode_id=self._episode_id,
             done=done,
             truncated=truncated,
             reward=reward,

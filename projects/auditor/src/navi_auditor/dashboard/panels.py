@@ -174,11 +174,11 @@ class RollingPlot(pg.PlotWidget):
 
 
 class StatusBar(QtWidgets.QFrame):
-    """Horizontal status bar with mode indicator, telemetry readouts, and stream health."""
+    """Minimal status bar with mode indicator and compact metrics."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(36)
+        self.setFixedHeight(44)
         self.setStyleSheet(
             "QFrame { background: #0d0d1a; border-bottom: 1px solid #333; }"
         )
@@ -190,84 +190,30 @@ class StatusBar(QtWidgets.QFrame):
         # Mode indicator
         self._mode_label = QtWidgets.QLabel("[ OBSERVER ]")
         self._mode_label.setStyleSheet(
-            "color: #aaa; font-weight: bold; font-size: 12px; padding: 2px 8px;"
+            "color: #aaa; font-weight: 700; font-size: 14px; padding: 2px 8px;"
         )
         layout.addWidget(self._mode_label)
 
-        # Step / Pose
-        self._step_label = QtWidgets.QLabel("step=—")
-        self._step_label.setStyleSheet("color: #ccc; font-size: 11px;")
-        layout.addWidget(self._step_label)
-
-        self._pose_label = QtWidgets.QLabel("pose=(—)")
-        self._pose_label.setStyleSheet("color: #ccc; font-size: 11px;")
-        layout.addWidget(self._pose_label)
-
-        # Velocity readout
-        self._vel_label = QtWidgets.QLabel("vel=—")
-        self._vel_label.setStyleSheet("color: #ccc; font-size: 11px;")
-        layout.addWidget(self._vel_label)
-
-        # Nearest obstacle
-        self._obstacle_label = QtWidgets.QLabel("nearest=—")
-        self._obstacle_label.setStyleSheet("color: #ccc; font-size: 11px;")
-        layout.addWidget(self._obstacle_label)
-
-        # Stream health
-        self._stream_label = QtWidgets.QLabel("stream=—")
-        self._stream_label.setStyleSheet("color: #0c0; font-size: 11px;")
-        layout.addWidget(self._stream_label)
-
-        # Lag indicator
-        self._lag_label = QtWidgets.QLabel("lag=—")
-        self._lag_label.setStyleSheet("color: #aaa; font-size: 11px;")
-        layout.addWidget(self._lag_label)
+        self._metrics_label = QtWidgets.QLabel("stall=-- | sps=-- | ema=-- | ep=0 | step=--")
+        self._metrics_label.setStyleSheet(
+            "color: #d5dde8; font-weight: 700; font-size: 14px; padding: 2px 4px;"
+        )
+        layout.addWidget(self._metrics_label)
 
         layout.addStretch()
-
-    def set_lag(self, lag_ms: float) -> None:
-        """Update lag indicator with colour coding."""
-        color = "#0c0" if lag_ms < 16.0 else "#fa0" if lag_ms < 33.0 else "#f00"
-        self._lag_label.setStyleSheet(f"color: {color}; font-size: 11px;")
-        self._lag_label.setText(f"lag={lag_ms:.1f}ms")
 
     def set_mode(self, mode: str) -> None:
         """Update mode indicator text and colour."""
         styles: dict[str, str] = {
-            "OBSERVER": "color: #aaa; font-weight: bold; font-size: 12px; padding: 2px 8px;",
-            "MANUAL": "color: #f0ad4e; font-weight: bold; font-size: 12px; padding: 2px 8px; background: #332200;",
-            "TRAINING": "color: #5bc0de; font-weight: bold; font-size: 12px; padding: 2px 8px; background: #002233;",
+            "OBSERVER": "color: #aaa; font-weight: 700; font-size: 14px; padding: 2px 8px;",
+            "MANUAL": "color: #f0ad4e; font-weight: 700; font-size: 14px; padding: 2px 8px; background: #332200;",
+            "TRAINING": "color: #5bc0de; font-weight: 700; font-size: 14px; padding: 2px 8px; background: #002233;",
         }
         self._mode_label.setText(f"[ {mode} ]")
         self._mode_label.setStyleSheet(
             styles.get(mode, styles["OBSERVER"])
         )
 
-    def set_step(self, step_id: int) -> None:
-        """Update step counter."""
-        self._step_label.setText(f"step={step_id}")
-
-    def set_pose(self, x: float, y: float, z: float, yaw: float) -> None:
-        """Update pose readout."""
-        self._pose_label.setText(f"({x:.1f}, {y:.1f}, {z:.1f}) yaw={yaw:.2f}")
-
-    def set_velocity(self, linear: float, yaw_rate: float) -> None:
-        """Update velocity readout."""
-        self._vel_label.setText(f"fwd={linear:.2f} yaw={yaw_rate:.2f}")
-
-    def set_nearest_obstacle(self, distance_m: float) -> None:
-        """Update nearest obstacle distance with colour coding."""
-        color = "#f00" if distance_m < 0.5 else "#fa0" if distance_m < 1.5 else "#0c0"
-        self._obstacle_label.setStyleSheet(f"color: {color}; font-size: 11px;")
-        self._obstacle_label.setText(f"nearest={distance_m:.2f}m")
-
-    def set_stream_health(self, age_s: float) -> None:
-        """Update stream age indicator."""
-        if age_s < 0.25:
-            color, text = "#0c0", f"stream={age_s:.2f}s"
-        elif age_s < 1.0:
-            color, text = "#fa0", f"stream={age_s:.2f}s"
-        else:
-            color, text = "#f00", f"stream={age_s:.1f}s"
-        self._stream_label.setStyleSheet(f"color: {color}; font-size: 11px;")
-        self._stream_label.setText(text)
+    def set_metrics_text(self, text: str) -> None:
+        """Update compact telemetry details rendered beside mode."""
+        self._metrics_label.setText(text)

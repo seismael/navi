@@ -14,7 +14,60 @@ depth observations into continuous 4-DOF velocity commands. This pipeline is
 **sacred and immutable** — it is never modified to accommodate new data sources
 or sensor types. External data connects only through `DatasetAdapter` instances
 in `environment/backends/` that transform raw observations *to* the
-engine's canonical `(B, 2, Az, El)` input format.
+engine's canonical `(B, 3, Az, El)` input format.
+
+The active performance migration for Navi does **not** replace this brain.
+Compiler/runtime upgrades are directed below the actor boundary:
+
+- `projects/voxel-dag` compiles source meshes into `.gmdag` caches.
+- `projects/torch-sdf` executes batched CUDA sphere tracing against those caches.
+- `projects/environment` adapts the result back into canonical `DistanceMatrix`
+  tensors that the Actor already consumes.
+
+### 1.1. Canonical Launch Commands
+
+Actor runtime and training entrypoints are standardized:
+
+```bash
+# Runtime service (step mode)
+uv run navi-actor serve --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
+
+# Shortcut command (equivalent to serve)
+uv run brain
+
+# Canonical training on the compiled-path runtime
+uv run navi-actor train
+```
+
+Canonical repository-root wrappers mirror the same runtime:
+
+```powershell
+./scripts/train.ps1
+./scripts/train-all-night.ps1
+./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560
+```
+
+By default, canonical training discovers all available dataset scenes,
+prepares the required compiled `.gmdag` corpus, and runs continuously until
+the user explicitly requests a scene-specific or time-bounded override.
+
+See [TRAINING.md](TRAINING.md) for the overnight training and dashboard attach workflow.
+
+### 1.1.1. Canonical Training Surface
+
+`train` is the single canonical actor training entrypoint. It means direct in-process stepping of
+`SdfDagBackend` for the fastest deterministic rollout path. Alternate training
+architectures are intentionally removed rather than preserved as equal modes.
+
+The canonical training default is corpus-driven, not sample-driven: if the user
+does not request a specific scene or subset, `train` must use the full
+discovered dataset corpus.
+
+The remaining performance work is now entirely inside this canonical path:
+reduce the remaining CPU episodic-memory boundary and replace per-actor Python
+transition assembly with indexed rollout storage in the canonical hot loop.
+
+### 1.2. Pipeline Dataflow
 
 ```text
 DistanceMatrix v2
@@ -33,7 +86,7 @@ DistanceMatrix v2
      ▼       ▼        ▼
   ┌──────┐ ┌──────┐ ┌───────────────────┐
   │2. RND│ │3. Ep.│ │                   │
-  │Module│ │Memory│ │4. Mamba2 Temporal  │
+  │Module│ │Memory│ │4. Temporal Core     │
   └──┬───┘ └──┬───┘ │   Core            │
      │        │     │   z_t → f_t       │
      │        │     └────────┬──────────┘
@@ -52,7 +105,10 @@ DistanceMatrix v2
 
 **Module:** `cognitive_policy.py` — `CognitiveMambaPolicy` composes the
 encoder, temporal core, and actor-critic heads as a single `nn.Module`. RND and
-episodic memory operate externally on $z_t$ during training.
+episodic memory operate externally on $z_t$ during training. The policy API is
+intentionally insulated from simulator upgrades: diagnostic voxel/mesh/habitat
+paths and the canonical SDF/DAG backend all converge on the same
+`DistanceMatrix` contract.
 
 ---
 
@@ -120,17 +176,17 @@ $$\mathcal{L}_{RND} = \mathbb{E}\left[\|f_{target}(z_t) - f_{predictor}(z_t)\|^2
 A non-parametric KNN memory buffer that detects revisited spatial states,
 solving the infinite-looping failure mode inherent to standard Markovian RL.
 
-**Data structure:** When FAISS is available, uses `faiss.IndexFlatIP` (CPU
-inner-product index) over L2-normalized embeddings — equivalent to cosine
-similarity. Falls back to brute-force numpy dot products when FAISS is not
-installed.
+**Data structure:** Canonical training uses a tensor-native cosine-similarity
+ring buffer. Spatial embeddings remain on the policy device, the newest
+`exclusion_window` entries are skipped, and the oldest entries are overwritten
+in fixed-capacity FIFO order.
 
 **Parameters:**
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `embedding_dim` | 128 | Dimensionality of stored embeddings |
-| `capacity` | 10,000 | Maximum embeddings retained per episode |
+| `capacity` | 100,000 | Maximum embeddings retained per episode |
 | `exclusion_window` | 50 | Most recent entries skipped when querying (avoids trivial self-match) |
 | `similarity_threshold` | 0.85 | Cosine similarity above which a loop is declared |
 
@@ -138,10 +194,24 @@ installed.
 
 - `reset()` — Clear all stored embeddings (called at episode start).
 - `add(embedding)` — Store an L2-normalized embedding. Evicts oldest entry
-  when capacity is reached (FIFO). FAISS index is rebuilt on eviction.
+  when capacity is reached (FIFO). Capacity enforcement must remain amortized;
+  the canonical runtime may rebuild or compact lazily, but not on every insert
+  after the buffer is full.
 - `query(embedding) → (similarity, matched_embedding, is_loop)` — Search
   the first `N - exclusion_window` entries. Returns max cosine similarity,
   the closest historical embedding (or `None`), and a boolean loop flag.
+
+### 4.1. Runtime Performance Rule
+
+When the environment is accelerated by compiled SDF/DAG stepping, episodic
+memory and rollout bookkeeping can become the dominant bottleneck. Canonical
+actor training therefore treats episodic memory as a hot-path subsystem:
+
+- capacity eviction must stay amortized,
+- queries must operate on the active searchable window without per-step full
+  structure rebuilds,
+- trainer telemetry should separate memory, transport, and transition overhead
+  so regressions can be attributed quickly.
 
 **Loop penalty integration:** When `is_loop` is `True`, the `RewardShaper`
 applies a penalty proportional to `max(0, similarity - threshold)`. This
@@ -149,20 +219,18 @@ instantly repels the agent from cyclical paths.
 
 ---
 
-## 5. Mamba2 Temporal Core — Sequence Engine
+## 5. Temporal Core — Sequence Engine
 
 **Module:** `mamba_core.py`
 
-Replaces standard RNNs (GRUs) and Transformer attention with a Selective State
-Space Model (SSM), providing infinite-horizon temporal memory with $O(n)$
-linear-time complexity.
+Current canonical runtime uses `mambapy` Mamba for temporal sequence modeling on
+native Windows CUDA in this workstation profile.
 
-**Dual-mode implementation:**
+**Current canonical runtime (Mar 2026):**
 
-- **Primary:** `mamba_ssm.Mamba2` when the `mamba-ssm` package is installed.
-  Parameters: `d_model=128`, `d_state=64`, `d_conv=4`, `expand=2`.
-- **Fallback:** Single-layer `nn.GRU` with `batch_first=True` when `mamba-ssm`
-  is unavailable.
+- `mambapy.mamba.Mamba` with parameters `d_model=128`, `d_state=64`, `d_conv=4`, `expand=2`.
+- Sequence residual + normalization: `LayerNorm(core(z_seq) + z_seq)`.
+- `forward_step` wraps single tokens as sequence length 1 for online inference.
 
 **Selective filtering mechanism:** The SSM's learned matrices $A$ and $B$
 mathematically learn to filter redundant spatial frames (e.g., staring at a
@@ -177,13 +245,10 @@ much of each input token influences the state transition.
 - **Residual connection:** Output = `LayerNorm(core(z_seq) + z_seq)`.
 - **Output:** $f_t \in \mathbb{R}^{B \times D}$ temporal features.
 
-**Online inference:** `forward_step(z_t, hidden)` wraps a single embedding as
-a length-1 sequence for step-by-step inference in the server loop. Hidden state
-management:
+**Migration note (active):**
 
-- Mamba2: stateless in training (full sequence at once); uses internal cache for
-  single-step inference.
-- GRU fallback: explicit `(1, B, D)` hidden state tensor, passed between steps.
+- Canonical temporal backend is now selected by benchmark, not by optional runtime fallback.
+- Candidate bake-off harnesses are allowed during migration, but production runtime remains single-path canonical.
 
 ---
 
@@ -276,11 +341,23 @@ hyperparameter sweeps without code changes.
 
 ## 8. Training Loop
 
-### 8.1. PpoTrainer — Proximal Policy Optimization
+### 8.1. PpoTrainer — Canonical PPO Runtime
 
 **Module:** `training/ppo_trainer.py`
 
-Synchronous step-mode PPO with BPTT-aware sequential minibatch sampling.
+Single canonical PPO runtime with direct in-process `sdfdag` stepping and
+BPTT-aware sequential minibatch sampling.
+
+Current canonical runtime status:
+
+- initial rollout seeding uses tensor-native `reset_tensor()` observations
+- rollout stepping prefers tensor-native `batch_step_tensor_actions()`
+- reward shaping, episodic memory, and rollout buffer appends stay batched and
+  tensor-native on the canonical path
+- CPU `DistanceMatrix` or action materialization remains only for low-volume
+  dashboard publication and telemetry
+- PPO updates run inline at rollout boundaries; the old async optimizer path
+  is no longer part of the canonical runtime
 
 **Training cycle:**
 
@@ -296,7 +373,8 @@ Synchronous step-mode PPO with BPTT-aware sequential minibatch sampling.
    - Value loss with clipping.
    - Entropy bonus: $\mathcal{L}_{entropy} = -c_{ent} \cdot H[\pi]$.
    - RND distillation loss: $\mathcal{L}_{RND}$.
-4. Publish 13 telemetry metrics and high-fidelity performance diagnostics via `telemetry_event_v2`.
+4. Publish 13 actor telemetry metrics plus coarse canonical runtime perf via
+  `environment.sdfdag.perf`.
 
 **High-Fidelity Performance Metrics:**
 
@@ -306,7 +384,7 @@ Synchronous step-mode PPO with BPTT-aware sequential minibatch sampling.
 | `fwd_ms` | Inference latency (Ray-ViT forward pass) |
 | `env_ms` | Simulation latency (Batch raycasting) |
 | `mem_ms` | Episodic memory query latency |
-| `zw_ratio` | Zero-wait ratio (overlap of sim and optimization) |
+| `zw_ratio` | Coordination indicator; canonical inline PPO updates should keep this near `0%` |
 
 **Telemetry metrics published per update:**
 
@@ -339,11 +417,11 @@ optimization begins.
 
 ## 9. Single Pipeline Invariant
 
-All training modes (`train`, `train-sequential`, `train-parallel`) use a
-single end-to-end pipeline: **CognitiveMambaPolicy** (§1–§6).
+The canonical trainer (`train`) uses one end-to-end pipeline:
+**CLI-level `SdfDagBackend` wiring -> `PpoTrainer` -> `CognitiveMambaPolicy`**.
 
-There are no alternative policy implementations. The sacred cognitive pipeline
-is the only policy in the actor package:
+There are no alternative trainer modes or policy implementations. The sacred
+cognitive pipeline is the only policy in the actor package:
 
 - `act(obs, step_id, hidden)` — inference-mode action selection.
 - `forward(obs_tensor, hidden)` — training forward pass (sample + value).
@@ -362,11 +440,26 @@ action selection.
 
 ## 10. Roadmap
 
-### 10.1. GPU FAISS Episodic Memory
+### 10.1. Tensor-Native Episodic Memory
 
-Migration from CPU `faiss.IndexFlatIP` to `faiss.StandardGpuResources` for
-VRAM-locked KNN lookups. Eliminates PCIe bus latency during rollout, achieving
-the "no stall" guarantee for memory queries.
+Canonical training now keeps episodic-memory query/add operations on tensors so
+loop-detection embeddings stay on the same device as the policy rollout.
+Remaining memory work is limited to profiling and scaling, not FAISS migration.
+
+### 10.0. Tensor-Native Canonical Rollout (Completed)
+
+The canonical trainer now keeps the rollout path tensor-native in the intended
+order:
+
+1. tensor-native environment runtime seam
+2. tensor-native trainer observation path
+3. tensor-native action stepping
+4. batched reward shaping and rollout storage
+5. tensor-native episodic memory
+
+Low-volume `DistanceMatrix` publication remains available for dashboard and
+telemetry observability, but it is no longer part of the canonical rollout hot
+path.
 
 ### 10.2. Ray-ViT Encoder
 
@@ -375,11 +468,12 @@ foveated (variable-density) ray sequences. Each ray or angular cluster becomes
 a sequence token with absolute $(\theta, \phi)$ positional encoding. Multi-head
 attention resolves spatial topology without the rigid 2D grid assumption of CNNs.
 
-### 10.3. Async Double-Buffered Training
+### 10.3. Canonical Inline PPO Updates
 
-Dual-`TrajectoryBuffer` implementation with thread bifurcation — optimization
-thread runs BPTT while the simulation thread continues rollout on a secondary
-buffer with zero wait.
+Canonical training now performs PPO updates inline at rollout boundaries. This
+keeps one measured runtime only, preserves the tensor-native rollout path, and
+avoids the coordination regressions that appeared once the background optimizer
+thread stopped being net beneficial.
 
 ### 10.4. FlashAttention IO Fusion for Mamba2
 
@@ -387,3 +481,18 @@ Hardware-aware SRAM IO fusion for the Mamba2 core: load hidden state $h_t$ from
 GPU SRAM, compute the selective state transition, and write back to SRAM without
 touching global GPU memory. This eliminates memory bandwidth bottlenecks in the
 temporal pipeline.
+
+---
+
+## 11. Operational Validation Baseline (Mar 2026)
+
+This section records durable runtime guarantees for the current canonical actor
+path on native Windows CUDA.
+
+- **Canonical temporal runtime:** `Mamba2TemporalCore` with `mambapy` is the active production path.
+- **Canonical startup evidence:** actor logs emit `Mamba2TemporalCore: canonical mambapy runtime active`.
+- **CUDA-only training policy:** PPO trainer fails fast if CUDA is unavailable or CUDA kernel preflight fails.
+- **CUDA startup evidence:** trainer logs explicit preflight details (`device`, `capability`, CUDA version).
+- **Launcher lifecycle policy:** `run-ghost-stack -Train -NoDashboard` waits for natural train completion and no longer exits after startup-only logs.
+- **Training readiness policy:** training socket readiness wait uses a 60-second timeout window in stack launcher checks.
+- **Checkpoint schedule robustness:** checkpoint saves are interval-crossing based (not modulo-only), avoiding missed saves when step increments skip exact boundaries.

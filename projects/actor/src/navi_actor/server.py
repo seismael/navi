@@ -107,16 +107,21 @@ class ActorServer:
         cfg = self._config
 
         sub_socket = self._context.socket(zmq.SUB)
+        sub_socket.setsockopt(zmq.RCVHWM, 500)
+        sub_socket.setsockopt(zmq.LINGER, 0)
         sub_socket.connect(cfg.sub_address)
         sub_socket.setsockopt(zmq.SUBSCRIBE, TOPIC_DISTANCE_MATRIX.encode("utf-8"))
         self._sub_socket = sub_socket
 
         pub_socket = self._context.socket(zmq.PUB)
+        pub_socket.setsockopt(zmq.SNDHWM, 500)
+        pub_socket.setsockopt(zmq.LINGER, 0)
         pub_socket.bind(cfg.pub_address)
         self._pub_socket = pub_socket
 
         if cfg.mode == "step":
             step_socket = self._context.socket(zmq.REQ)
+            step_socket.setsockopt(zmq.LINGER, 0)
             step_socket.connect(cfg.step_endpoint)
             self._step_socket = step_socket
 
@@ -213,6 +218,7 @@ class ActorServer:
                 # ── Step mode: REQ/REP with Environment ──────────
                 if self._config.mode == "step" and self._step_socket is not None:
                     result = self.step(action)
+                    actor_id = int(action.env_ids[0]) if len(action.env_ids) > 0 else 0
                     # Reset hidden state on episode boundaries
                     if self._stateful and (result.done or result.truncated):
                         self._hidden_state = None
@@ -231,6 +237,8 @@ class ActorServer:
                                 ],
                                 dtype=np.float32,
                             ),
+                            env_id=actor_id,
+                            episode_id=result.episode_id,
                         )
                         # Compute features only when publishing
                         features = extract_spherical_features(msg)
@@ -238,6 +246,8 @@ class ActorServer:
                             "actor.inference.features",
                             action.step_id,
                             features,
+                            env_id=actor_id,
+                            episode_id=result.episode_id,
                         )
                     # Always publish step_result (reward chart needs it)
                     self._publish_telemetry(
@@ -252,6 +262,8 @@ class ActorServer:
                             ],
                             dtype=np.float32,
                         ),
+                        env_id=result.env_id,
+                        episode_id=result.episode_id,
                     )
                 else:
                     self._step_counter += 1
@@ -284,15 +296,21 @@ class ActorServer:
     # ── Telemetry helpers ────────────────────────────────────────────
 
     def _publish_telemetry(
-        self, event_type: str, step_id: int, payload: np.ndarray,
+        self,
+        event_type: str,
+        step_id: int,
+        payload: np.ndarray,
+        *,
+        env_id: int = 0,
+        episode_id: int = 0,
     ) -> None:
         """Serialize and publish a single telemetry event (non-blocking)."""
         if self._pub_socket is None:
             return
         event = TelemetryEvent(
             event_type=event_type,
-            episode_id=0,
-            env_id=0,
+            episode_id=episode_id,
+            env_id=env_id,
             step_id=step_id,
             payload=payload.astype(np.float32, copy=False),
             timestamp=time.time(),

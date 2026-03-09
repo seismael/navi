@@ -59,18 +59,18 @@ class TestMeshSceneBackend:
     def test_observation_shapes(self) -> None:
         b = _make_backend(az=32, el=16)
         obs = b.reset(0)
-        # Defaults from .env override init args (128x24)
-        assert obs.depth.shape == (1, 128, 24)
-        assert obs.delta_depth.shape == (1, 128, 24)
-        assert obs.semantic.shape == (1, 128, 24)
-        assert obs.valid_mask.shape == (1, 128, 24)
-        assert obs.matrix_shape == (128, 24)
+        # Canonical defaults from config/.env override init args (256x48)
+        assert obs.depth.shape == (1, 256, 48)
+        assert obs.delta_depth.shape == (1, 256, 48)
+        assert obs.semantic.shape == (1, 256, 48)
+        assert obs.valid_mask.shape == (1, 256, 48)
+        assert obs.matrix_shape == (256, 48)
 
     def test_full_valid_mask(self) -> None:
         """Inside a closed room, all rays should hit geometry."""
         b = _make_backend(az=32, el=16)
         obs = b.reset(0)
-        assert obs.valid_mask.sum() == 128 * 24
+        assert obs.valid_mask.sum() == 256 * 48
 
     def test_depth_normalised_zero_one(self) -> None:
         b = _make_backend(az=32, el=16)

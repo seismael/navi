@@ -1,10 +1,8 @@
-"""Ghost-Matrix RL Dashboard — PyQtGraph/Qt6 main application.
+"""Ghost-Matrix RL Dashboard — single selected actor view.
 
-GPU-accelerated, dockable-panel layout with real-time RL training
-curves, depth-mapped colormaps, and live occupancy map.
-
-Provides a two-panel spatial view (Live Map + Raw Depth) on the left
-and a dense two-column chart grid of training metrics on the right.
+The dashboard is intentionally visual-only: it renders one live actor
+depth view with mode/status indication. By default actor 0 is shown for
+scalability. Optional selector mode can be enabled to switch actor.
 """
 
 from __future__ import annotations
@@ -15,18 +13,15 @@ import cv2
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from navi_auditor.dashboard.occupancy_view import OccupancyMap
 from navi_auditor.dashboard.panels import (
     ImagePanel,
-    RollingPlot,
     StatusBar,
 )
 from navi_auditor.dashboard.renderers import (
-    VIEW_RANGE_M,
     add_orientation_guides,
-    compute_nav_metrics,
     depth_to_viridis,
 )
+from navi_auditor.dashboard.status_line import build_status_metrics_line
 from navi_auditor.stream_engine import StreamEngine
 
 __all__: list[str] = ["GhostMatrixDashboard"]
@@ -36,12 +31,13 @@ _FOV_FRACTION: float = 120.0 / 360.0
 
 
 class GhostMatrixDashboard(QtWidgets.QMainWindow):
-    """High-performance real-time RL training visualiser.
+    """High-performance real-time selected-actor visualiser.
 
     Parameters
     ----------
     matrix_sub
-        ZMQ SUB address for Environment PUB (distance_matrix_v2).
+        Optional ZMQ SUB address for Environment PUB (distance_matrix_v2).
+        Leave empty in passive actor-only training mode.
     actor_sub
         ZMQ SUB address for Actor/Trainer PUB (action_v2, telemetry).
     step_endpoint
@@ -56,9 +52,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
     def __init__(
         self,
-        matrix_sub: str,
+        matrix_sub: str = "",
         actor_sub: str = "",
         step_endpoint: str = "",
+        actor_id: int = 0,
+        enable_actor_selector: bool = False,
         hz: float = 30.0,
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
@@ -70,13 +68,15 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self.setStyleSheet("QMainWindow { background: #0d0d1a; }")
 
         self._known_actors: list[int] = []
-        self._active_actor: int = -1  # None selected yet
+        self._selected_actor: int = actor_id
+        self._enable_actor_selector = enable_actor_selector
 
         # Stream engine
         self._engine = StreamEngine(
             matrix_sub=matrix_sub,
             actor_sub=actor_sub,
             step_endpoint=step_endpoint,
+            selected_actor_id=None if enable_actor_selector else actor_id,
         )
 
         # Teleop state
@@ -89,8 +89,8 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         # ── build UI ─────────────────────────────────────────────────
         self._status_bar = StatusBar()
+        self._actor_panel = ImagePanel(title="LIVE ACTOR")
         self._build_layout()
-        self._wire_plots()
 
         # ── tick timer ───────────────────────────────────────────────
         self._tick_ms = max(1, int(1000.0 / max(1.0, hz)))
@@ -101,7 +101,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
     # ── layout construction ──────────────────────────────────────────
 
     def _build_layout(self) -> None:
-        """Build the main window layout: spatial views left, 2-col charts right."""
+        """Build the main window layout with one selected actor view."""
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main_layout = QtWidgets.QVBoxLayout(central)
@@ -111,295 +111,90 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Top status bar
         main_layout.addWidget(self._status_bar)
 
-        # Actor selection (ComboBox)
-        self._actor_selector = QtWidgets.QComboBox()
-        self._actor_selector.setStyleSheet(
-            "QComboBox { background: #1a1a2e; color: #fff; border: 1px solid #333; "
-            "padding: 5px; border-radius: 4px; min-width: 120px; font-weight: bold; } "
-            "QComboBox::drop-down { border: none; } "
-            "QComboBox QAbstractItemView { background: #1a1a2e; color: #fff; selection-background-color: #2e86de; }"
-        )
-        self._actor_selector.currentIndexChanged.connect(self._on_actor_selector_changed)
+        if self._enable_actor_selector:
+            self._actor_selector = QtWidgets.QComboBox()
+            self._actor_selector.setStyleSheet(
+                "QComboBox { background: #1a1a2e; color: #fff; border: 1px solid #333; "
+                "padding: 5px; border-radius: 4px; min-width: 120px; font-weight: bold; } "
+                "QComboBox::drop-down { border: none; } "
+                "QComboBox QAbstractItemView { background: #1a1a2e; color: #fff; selection-background-color: #2e86de; }"
+            )
+            self._actor_selector.currentIndexChanged.connect(self._on_actor_selector_changed)
 
-        selector_container = QtWidgets.QWidget()
-        selector_layout = QtWidgets.QHBoxLayout(selector_container)
-        selector_layout.setContentsMargins(10, 5, 10, 5)
-        selector_layout.addWidget(QtWidgets.QLabel("VIEWING ACTOR:"))
-        selector_layout.addWidget(self._actor_selector)
-        selector_layout.addStretch()
+            selector_container = QtWidgets.QWidget()
+            selector_layout = QtWidgets.QHBoxLayout(selector_container)
+            selector_layout.setContentsMargins(10, 5, 10, 5)
+            selector_layout.addWidget(QtWidgets.QLabel("ACTOR:"))
+            selector_layout.addWidget(self._actor_selector)
+            selector_layout.addStretch()
+            main_layout.addWidget(selector_container)
 
-        main_layout.addWidget(selector_container)
+        main_layout.addWidget(self._actor_panel, stretch=1)
 
-        # Body: splitter with left (spatial views) and right (chart grid)
-        body = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        main_layout.addWidget(body, stretch=1)
-
-        # ── Left: stacked spatial views (~30%) ───────────────────────
-        view_container = QtWidgets.QWidget()
-        view_layout = QtWidgets.QVBoxLayout(view_container)
-        view_layout.setContentsMargins(2, 2, 2, 2)
-        view_layout.setSpacing(2)
-
-        # Live 2D Occupancy Map (with optional blueprint floor-plan)
-        self._occ_map = OccupancyMap(
-            max_distance=15.0, scene_path=self._scene_path,
-        )
-        self._env_panel = ImagePanel(title="LIVE MAP")
-        view_layout.addWidget(self._env_panel, stretch=1)
-
-        # Raw Depth (Viridis)
-        self._depth_panel = ImagePanel(title="RAW DEPTH (Viridis)")
-        view_layout.addWidget(self._depth_panel, stretch=1)
-
-        body.addWidget(view_container)
-
-        # ── Right: 2-column training metric chart grid (~70%) ────────
-        chart_scroll = QtWidgets.QScrollArea()
-        chart_scroll.setWidgetResizable(True)
-        chart_scroll.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
-        )
-        chart_scroll.setStyleSheet(
-            "QScrollArea { border: none; background: #0d0d1a; }"
-        )
-
-        chart_container = QtWidgets.QWidget()
-        chart_grid = QtWidgets.QGridLayout(chart_container)
-        chart_grid.setContentsMargins(2, 2, 2, 2)
-        chart_grid.setSpacing(3)
-
-        # Create all plots
-        self._plot_reward_ema = RollingPlot(
-            title="Reward EMA", color="#2e86de",
-        )
-        self._plot_reward = RollingPlot(title="Step Reward", color="#2e86de")
-        self._plot_episode_return = RollingPlot(
-            title="Episode Return", color="#8e44ad",
-        )
-        self._plot_episode_len = RollingPlot(
-            title="Episode Length", color="#1abc9c",
-        )
-        self._plot_collision = RollingPlot(
-            title="Done / Collision", color="#e74c3c",
-        )
-        self._plot_forward = RollingPlot(
-            title="Forward Velocity", color="#27ae60",
-        )
-        self._plot_yaw = RollingPlot(title="Yaw Rate", color="#f39c12")
-        self._plot_front_depth = RollingPlot(
-            title="Front Depth (min)", color="#3498db",
-        )
-        self._plot_mean_depth = RollingPlot(title="Mean Depth", color="#e67e22")
-        self._plot_near_fraction = RollingPlot(
-            title="Near-Object Fraction", color="#e74c3c",
-        )
-        self._plot_policy_loss = RollingPlot(
-            title="Policy Loss", color="#9b59b6",
-        )
-        self._plot_value_loss = RollingPlot(
-            title="Value Loss", color="#e67e22",
-        )
-        self._plot_entropy = RollingPlot(
-            title="Entropy", color="#1abc9c",
-        )
-        self._plot_kl = RollingPlot(
-            title="Approx KL", color="#e74c3c",
-        )
-        self._plot_clip_fraction = RollingPlot(
-            title="Clip Fraction", color="#f39c12",
-        )
-        self._plot_rnd_loss = RollingPlot(
-            title="RND Loss", color="#3498db",
-        )
-        self._plot_intrinsic = RollingPlot(
-            title="Intrinsic Reward", color="#2ecc71",
-        )
-        self._plot_loop_sim = RollingPlot(
-            title="Loop Similarity", color="#e74c3c",
-        )
-        self._plot_beta = RollingPlot(
-            title="Beta (intrinsic coeff)", color="#9b59b6",
-        )
-        self._plot_lr = RollingPlot(
-            title="Learning Rate", color="#f1c40f",
-        )
-
-        # ── Performance Instrumentation charts ──
-        self._plot_sps = RollingPlot(
-            title="Steps/sec (SPS)", color="#2ecc71",
-        )
-        self._plot_forward_ms = RollingPlot(
-            title="Forward Pass (ms)", color="#e74c3c",
-        )
-        self._plot_batch_step_ms = RollingPlot(
-            title="Batch Step (ms)", color="#3498db",
-        )
-        self._plot_memory_ms = RollingPlot(
-            title="Memory Query (ms)", color="#f39c12",
-        )
-        self._plot_zero_wait = RollingPlot(
-            title="Zero-Wait Ratio", color="#9b59b6",
-        )
-        self._plot_opt_ms = RollingPlot(
-            title="PPO Update (ms)", color="#e67e22",
-        )
-
-        # Arrange in 2-column grid — most important charts at top
-        # Row 0: headline metrics
-        # Row 1-4: PPO training diagnostics
-        # Row 5+: sensor / navigation metrics
-        chart_pairs: list[tuple[RollingPlot, RollingPlot]] = [
-            (self._plot_reward_ema, self._plot_episode_return),
-            (self._plot_policy_loss, self._plot_value_loss),
-            (self._plot_entropy, self._plot_kl),
-            (self._plot_clip_fraction, self._plot_rnd_loss),
-            (self._plot_reward, self._plot_collision),
-            (self._plot_episode_len, self._plot_forward),
-            (self._plot_yaw, self._plot_front_depth),
-            (self._plot_mean_depth, self._plot_near_fraction),
-            (self._plot_intrinsic, self._plot_loop_sim),
-            (self._plot_sps, self._plot_zero_wait),
-            (self._plot_forward_ms, self._plot_batch_step_ms),
-            (self._plot_memory_ms, self._plot_opt_ms),
-            (self._plot_beta, self._plot_lr),
-        ]
-
-        chart_h = 110
-        for row, (left, right) in enumerate(chart_pairs):
-            left.setMinimumHeight(chart_h)
-            left.setMaximumHeight(chart_h * 2)
-            right.setMinimumHeight(chart_h)
-            right.setMaximumHeight(chart_h * 2)
-            chart_grid.addWidget(left, row, 0)
-            chart_grid.addWidget(right, row, 1)
-
-        chart_grid.setRowStretch(len(chart_pairs), 1)
-        chart_scroll.setWidget(chart_container)
-        body.addWidget(chart_scroll)
-
-        # Split ratios: ~30% spatial views, ~70% charts
-        body.setStretchFactor(0, 3)
-        body.setStretchFactor(1, 7)
-
-    def _wire_plots(self) -> None:
-        """Connect rolling plots to the active actor's stream state."""
-        if self._active_actor not in self._engine.actor_states:
+    def _refresh_selector(self) -> None:
+        """Refresh actor selector options from discovered stream actors."""
+        if not self._enable_actor_selector:
             return
+        discovered = sorted(self._engine.actor_states.keys())
+        if discovered != self._known_actors:
+            self._known_actors = discovered
+            self._actor_selector.blockSignals(True)
+            self._actor_selector.clear()
+            for actor_id in discovered:
+                self._actor_selector.addItem(f"Actor {actor_id}", actor_id)
+            idx = self._actor_selector.findData(self._selected_actor)
+            if idx >= 0:
+                self._actor_selector.setCurrentIndex(idx)
+            self._actor_selector.blockSignals(False)
 
-        state = self._engine.actor_states[self._active_actor]
-        self._plot_reward.set_data_from_deque(state.reward_history)
-        self._plot_episode_return.set_data_from_deque(state.episode_return_history)
-        self._plot_collision.set_data_from_deque(state.collision_history)
-        self._plot_episode_len.set_data_from_deque(state.episode_length_history)
-        self._plot_forward.set_data_from_deque(state.forward_cmd_history)
-        self._plot_yaw.set_data_from_deque(state.yaw_cmd_history)
-        self._plot_front_depth.set_data_from_deque(state.front_depth_history)
-        self._plot_mean_depth.set_data_from_deque(state.mean_depth_history)
-        self._plot_near_fraction.set_data_from_deque(state.near_fraction_history)
-        # PPO-specific metrics
-        self._plot_reward_ema.set_data_from_deque(state.ppo_reward_ema_history)
-        self._plot_policy_loss.set_data_from_deque(state.ppo_policy_loss_history)
-        self._plot_value_loss.set_data_from_deque(state.ppo_value_loss_history)
-        self._plot_entropy.set_data_from_deque(state.ppo_entropy_history)
-        self._plot_kl.set_data_from_deque(state.ppo_kl_history)
-        self._plot_clip_fraction.set_data_from_deque(
-            state.ppo_clip_fraction_history,
-        )
-        self._plot_rnd_loss.set_data_from_deque(state.ppo_rnd_loss_history)
-        self._plot_intrinsic.set_data_from_deque(
-            state.ppo_intrinsic_reward_history,
-        )
-        self._plot_loop_sim.set_data_from_deque(
-            state.ppo_loop_similarity_history,
-        )
-        self._plot_beta.set_data_from_deque(state.ppo_beta_history)
-        self._plot_lr.set_data_from_deque(state.ppo_lr_history)
-        # Performance instrumentation
-        self._plot_sps.set_data_from_deque(state.perf_sps_history)
-        self._plot_forward_ms.set_data_from_deque(state.perf_forward_ms_history)
-        self._plot_batch_step_ms.set_data_from_deque(
-            state.perf_batch_step_ms_history,
-        )
-        self._plot_memory_ms.set_data_from_deque(state.perf_memory_ms_history)
-        self._plot_zero_wait.set_data_from_deque(state.perf_zero_wait_history)
-        self._plot_opt_ms.set_data_from_deque(state.perf_opt_ms_history)
-
-    # ── actor selection ────────────────────────────────────────────
-
-    def _on_actor_selector_changed(self, index: int) -> None:
-        """Switch the displayed actor when drop-down selection changes."""
-        if 0 <= index < self._actor_selector.count():
-            actor_id = self._actor_selector.itemData(index)
-            if actor_id is not None:
-                self._active_actor = int(actor_id)
-                self._engine.set_active_actor(self._active_actor)
-                self._wire_plots()
+    def _on_actor_selector_changed(self, _index: int) -> None:
+        """Switch selected actor from UI selector."""
+        if not self._enable_actor_selector:
+            return
+        actor_id = self._actor_selector.currentData()
+        if actor_id is None:
+            return
+        self._selected_actor = int(actor_id)
+        self._engine.set_selected_actor(self._selected_actor)
 
     # ── tick / render loop ───────────────────────────────────────────
 
     def _tick(self) -> None:
         """Called every timer interval — poll ZMQ, update all panels."""
-        t_start = time.perf_counter()
-
         # Ingest capped ZMQ burst (Standard: UI Throughput)
         _msgs_processed = self._engine.poll(max_messages=100)
 
-        # Dynamic actor discovery
-        current_stream_actors = set(self._engine.actor_states.keys())
-        known_set = set(self._known_actors)
-        new_actors = sorted(current_stream_actors - known_set)
-
-        if new_actors:
-            for actor_id in new_actors:
-                self._actor_selector.addItem(f"Actor {actor_id}", actor_id)
-                self._known_actors.append(actor_id)
-
-            # Auto-select the first one if none selected
-            if self._actor_selector.currentIndex() < 0 and self._known_actors:
-                self._actor_selector.setCurrentIndex(0)
-
-        if not self._known_actors:
+        self._refresh_selector()
+        state = self._engine.actor_states.get(self._selected_actor)
+        if state is None:
             self._status_bar.set_mode("WAITING")
+            self._status_bar.set_metrics_text(build_status_metrics_line(None))
             return
-
-        if self._active_actor not in self._engine.actor_states:
-            if not self._known_actors:
-                return
-            self._active_actor = self._known_actors[0]
-            self._wire_plots()
-
-        if self._active_actor not in self._engine.actor_states:
-            return
-
-        state = self._engine.actor_states[self._active_actor]
 
         # Determine mode (Standard: Mode Detection)
-        has_training_data = (len(state.reward_history) > 0 or
-                            len(state.ppo_reward_ema_history) > 0)
+        has_training_data = (len(state.reward_history) > 0 or len(state.ppo_reward_ema_history) > 0)
+        has_inference_data = state.latest_features is not None
 
         if self._manual_mode:
             mode = "MANUAL"
         elif has_training_data:
             mode = "TRAINING"
+        elif has_inference_data:
+            mode = "INFERENCE"
         else:
             mode = "OBSERVER"
         self._status_bar.set_mode(mode)
+        self._status_bar.set_metrics_text(
+            build_status_metrics_line(state, now=time.time()),
+        )
 
-        dm = state.latest_matrix
-        action = state.latest_action
+        if state.latest_matrix is not None:
+            self._update_actor_panel(self._actor_panel, state.latest_matrix)
 
-        if dm is not None:
-            self._update_spatial_panels(dm)
-            self._update_status(dm, action, state)
-
-        self._refresh_plots()
         self._handle_teleop()
 
-        lag_ms = (time.perf_counter() - t_start) * 1000.0
-        self._status_bar.set_lag(lag_ms)
-
-    def _update_spatial_panels(self, dm: object) -> None:
-        """Update spatial view panels: live occupancy map + raw depth."""
+    def _update_actor_panel(self, panel: ImagePanel, dm: object) -> None:
+        """Update one actor panel with depth-derived viridis view."""
         import numpy as np
 
         from navi_contracts import DistanceMatrix
@@ -417,89 +212,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         fov_depth = depth_2d[fov_lo:fov_hi, :]
         fov_valid = valid_2d[fov_lo:fov_hi, :]
 
-        # Live occupancy map — accumulate + render
-        p = dm.robot_pose
-        if p:
-            # Pass the original un-rolled matrix to OccupancyMap for world-space projection
-            self._occ_map.update(
-                dm.depth[0], dm.valid_mask[0], p.x, p.z, p.yaw, dm.episode_id,
-            )
-            occ_img = self._occ_map.render(480, 480)
-            self._env_panel.set_image(occ_img)
-
         # Raw depth (Viridis) — transpose to put Azimuth on X and Elevation on Y
         viridis_img = depth_to_viridis(fov_depth.T, fov_valid.T)
         viridis_resized = cv2.resize(
             viridis_img, (480, 360), interpolation=cv2.INTER_NEAREST,
         )
         add_orientation_guides(viridis_resized)
-        self._depth_panel.set_image(viridis_resized)
-
-
-    def _update_status(
-        self, dm: object, action: object, state: object,
-    ) -> None:
-        """Update status bar from latest data."""
-        from navi_auditor.stream_engine import StreamState
-        from navi_contracts import Action, DistanceMatrix
-
-        assert isinstance(dm, DistanceMatrix)
-        assert isinstance(state, StreamState)
-        p = dm.robot_pose
-        self._status_bar.set_step(dm.step_id)
-        self._status_bar.set_pose(p.x, p.y, p.z, p.yaw)
-
-        depth_2d = dm.depth[0]
-        valid_2d = dm.valid_mask[0]
-        az_bins = depth_2d.shape[0]
-        fov_bins = max(1, int(az_bins * _FOV_FRACTION))
-        centre_bin = az_bins // 2
-        fov_lo = centre_bin - fov_bins // 2
-        fov_hi = fov_lo + fov_bins
-        fov_depth = depth_2d[fov_lo:fov_hi, :]
-        fov_valid = valid_2d[fov_lo:fov_hi, :]
-
-        fwd, _left, _right = compute_nav_metrics(fov_depth, fov_valid)
-        self._status_bar.set_nearest_obstacle(fwd * VIEW_RANGE_M)
-
-        stale = max(0.0, time.time() - state.last_rx_time)
-        self._status_bar.set_stream_health(stale)
-
-        if isinstance(action, Action):
-            lin = float(action.linear_velocity[0, 0])
-            yaw = float(action.angular_velocity[0, 2])
-            self._status_bar.set_velocity(lin, yaw)
-
-    def _refresh_plots(self) -> None:
-        """Redraw all rolling training plots."""
-        self._plot_reward.refresh()
-        self._plot_episode_return.refresh()
-        self._plot_collision.refresh()
-        self._plot_episode_len.refresh()
-        self._plot_forward.refresh()
-        self._plot_yaw.refresh()
-        self._plot_front_depth.refresh()
-        self._plot_mean_depth.refresh()
-        self._plot_near_fraction.refresh()
-        # PPO-specific
-        self._plot_reward_ema.refresh()
-        self._plot_policy_loss.refresh()
-        self._plot_value_loss.refresh()
-        self._plot_entropy.refresh()
-        self._plot_kl.refresh()
-        self._plot_clip_fraction.refresh()
-        self._plot_rnd_loss.refresh()
-        self._plot_intrinsic.refresh()
-        self._plot_loop_sim.refresh()
-        self._plot_beta.refresh()
-        self._plot_lr.refresh()
-        # Performance instrumentation
-        self._plot_sps.refresh()
-        self._plot_forward_ms.refresh()
-        self._plot_batch_step_ms.refresh()
-        self._plot_memory_ms.refresh()
-        self._plot_zero_wait.refresh()
-        self._plot_opt_ms.refresh()
+        panel.set_image(viridis_resized)
 
     # ── teleop / keyboard control ────────────────────────────────────
 
@@ -567,9 +286,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
 
 def run_dashboard(
-    matrix_sub: str,
+    matrix_sub: str = "",
     actor_sub: str = "",
     step_endpoint: str = "",
+    actor_id: int = 0,
+    enable_actor_selector: bool = False,
     hz: float = 30.0,
     linear_speed: float = 1.5,
     yaw_rate: float = 1.5,
@@ -582,6 +303,8 @@ def run_dashboard(
         matrix_sub=matrix_sub,
         actor_sub=actor_sub,
         step_endpoint=step_endpoint,
+        actor_id=actor_id,
+        enable_actor_selector=enable_actor_selector,
         hz=hz,
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,

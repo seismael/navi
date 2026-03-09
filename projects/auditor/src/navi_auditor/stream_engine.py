@@ -8,6 +8,7 @@ ring-buffer state for the rendering layer.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from navi_contracts import (
 __all__: list[str] = ["StreamEngine", "StreamState"]
 
 _RING_LEN = 2000
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,46 +45,17 @@ class StreamState:
         default_factory=lambda: deque(maxlen=90),
     )
 
-    # Training step telemetry ring buffers
+    # Canonical training/inference ring buffers
     reward_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
-    advantage_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
     collision_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    novelty_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
     forward_cmd_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
     yaw_cmd_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    grad_norm_fwd_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    grad_norm_yaw_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-
-    # Evaluation-window telemetry ring buffers
-    eval_reward_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    eval_collision_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    eval_novelty_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    eval_coverage_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    eval_step_history: deque[int] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
 
@@ -189,6 +162,15 @@ class StreamState:
     perf_opt_ms_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
+    env_perf_sps_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    env_perf_batch_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
+    env_perf_actor_ms_history: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_RING_LEN),
+    )
 
     # Telemetry ring (raw events)
     telemetry_buffer: deque[TelemetryEvent] = field(
@@ -210,15 +192,25 @@ class StreamEngine:
 
     def __init__(
         self,
-        matrix_sub: str,
+        matrix_sub: str = "",
         actor_sub: str = "",
         step_endpoint: str = "",
         n_actors: int = 0,
+        selected_actor_id: int | None = 0,
     ) -> None:
         self._ctx: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._poller = zmq.Poller()
         self._actor_states: dict[int, StreamState] = {}
-        self._active_actor_id: int = 0
+        self._selected_actor_id: int | None = selected_actor_id
+
+        self._msg_total: int = 0
+        self._drop_total: int = 0
+        self._topic_counts: dict[str, int] = {
+            TOPIC_DISTANCE_MATRIX: 0,
+            TOPIC_ACTION: 0,
+            TOPIC_TELEMETRY_EVENT: 0,
+        }
+        self._last_diag_t: float = time.monotonic()
 
         # Pre-populate actor states if requested
         if n_actors > 0:
@@ -226,18 +218,24 @@ class StreamEngine:
                 self._actor_states[i] = StreamState()
 
         # Environment PUB socket
-        self._sock_matrix = self._ctx.socket(zmq.SUB)
-        self._sock_matrix.connect(matrix_sub)
-        for topic in (TOPIC_DISTANCE_MATRIX, TOPIC_TELEMETRY_EVENT):
-            self._sock_matrix.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
-        self._poller.register(self._sock_matrix, zmq.POLLIN)
+        self._sock_matrix: zmq.Socket[bytes] | None = None
+        if matrix_sub:
+            self._sock_matrix = self._ctx.socket(zmq.SUB)
+            self._sock_matrix.setsockopt(zmq.RCVHWM, 200)
+            self._sock_matrix.setsockopt(zmq.LINGER, 0)
+            self._sock_matrix.connect(matrix_sub)
+            for topic in (TOPIC_DISTANCE_MATRIX, TOPIC_TELEMETRY_EVENT):
+                self._sock_matrix.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
+            self._poller.register(self._sock_matrix, zmq.POLLIN)
 
         # Actor / Trainer PUB socket
         self._sock_actor: zmq.Socket[bytes] | None = None
         if actor_sub:
             self._sock_actor = self._ctx.socket(zmq.SUB)
+            self._sock_actor.setsockopt(zmq.RCVHWM, 200)
+            self._sock_actor.setsockopt(zmq.LINGER, 0)
             self._sock_actor.connect(actor_sub)
-            for topic in (TOPIC_ACTION, TOPIC_TELEMETRY_EVENT):
+            for topic in (TOPIC_DISTANCE_MATRIX, TOPIC_ACTION, TOPIC_TELEMETRY_EVENT):
                 self._sock_actor.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
             self._poller.register(self._sock_actor, zmq.POLLIN)
 
@@ -255,11 +253,6 @@ class StreamEngine:
 
         self._step_counter = 0
 
-    @property
-    def state(self) -> StreamState:
-        """Backward compatibility accessor for Actor 0."""
-        return self._resolve_state(0)
-
     # ── public API ───────────────────────────────────────────────────
 
     def poll(self, max_messages: int = 50) -> int:
@@ -274,13 +267,25 @@ class StreamEngine:
             if not socks:
                 break
 
-            if self._sock_matrix in socks:
+            if self._sock_matrix is not None and self._sock_matrix in socks:
                 count += self._recv_from(self._sock_matrix, limit=max_messages - count)
             if self._sock_actor is not None and self._sock_actor in socks:
                 count += self._recv_from(self._sock_actor, limit=max_messages - count)
 
             if not socks:
                 break
+        now = time.monotonic()
+        if now - self._last_diag_t >= 5.0:
+            _LOG.info(
+                "auditor.stream poll total=%d dropped=%d selected_actor=%s topics={dm:%d action:%d telem:%d}",
+                self._msg_total,
+                self._drop_total,
+                str(self._selected_actor_id),
+                self._topic_counts[TOPIC_DISTANCE_MATRIX],
+                self._topic_counts[TOPIC_ACTION],
+                self._topic_counts[TOPIC_TELEMETRY_EVENT],
+            )
+            self._last_diag_t = now
         return count
 
     def send_step_request(
@@ -325,13 +330,14 @@ class StreamEngine:
         """Whether manual stepping is available."""
         return self._sock_step is not None
 
-    def set_active_actor(self, actor_id: int) -> None:
-        """Set which actor's history to record (saves memory for others)."""
-        self._active_actor_id = actor_id
+    def set_selected_actor(self, actor_id: int | None) -> None:
+        """Set actor filter for ingestion (None = ingest all actors)."""
+        self._selected_actor_id = actor_id
 
     def close(self) -> None:
         """Tear down all sockets."""
-        self._sock_matrix.close()
+        if self._sock_matrix is not None:
+            self._sock_matrix.close()
         if self._sock_actor is not None:
             self._sock_actor.close()
         if self._sock_step is not None:
@@ -351,6 +357,9 @@ class StreamEngine:
             topic = topic_bytes.decode("utf-8")
             msg = deserialize(data)
             self._dispatch(topic, msg)
+            self._msg_total += 1
+            if topic in self._topic_counts:
+                self._topic_counts[topic] += 1
             count += 1
         return count
 
@@ -374,26 +383,31 @@ class StreamEngine:
         """Route a deserialized message to the appropriate per-actor state."""
         if topic == TOPIC_DISTANCE_MATRIX and isinstance(msg, DistanceMatrix):
             actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
+            if self._selected_actor_id is not None and actor_id != self._selected_actor_id:
+                self._drop_total += 1
+                return
             state = self._resolve_state(actor_id)
             state.latest_matrix = msg
             state.last_rx_time = time.time()
-            # Only record history for the active viewer
-            if actor_id == self._active_actor_id:
-                pose = msg.robot_pose
-                state.pose_history.append((pose.x, pose.z, pose.yaw))
+            pose = msg.robot_pose
+            state.pose_history.append((pose.x, pose.z, pose.yaw))
 
         elif topic == TOPIC_ACTION and isinstance(msg, Action):
             actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
+            if self._selected_actor_id is not None and actor_id != self._selected_actor_id:
+                self._drop_total += 1
+                return
             state = self._resolve_state(actor_id)
             state.latest_action = msg
 
         elif topic == TOPIC_TELEMETRY_EVENT and isinstance(msg, TelemetryEvent):
             actor_id = msg.env_id
+            if self._selected_actor_id is not None and actor_id != self._selected_actor_id:
+                self._drop_total += 1
+                return
             state = self._resolve_state(actor_id)
             state.telemetry_buffer.append(msg)
-            # Only record history for the active viewer
-            if actor_id == self._active_actor_id:
-                self._route_telemetry(msg, state)
+            self._route_telemetry(msg, state)
 
     def _route_telemetry(
         self, event: TelemetryEvent, state: StreamState,
@@ -402,24 +416,7 @@ class StreamEngine:
         et = event.event_type
         p = event.payload
 
-        if et == "actor.training.step" and len(p) >= 8:
-            state.reward_history.append(float(p[0]))
-            state.advantage_history.append(float(p[1]))
-            state.collision_history.append(float(p[2]))
-            state.novelty_history.append(float(p[3]))
-            state.forward_cmd_history.append(float(p[4]))
-            state.yaw_cmd_history.append(float(p[5]))
-            state.grad_norm_fwd_history.append(float(p[6]))
-            state.grad_norm_yaw_history.append(float(p[7]))
-
-        elif et == "actor.training.eval" and len(p) >= 4:
-            state.eval_step_history.append(event.step_id)
-            state.eval_reward_history.append(float(p[0]))
-            state.eval_collision_history.append(float(p[1]))
-            state.eval_novelty_history.append(float(p[2]))
-            state.eval_coverage_history.append(float(p[3]))
-
-        elif et == "actor.training.ppo.step" and len(p) >= 9:
+        if et == "actor.training.ppo.step" and len(p) >= 9:
             state.ppo_raw_reward_history.append(float(p[0]))
             state.ppo_shaped_reward_history.append(float(p[1]))
             state.ppo_intrinsic_reward_history.append(float(p[2]))
@@ -427,7 +424,7 @@ class StreamEngine:
             state.ppo_loop_detected_history.append(float(p[4]))
             state.ppo_beta_history.append(float(p[5]))
             state.ppo_done_history.append(float(p[6]))
-            # Also push to generic reward/collision for backward compat
+            # Keep aggregate histories for compact status and mode detection.
             state.reward_history.append(float(p[1]))
             state.collision_history.append(float(p[6]))
             state.forward_cmd_history.append(float(p[7]))
@@ -446,9 +443,24 @@ class StreamEngine:
                 state.ppo_lr_history.append(float(p[9]))
                 state.ppo_rnd_lr_history.append(float(p[10]))
 
+        elif et == "actor.training.ppo.perf" and len(p) >= 8:
+            state.perf_sps_history.append(float(p[0]))
+            state.perf_forward_ms_history.append(float(p[1]))
+            state.perf_batch_step_ms_history.append(float(p[2]))
+            state.perf_memory_ms_history.append(float(p[3]))
+            state.perf_transition_ms_history.append(float(p[4]))
+            state.perf_tick_ms_history.append(float(p[5]))
+            state.perf_zero_wait_history.append(float(p[6]))
+            state.perf_opt_ms_history.append(float(p[7]))
+
         elif et == "actor.training.ppo.episode" and len(p) >= 2:
             state.episode_return_history.append(float(p[0]))
             state.episode_length_history.append(float(p[1]))
+
+        elif et == "environment.sdfdag.perf" and len(p) >= 5:
+            state.env_perf_sps_history.append(float(p[0]))
+            state.env_perf_batch_ms_history.append(float(p[3]))
+            state.env_perf_actor_ms_history.append(float(p[4]))
 
         elif et == "actor.inference.features":
             state.latest_features = np.asarray(p, dtype=np.float32)
@@ -480,16 +492,6 @@ class StreamEngine:
             # Action published: [fwd, lateral, vertical, yaw]
             state.forward_cmd_history.append(float(p[0]))
             state.yaw_cmd_history.append(float(p[3]))
-
-        elif et == "actor.training.ppo.perf" and len(p) >= 8:
-            state.perf_sps_history.append(float(p[0]))
-            state.perf_forward_ms_history.append(float(p[1]))
-            state.perf_batch_step_ms_history.append(float(p[2]))
-            state.perf_memory_ms_history.append(float(p[3]))
-            state.perf_transition_ms_history.append(float(p[4]))
-            state.perf_tick_ms_history.append(float(p[5]))
-            state.perf_zero_wait_history.append(float(p[6]))
-            state.perf_opt_ms_history.append(float(p[7]))
 
 
 

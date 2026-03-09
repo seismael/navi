@@ -12,8 +12,9 @@ to ``[0, 1]``.
 from __future__ import annotations
 
 import logging
+import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -196,8 +197,13 @@ class VoxelBackend(SimulatorBackend):
         collided = linear_cmd > 0.5 and expected_motion > 1e-6 and proposed_motion / expected_motion < 0.15
 
         if collided:
-            _LOGGER.debug("Actor %d collision detected at (%0.2f, %0.2f, %0.2f)", 
-                         actor_id, new_pose.x, new_pose.y, new_pose.z)
+            _LOGGER.debug(
+                "Actor %d collision detected at (%0.2f, %0.2f, %0.2f)",
+                actor_id,
+                new_pose.x,
+                new_pose.y,
+                new_pose.z,
+            )
 
         a.pose = new_pose
         a.episode_step += 1
@@ -238,7 +244,7 @@ class VoxelBackend(SimulatorBackend):
 
         # GHOST-MATRIX PERSISTENCE: Collided no longer ends the episode.
         # This allows Mamba memory to persist and learn recovery maneuvers.
-        done = False 
+        done = False
         truncated = a.episode_step >= self._max_steps_per_episode
         if truncated:
             _LOGGER.info("Actor %d episode truncated: steps=%d, reward=%0.2f",
@@ -246,12 +252,20 @@ class VoxelBackend(SimulatorBackend):
             a.needs_reset = True
 
         if collided:
-            _LOGGER.debug("Actor %d in persistent collision standoff. Reward: %0.2f", 
-                         actor_id, reward)
+            _LOGGER.debug(
+                "Actor %d in persistent collision standoff. Applying nudge.",
+                actor_id,
+            )
+            a.pose = replace(
+                a.pose,
+                x=a.pose.x - 0.5 * math.cos(a.pose.yaw),
+                z=a.pose.z - 0.5 * math.sin(a.pose.yaw),
+            )
 
         result = StepResult(
             step_id=step_id,
             env_id=actor_id,
+            episode_id=a.episode_id,
             done=done,
             truncated=truncated,
             reward=reward,

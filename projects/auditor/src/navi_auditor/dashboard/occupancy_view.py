@@ -202,9 +202,10 @@ class OccupancyMap:
 
         # pts_list must be a list of (3, 2) arrays for cv2.fillPoly
         pts_list = np.stack([gx, gz], axis=-1).astype(np.int32)
+        polygons = list(pts_list)
 
         # Batch fillPoly is significantly faster than a Python loop
-        cv2.fillPoly(target.view(np.uint8), pts_list, 1)
+        cv2.fillPoly(target.view(np.uint8), polygons, 1)
 
     # ── per-tick grid update ─────────────────────────────────────────
 

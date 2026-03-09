@@ -64,7 +64,7 @@ def test_gradient_flow() -> None:
     """Gradients should flow through both actor and critic."""
     heads = ActorCriticHeads(input_dim=128)
     features = torch.randn(4, 128)
-    actions, log_probs, values = heads.sample(features)
+    _, log_probs, values = heads.sample(features)
     # Use log_probs (touches log_std) + values to ensure all params get gradients
     loss = log_probs.sum() + values.sum()
     loss.backward()

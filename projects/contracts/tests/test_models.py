@@ -138,6 +138,7 @@ class TestStepResult:
         result = StepResult(
             step_id=99,
             env_id=0,
+            episode_id=7,
             done=True,
             truncated=False,
             reward=-1.0,
@@ -148,6 +149,8 @@ class TestStepResult:
         restored = deserialize(data)
         assert isinstance(restored, StepResult)
         assert restored.step_id == 99
+        assert restored.env_id == 0
+        assert restored.episode_id == 7
         assert restored.done is True
         assert restored.truncated is False
         assert restored.reward == -1.0
@@ -232,6 +235,7 @@ class TestBatchStepResult:
             StepResult(
                 step_id=10,
                 env_id=i,
+                episode_id=100 + i,
                 done=i == 1,
                 truncated=False,
                 reward=0.5,
@@ -249,6 +253,7 @@ class TestBatchStepResult:
         assert len(restored.observations) == 3
         assert restored.results[1].done is True
         assert restored.results[0].done is False
+        assert restored.results[2].episode_id == 102
         for i, obs in enumerate(restored.observations):
             assert obs.env_ids[0] == i
             np.testing.assert_array_almost_equal(obs.depth, observations[i].depth)

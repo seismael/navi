@@ -91,6 +91,7 @@ def _serialize_step_result(result: StepResult) -> dict[str, Any]:
     return {
         "step_id": result.step_id,
         "env_id": result.env_id,
+        "episode_id": result.episode_id,
         "done": result.done,
         "truncated": result.truncated,
         "reward": result.reward,

@@ -27,6 +27,33 @@ and a REP socket (default `tcp://*:5560`). In step mode, it polls for
 `StepRequest` messages with a 500 ms idle re-publish interval to support late
 subscribers. In async mode, it subscribes to `action_v2` and steps continuously.
 
+### 1.1. Canonical Launch Commands
+
+```bash
+# Environment service (step mode)
+uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560
+
+# Canonical compiled-path backend
+uv run navi-environment serve --backend sdfdag --gmdag-file ./worlds/city.gmdag --mode step --pub tcp://*:5559 --rep tcp://*:5560
+
+# Shortcut command (equivalent to serve)
+uv run environment
+
+# Compile source meshes to canonical sparse Zarr
+uv run navi-environment compile-world --source ./worlds/city.ply --output ./worlds/city.zarr
+uv run navi-environment compile-world --source ./worlds/city.obj --source-format obj --output ./worlds/city.zarr
+uv run navi-environment compile-world --source ./worlds/city.stl --source-format stl --output ./worlds/city.zarr
+
+# Compile source meshes to `.gmdag` via the internal voxel-dag project
+uv run navi-environment compile-gmdag --source ./worlds/city.glb --output ./worlds/city.gmdag --resolution 2048
+
+# Preflight the canonical SDF/DAG stack and validate asset metadata
+uv run navi-environment check-sdfdag --gmdag-file ./worlds/city.gmdag
+
+# Benchmark the canonical batched runtime directly in the environment layer
+uv run navi-environment bench-sdfdag --gmdag-file ./worlds/city.gmdag --actors 4 --steps 200
+```
+
 ---
 
 ## 2. Backend Architecture
@@ -37,10 +64,21 @@ wire protocol, or training engine.
 
 ```text
 SimulatorBackend (ABC)
-  ├── VoxelBackend         — Procedural voxel worlds + RaycastEngine (default)
-  ├── HabitatBackend       — Meta habitat-sim with HabitatAdapter (DatasetAdapter)
-  └── MeshSceneBackend     — trimesh ray-mesh intersection for .glb/.obj/.ply
+  ├── SdfDagBackend        — Batched CUDA sphere tracing against `.gmdag` caches (canonical training runtime)
+  ├── VoxelBackend         — Procedural voxel worlds + RaycastEngine (diagnostic reference)
+  ├── HabitatBackend       — Meta habitat-sim with HabitatAdapter (external adapter diagnostics)
+  └── MeshSceneBackend     — trimesh ray-mesh intersection for .glb/.obj/.ply (diagnostic reference)
 ```
+
+`SdfDagBackend` is the repository's canonical training runtime. `VoxelBackend`,
+`MeshSceneBackend`, and `HabitatBackend` remain available only for targeted
+diagnostics, adapter validation, and regression comparison outside canonical
+training launch surfaces.
+
+`SdfDagBackend` is also the canonical environment-side performance source for
+the compiled path: it records rolling batch throughput internally, the server
+emits coarse `environment.sdfdag.perf` telemetry every 100 batch steps, and the
+same perf snapshot surface powers the `bench-sdfdag` CLI.
 
 ### 2.1. SimulatorBackend ABC
 
@@ -50,6 +88,7 @@ SimulatorBackend (ABC)
 |--------|-----------|-------------|
 | `reset(episode_id)` | `→ DistanceMatrix` | Reset environment, return initial observation |
 | `step(action, step_id)` | `→ (DistanceMatrix, StepResult)` | Apply action, return observation + result |
+| `perf_snapshot()` | `→ object \| None` | Coarse runtime metrics for canonical performance telemetry |
 | `close()` | `→ None` | Release resources |
 | `pose` (property) | `→ RobotPose` | Current 6-DOF robot pose |
 | `episode_id` (property) | `→ int` | Current episode counter |
@@ -61,9 +100,12 @@ All backends produce `DistanceMatrix` observations with shape `(1, Az, El)` for
 
 **Module:** `backends/voxel.py`
 
-The default backend for procedural world training. Delegates environment
+The default backend for procedural world diagnostics. Delegates environment
 generation to an `AbstractWorldGenerator`, physics to `MjxEnvironment`, and
 observation to `DistanceMatrixBuilder` + `RaycastEngine`.
+
+This backend remains valuable for fast procedural experiments, but it is not
+the long-term high-throughput target for compiled real-world scenes.
 
 **Component chain:**
 
@@ -130,12 +172,15 @@ A lightweight backend that loads `.glb`, `.obj`, or `.ply` meshes via `trimesh`
 and performs equirectangular raycasting without requiring `habitat-sim`. Useful
 for testing with arbitrary 3D models when Habitat is not installed.
 
+Mesh is retained only as a correctness and regression reference for targeted
+diagnostics. Canonical training no longer routes through this backend.
+
 **Features:**
 
-- **Auto-reset:** Automatically resets the episode when the agent collides with
-  geometry or exceeds the maximum step count.
-- **Collision termination:** Returns `done=True` with collision penalty when
-  the agent penetrates the mesh surface.
+- **Ghost-Matrix persistence:** Collisions apply penalties but do **not** set
+  `done=True` during training.
+- **Hard truncation:** Episodes are truncated at the configured maximum step
+  count to preserve episodic diversity.
 - **Equirectangular raycasting:** Generates `(Az, El)` spherical depth tensors
   via `trimesh.ray` intersection, matching the canonical observation format.
 - **Coordinate system:** Uses Navi's standard Y-up, forward-X convention with
@@ -226,6 +271,16 @@ without modifying the training engine:
 
 ## 4. World Compilation Pipeline
 
+Two world-compilation paths currently coexist in Navi:
+
+- **Sparse Zarr voxel worlds** for the current `VoxelBackend` flow.
+- **`.gmdag` worlds** for the internal `projects/voxel-dag` + `projects/torch-sdf`
+  performance path.
+
+The performance-first direction of the repository is to promote `.gmdag` to the
+canonical compiled-world format for high-throughput training once the runtime
+backend is validated.
+
 ### 4.1. WorldModelCompiler / PlyWorldCompiler
 
 **Module:** `transformers/compiler.py`
@@ -233,10 +288,31 @@ without modifying the training engine:
 Offline tool that converts mesh assets into the canonical sparse Zarr chunk
 format for `VoxelBackend` consumption.
 
+This compiler remains part of the repository for the current voxel path, but it
+is no longer the sole strategic compilation story.
+
 **Supported input formats:** PLY, OBJ, ASCII STL.
 
 **Output:** Zarr archive with sparse chunk layout:
 - `chunk_index` — array mapping chunk coordinates to data offsets.
+
+### 4.2. Internal `.gmdag` Compiler Path
+
+The imported `projects/voxel-dag` project is now the in-repo compiler domain
+for the high-performance Ghost-Matrix path.
+
+- **Input:** `.glb`, `.obj`, `.ply`, and related mesh assets.
+- **Output:** `.gmdag` binary caches with cubic world alignment and DAG-compressed
+  distance payloads.
+- **Entry points:** `projects/voxel-dag/src/main.cpp` and the package entry
+  point exposed by `projects/voxel-dag/pyproject.toml`.
+
+Navi surfaces this flow through `navi-environment compile-gmdag` so the
+Environment project can own orchestration without reimplementing the compiler.
+`navi-environment check-sdfdag` is the paired preflight command for validating
+compiler/runtime readiness and `.gmdag` metadata before rollout.
+`navi-environment bench-sdfdag` runs the same canonical batched backend without
+the actor layer so throughput can be measured directly before stack cutover.
 - `chunks/<cx>_<cy>_<cz>` — per-chunk voxel arrays `(N, 5)`.
 
 **CLI:**
@@ -334,7 +410,7 @@ All backends produce arrays with the following canonical conventions:
 
 | Property | Value |
 |----------|-------|
-| `matrix_shape` | `(azimuth_bins, elevation_bins)` — default `(256, 128)` |
+| `matrix_shape` | `(azimuth_bins, elevation_bins)` — default `(256, 48)` |
 | Axis ordering | `(n_envs, azimuth, elevation)` |
 | Single-env shape | `n_envs = 1` → `(1, Az, El)` |
 | Depth range | `[0, 1]` — normalized by `max_distance` (default 30.0 m) |
@@ -394,7 +470,7 @@ full specification.
 | `rep_address` | `str` | `tcp://*:5560` | REP socket bind address |
 | `action_sub_address` | `str` | `tcp://localhost:5557` | SUB socket for async mode |
 | `mode` | `str` | `step` | `step` (REQ/REP) or `async` (SUB/PUB) |
-| `backend` | `str` | `voxel` | Backend selection: `voxel`, `habitat`, or `mesh` |
+| `backend` | `str` | `sdfdag` | Backend selection: `sdfdag` (canonical). `voxel`, `habitat`, and `mesh` remain diagnostic-only. |
 | `world_source` | `str` | `procedural` | `procedural` or `file` |
 | `world_file` | `str` | `""` | Path to Zarr world file (when `file` source) |
 | `generator` | `str` | `arena` | World generator: `arena`, `city`, `maze`, `rooms`, `open3d` |

@@ -6,6 +6,7 @@ import math
 
 import torch
 from torch import Tensor, nn
+from torch.distributions import Normal
 
 __all__: list[str] = ["ActorCriticHeads"]
 
@@ -167,7 +168,7 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
         """
         action_mean, values = self.forward(features)
         std = self.log_std.exp()
-        dist = torch.distributions.Normal(action_mean, std)
-        actions = dist.sample()
-        log_probs = dist.log_prob(actions).sum(dim=-1)
+        dist = Normal(action_mean, std)  # type: ignore[no-untyped-call]
+        actions = dist.sample()  # type: ignore[no-untyped-call]
+        log_probs = dist.log_prob(actions).sum(dim=-1)  # type: ignore[no-untyped-call]
         return actions, log_probs, values

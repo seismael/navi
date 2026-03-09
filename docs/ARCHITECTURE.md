@@ -40,6 +40,88 @@ engine's canonical `(1, Az, El)` DistanceMatrix format. The adapter is the
 **only** place where axis transposes, depth normalization, semantic class
 remapping, delta-depth computation, and env-dimension insertion are performed.
 
+The temporal stage inside the sacred pipeline remains a single canonical runtime
+backend. Backend selection is benchmark-governed and must satisfy cross-platform
+support targets (native Windows, Linux, WSL2) and throughput floor requirements.
+
+The active runtime evolution path is therefore below the actor boundary:
+`projects/voxel-dag` compiles `.gmdag` assets, `projects/torch-sdf` executes
+batched CUDA sphere tracing, and `projects/environment` adapts the output back
+to the actor's canonical `(1, Az, El)` `DistanceMatrix` contract.
+
+### 1.3.1. Canonical Training Boundary
+
+Canonical high-throughput training now targets one unified execution surface:
+
+- `projects/environment` still owns simulation backends and observation shaping.
+- `projects/actor` still owns PPO, memory, curiosity, and the sacred policy.
+- The canonical training CLI instantiates the environment backend directly and
+  steps it in-process to remove the Environment<->Actor ZMQ control-path barrier
+  from the rollout hot loop.
+
+This is an orchestration-level integration only. It does not relax project
+sovereignty for long-running services or change the actor contract. There is no
+second canonical training architecture alongside it.
+
+What still remains after that architectural cleanup is internal hot-path
+cleanup: canonical training must now remove observation host staging,
+action host staging, and per-actor Python transition work inside the single
+trainer rather than introducing any new runtime surfaces.
+
+### 1.4. Canonical Launch Commands
+
+Runtime commands are standardized across the repository to keep launches
+stateless, reproducible, and aligned with service isolation.
+
+| Scope | Command | Notes |
+|------|---------|-------|
+| Full stack (inference, voxel) | `./scripts/run-ghost-stack.ps1 -Backend voxel` | Environment + Actor + Dashboard |
+| Full stack (inference, mesh) | `./scripts/run-ghost-stack.ps1 -Backend mesh -HabitatScene C:/path/to/scene.glb` | Mesh backend requires scene path |
+| Full stack (inference, sdfdag) | `./scripts/run-ghost-stack.ps1 -Backend sdfdag -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag` | Canonical compiled-path runtime using a prebuilt `.gmdag` asset |
+| Full stack (training, canonical) | `./scripts/run-ghost-stack.ps1 -Train` | Standard 4-actor fleet on the single canonical in-process sdfdag trainer, using the full discovered corpus by default |
+| Actor trainer | `uv run --project projects/actor navi-actor train` | Single canonical training entrypoint with direct in-process sdfdag stepping, full-corpus default, and continuous runtime unless explicitly bounded |
+| Environment service | `uv run --project projects/environment environment` | Shortcut for `navi-environment serve` |
+| Brain service | `uv run --project projects/actor brain` | Shortcut for `navi-actor serve` |
+| Dashboard service | `uv run --project projects/auditor dashboard` | Shortcut for `navi-auditor dashboard` |
+| Environment wrapper | `./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560` | Windows wrapper |
+| Brain wrapper | `./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560` | Windows wrapper |
+| Dashboard wrapper | `./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560` | Windows wrapper |
+| Compile mesh assets | `uv run --project projects/environment navi-environment compile-world --source data/scenes/world.ply --output data/scenes/world.zarr` | Canonical mesh-to-Zarr pipeline |
+| Compile `.gmdag` assets | `uv run --project projects/environment navi-environment compile-gmdag --source data/scenes/world.glb --output data/scenes/world.gmdag --resolution 2048` | Performance-path compiler orchestration |
+
+For canonical training, the repository should resolve the full discovered scene
+corpus by default, compile or refresh `.gmdag` assets as needed, and only use
+`-GmDagFile`, manifest, or named-scene inputs as explicit narrowing overrides.
+
+### 1.5. Canonical-Only Compatibility Policy
+
+Ghost-Matrix runs on a strict canonical-only policy:
+
+- Legacy/backward-compatible runtime paths are removed once migration is complete.
+- Producers and consumers are updated in lock-step; dual-path routing is not retained.
+- Compatibility wrappers/aliases/no-op methods are not preserved.
+- Required dependencies fail fast when missing; fallback implementations are not part of canonical runtime.
+- Tests and docs must reflect only active, used production paths.
+
+For training specifically, distributed ZMQ stepping is no longer part of the
+canonical performance architecture. One direct in-process sdfdag trainer is the
+production training surface.
+
+Inside that production training surface, `DistanceMatrix` remains the external
+diagnostic and wire contract, but canonical rollout is allowed to keep an
+equivalent tensor-native CUDA representation internally. Materializing Python
+wire objects every step is now treated as a performance bug, not as an
+architectural requirement.
+
+### 1.6. Temporal Backend Selection Policy (Mar 2026)
+
+- Actor temporal-core backend selection is benchmark-gated under strict interface parity `(B,T,D)->(B,T,D)`.
+- Candidate comparison tooling is allowed during migration; production runtime stays single-path canonical.
+- Migration is accepted only if 4-actor rollout throughput remains `>=60 SPS`.
+- Platform support target is first-class native Windows, Linux, and WSL2.
+- Current production runtime is `Mamba2TemporalCore` on `mambapy` (single canonical path, no runtime fallback branch).
+- Actor PPO runtime is CUDA-only in canonical training mode and must pass CUDA kernel preflight at startup.
+
 ---
 
 ## 2. Mathematical Foundations
@@ -57,9 +139,11 @@ shortest absolute geometric distance to the nearest surface:
 - $\Omega(\mathbf{p}) = 0$: the point is exactly on a surface boundary.
 - $\Omega(\mathbf{p}) < 0$: the point is penetrating a solid mass.
 
-> **Current implementation:** The runtime approximates the SDF via discrete
-> sparse voxel grids (`SparseVoxelGrid`) with vectorized spherical projection.
-> See §8.1 for the roadmap to continuous SDF evaluation.
+> **Current implementation:** The canonical training runtime now runs through
+> `projects/voxel-dag` for offline `.gmdag` compilation and `projects/torch-sdf`
+> for CUDA sphere tracing, with `projects/environment` preserving the current
+> actor contract. Sparse voxel grids and mesh traversal remain diagnostic or
+> regression references only.
 
 ### 2.2. Actor Geometric State
 
@@ -121,7 +205,9 @@ until it reaches individual triangles.
   ScanNet) reach tens of millions, making per-ray intersection expensive even
   with optimized BVH libraries.
 
-> **Current usage:** `MeshSceneBackend` supports high-throughput training on complex meshes (HSSD, ReplicaCAD) via **batched raycasting**. It leverages `trimesh` with a vectorized query structure to maintain high rollout throughput across multiple actors at 128x24 resolution.
+> **Current usage:** `MeshSceneBackend` remains a diagnostic and regression
+> comparison backend only. Canonical training does not route through CPU mesh
+> traversal.
 
 ### 3.2. Why Not Dense Voxel Occupancy / 3D DDA
 
@@ -148,7 +234,8 @@ through a discrete 3D occupancy grid, checking each voxel cell for occupation.
 > `RaycastEngine` then uses vectorized `np.minimum.at` scatter-reduce projection
 > instead of per-ray DDA stepping, trading exact ray-march accuracy for
 > throughput by projecting all voxels onto the spherical grid in a single
-> vectorized pass.
+> vectorized pass. It is retained only for targeted diagnostics and regression
+> comparison, not for canonical training.
 
 ### 3.3. Target: Sphere Tracing (Ray Marching)
 
@@ -173,8 +260,9 @@ For any ray $\mathbf{p} + t\hat{d}$:
 - **Exact boundaries:** Collision is detected at the continuous mathematical
   surface, not at a discrete grid edge.
 
-> **Status:** Sphere tracing is the target architecture for the GPU simulation
-> kernel. See §8.1 for the full SDF compiler and kernel roadmap.
+> **Status:** Sphere tracing is the active integration target for the GPU
+> simulation kernel through the internal `projects/torch-sdf` runtime and
+> `projects/voxel-dag` compiler domains.
 
 ### 3.4. Foveated Ray Distribution
 
@@ -243,7 +331,8 @@ canonical `DistanceMatrix v2` observations.
 | Component | Role |
 |-----------|------|
 | `SimulatorBackend` ABC | Pluggable strategy interface for simulation |
-| `VoxelBackend` | Procedural voxel worlds + `RaycastEngine` (default) |
+| `SdfDagBackend` | Canonical compiled `.gmdag` runtime backed by `torch-sdf` batched CUDA sphere tracing |
+| `VoxelBackend` | Procedural voxel worlds + `RaycastEngine` (diagnostic-only) |
 | `HabitatBackend` | Meta `habitat-sim` + `HabitatAdapter` (`DatasetAdapter`) |
 | `MeshSceneBackend` | `trimesh` ray-mesh intersection for `.glb`/`.obj`/`.ply` |
 | `RaycastEngine` | Vectorized `np.minimum.at` scatter-reduce spherical projection |
@@ -274,10 +363,11 @@ this engine.
    spatial embedding $z_t$.
 2. **RND Curiosity** — frozen target MLP + trainable predictor: intrinsic
    exploration reward from embedding novelty.
-3. **EpisodicMemory** — CPU FAISS `IndexFlatIP` (numpy fallback): KNN
-   loop-closure detection via cosine similarity.
-4. **Mamba2TemporalCore** — Selective State Space Model (`mamba_ssm` with GRU
-   fallback): $O(n)$ linear-time temporal integration.
+3. **EpisodicMemory** — tensor-native cosine ring buffer:
+  loop-closure detection via batched on-device similarity search.
+4. **Mamba2TemporalCore** — Canonical selective state-space temporal core
+  implemented via `mambapy` on this Windows CUDA profile: $O(n)$ linear-time
+  temporal integration.
 5. **ActorCriticHeads** — Gaussian policy for 4-DOF `[fwd, vert, lat, yaw]` +
    scalar value head.
 
@@ -296,7 +386,7 @@ training loops. Visualization types (RGB frames, camera images) exist only here
 | `Recorder` | Records `distance_matrix_v2`, `action_v2`, `telemetry_event_v2` to Zarr |
 | `Rewinder` | Replays recorded Zarr sessions via ZMQ PUB |
 | `LiveDashboard` | OpenCV-based first-person pseudo-3D depth renderer with teleop controls |
-| `GhostMatrixDashboard` | PyQtGraph live dashboard with spherical depth views + 10 PPO metric plots |
+| `GhostMatrixDashboard` | PyQtGraph live selected-actor depth view (actor 0 default), optional actor selector, and compact status-line telemetry (stall, SPS, EMA, episodes, step, optimizer ms, zero-wait) |
 
 ---
 
@@ -316,38 +406,33 @@ tick follows a single-round-trip batched protocol:
 4. **Actor** unpacks per-actor results, processes reward shaping + episodic
    memory, and appends transitions to per-actor `TrajectoryBuffer`s.
 
-This replaces the former sequential round-robin design where each actor
+This replaces the former per-actor round-robin design where each actor
 required its own REQ/REP round-trip, reducing ZMQ latency from $O(N)$ to
 $O(1)$ per rollout tick.
 
-Single-actor `StepRequest`/`StepResult` is still supported for backward
-compatibility and inference modes.
+Single-actor `StepRequest`/`StepResult` remains available for single-
+environment and inference workflows.
 
 An **async mode** is also supported for inference: the server subscribes to
 `action_v2`, applies actions continuously, and publishes distance matrices.
 
-### 6.2. Target: Asynchronous Double-Buffered Training
+### 6.2. Canonical Rollout-Boundary PPO Updates
 
-To guarantee that the Actor does not bottleneck the simulation engine:
+The measured canonical actor runtime now uses one rollout/update loop:
 
 1. **Parallel rollout:** The simulation engine steps $N_{envs}$ parallel
-   environments simultaneously.
+  environments simultaneously.
 2. **Instantaneous inference:** The Actor processes the batch in a single CUDA
-   pass, yielding $N_{envs}$ continuous action vectors.
-3. **Thread bifurcation:** Upon filling the episodic sequence `TrajectoryBuffer`,
-   the pipeline branches:
-   - **Optimization thread:** Executes Backpropagation Through Time (BPTT) for
-     PPO and RND gradients on Buffer 1.
-   - **Simulation thread:** Instantly swaps memory pointers to Buffer 2 and
-     continues stepping environments using the latest policy weights —
-     zero latency.
+  pass, yielding $N_{envs}$ continuous action vectors.
+3. **Inline optimization:** Once the rollout buffer is full, PPO and RND
+  updates run immediately on that canonical buffer, weights are synced to the
+  rollout copy, and the next rollout begins.
 
-> **Status:** Implemented. `PpoTrainer` uses dual `TrajectoryBuffer` sets
-> (A/B) with an `_optimisation_worker` background thread. At rollout
-> boundaries the simulation thread swaps the active buffer pointer and
-> signals the optimisation thread — zero latency. Weight updates are
-> guarded by `threading.Lock`; PyTorch inference is lock-free.
-> Zero-wait ratio is tracked and logged at the end of each training run.
+> **Status:** Implemented. The earlier background optimizer-worker design was
+> removed after tensor-native rollout storage and episodic-memory updates
+> showed that coordination overhead, not transport, had become the dominant
+> stall source. Zero-wait ratio remains a diagnostic metric, but the canonical
+> runtime no longer depends on overlap to make progress.
 
 ### 6.3. Execution Topology
 
@@ -482,18 +567,18 @@ encoder is a Vision Transformer (ViT) that natively ingests foveated rays:
   attend to one another to resolve 3D topology (e.g., a cluster of similar
   distances forming a solid wall).
 
-### 8.5. GPU FAISS Episodic Memory
+### 8.5. Tensor-Native Episodic Memory
 
-Migration from CPU-based `faiss.IndexFlatIP` to `faiss.StandardGpuResources`,
-residing 100% in GPU VRAM. This eliminates PCIe bus latency stalls during
-rollout by keeping all KNN lookups on-device.
+Canonical training now uses batched tensor cosine search plus fixed-capacity
+ring-buffer writes, eliminating the previous GPU -> CPU -> FAISS memory hop in
+the rollout loop.
 
-### 8.6. ~~Asynchronous Double-Buffered Training~~ (Implemented)
+### 8.6. Canonical Inline PPO Updates
 
-> Implemented in `PpoTrainer._optimisation_worker()`. See §6.2 for details.
-> The dual-`TrajectoryBuffer` pointer-swapping protocol enables true
-> zero-wait optimization where the backward pass never stalls the
-> simulation engine.
+`PpoTrainer` now performs PPO updates inline at rollout boundaries after the
+rollout buffer is finalized. The previous async double-buffered optimizer path
+was removed once measurements showed it had become the dominant coordination
+stall on the canonical tensor-native runtime.
 
 ---
 
@@ -504,6 +589,6 @@ Architectural success is measured by:
 | Metric | Description |
 |--------|-------------|
 | **Ray throughput** | Rays evaluated per second (aggregate across parallel $N_{envs}$) |
-| **Sequence latency** | Inference time for the Encoder + FAISS + Mamba2 pipeline |
+| **Sequence latency** | Inference time for the Encoder + episodic memory + Mamba2 pipeline |
 | **Zero-wait ratio** | Fraction of simulation steps not blocked by optimization |
 | **Memory efficiency** | Ratio of active geometry to allocated VRAM |

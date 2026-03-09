@@ -135,13 +135,11 @@ class Recorder:
 
 
 class LiveDashboard:
-    """OpenCV-based live distance-matrix visualizer (legacy).
+    """OpenCV-based live distance-matrix visualizer for direct diagnostics.
 
-    .. deprecated::
-        Replaced by ``navi_auditor.dashboard.GhostMatrixDashboard`` which
-        uses PyQtGraph for GPU-accelerated rendering, multi-stream ZMQ
-        ingestion, and real-time RL training curves.  This class is
-        retained for fallback in environments without PyQt6.
+    ``navi_auditor.dashboard.GhostMatrixDashboard`` is the primary operator UI
+    for multi-stream monitoring and training telemetry. This lightweight view
+    remains available for direct OpenCV-based inspection and teleoperation.
 
     Renders at true 30-60 fps using ``cv2.imshow`` with deterministic
     ``waitKey`` polling — no matplotlib overhead.
@@ -314,7 +312,7 @@ class LiveDashboard:
             if v + 1 < height:
                 img[v + 1, u] = color
 
-        img = cv2.GaussianBlur(img, (3, 3), 0.0)
+        img = np.asarray(cv2.GaussianBlur(img, (3, 3), 0.0), dtype=np.uint8)
 
         for i in range(1, 7):
             y_line = int(horizon_y + (height - horizon_y) * (i / 7.0))
@@ -626,7 +624,10 @@ class LiveDashboard:
                 overhead_bgr = self._zoom_overhead(
                     overhead_bgr, self._overhead_zoom,
                 )
-            overhead_bgr = cv2.convertScaleAbs(overhead_bgr, alpha=1.1, beta=45)
+            overhead_bgr = np.asarray(
+                cv2.convertScaleAbs(overhead_bgr, alpha=1.1, beta=45),
+                dtype=np.uint8,
+            )
             oh = cv2.resize(
                 overhead_bgr, (_SIDE_COL_W, _STACK_H),
                 interpolation=cv2.INTER_NEAREST,
@@ -657,8 +658,14 @@ class LiveDashboard:
             overhead_raw = dm.overhead.astype(np.uint8, copy=False)
             if self._overhead_zoom > 1.01:
                 overhead_raw = self._zoom_overhead(overhead_raw, self._overhead_zoom)
-            overhead_raw = cv2.convertScaleAbs(overhead_raw, alpha=1.1, beta=45)
-            overhead_raw = cv2.resize(overhead_raw, (_SIDE_COL_W, _STACK_H), interpolation=cv2.INTER_NEAREST)
+            overhead_raw = np.asarray(
+                cv2.convertScaleAbs(overhead_raw, alpha=1.1, beta=45),
+                dtype=np.uint8,
+            )
+            overhead_raw = np.asarray(
+                cv2.resize(overhead_raw, (_SIDE_COL_W, _STACK_H), interpolation=cv2.INTER_NEAREST),
+                dtype=np.uint8,
+            )
             frame[_STACK_H : 2 * _STACK_H, side_x1:_DISPLAY_W] = overhead_raw
             draw_panel_title("RAW OVERHEAD", side_x1, _STACK_H, _SIDE_COL_W)
 

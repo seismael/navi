@@ -5,14 +5,24 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import numpy as np
+import pytest
 import torch
 
 from navi_actor.config import ActorConfig
 from navi_actor.training.ppo_trainer import PpoTrainer
+from navi_contracts import (
+    TOPIC_DISTANCE_MATRIX,
+    TOPIC_TELEMETRY_EVENT,
+    DistanceMatrix,
+    RobotPose,
+    TelemetryEvent,
+    deserialize,
+)
 
 
 def _make_trainer() -> PpoTrainer:
-    """Create a PpoTrainer with minimal config (no ZMQ sockets needed)."""
+    """Create a canonical PpoTrainer with minimal config for state tests."""
     cfg = ActorConfig(
         sub_address="tcp://127.0.0.1:19000",
         pub_address="tcp://127.0.0.1:19001",
@@ -32,23 +42,23 @@ def test_save_load_training_state_roundtrip() -> None:
 
     # Force optimizer creation by doing a dummy forward/backward
     obs = torch.randn(1, 3, 128, 24, device=trainer._device)
-    _actions, log_probs, values, _, _ = trainer._policy(obs)
+    _actions, log_probs, values, _, _ = trainer._learner_policy(obs)
     loss = -log_probs.sum() + values.sum()
-    opt = trainer._learner._get_optimizer(trainer._policy)
+    opt = trainer._learner._get_optimizer(trainer._learner_policy)
     opt.zero_grad()
-    loss.backward()
+    loss.backward()  # type: ignore[no-untyped-call]
     opt.step()
 
     # RND predictor step
-    z = trainer._policy.encode(obs.detach())
+    z = trainer._learner_policy.encode(obs.detach())
     rnd_opt = trainer._learner._get_rnd_optimizer(trainer._rnd)
     rnd_loss = trainer._rnd.distillation_loss(z)
     rnd_opt.zero_grad()
-    rnd_loss.backward()
+    rnd_loss.backward()  # type: ignore[no-untyped-call]
     rnd_opt.step()
 
     # Snapshot state before save
-    policy_sd = {k: v.clone() for k, v in trainer._policy.state_dict().items()}
+    policy_sd = {k: v.clone() for k, v in trainer._learner_policy.state_dict().items()}
     rnd_sd = {k: v.clone() for k, v in trainer._rnd.state_dict().items()}
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -63,7 +73,7 @@ def test_save_load_training_state_roundtrip() -> None:
     # Verify policy weights match
     for key in policy_sd:
         assert torch.equal(
-            policy_sd[key], trainer2._policy.state_dict()[key]
+            policy_sd[key], trainer2._learner_policy.state_dict()[key]
         ), f"Policy param mismatch: {key}"
 
     # Verify RND weights match (including frozen target)
@@ -80,28 +90,18 @@ def test_save_load_training_state_roundtrip() -> None:
     assert trainer2._learner._rnd_optimizer is not None
 
 
-def test_legacy_checkpoint_compat() -> None:
-    """Loading a legacy checkpoint (plain state_dict) should still work."""
+def test_legacy_checkpoint_is_rejected() -> None:
+    """Loading a non-canonical checkpoint format should fail fast."""
     trainer = _make_trainer()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ckpt = Path(tmpdir) / "legacy.pt"
         # Save old-format: just the policy state_dict
-        torch.save(trainer._policy.state_dict(), ckpt)
+        torch.save(trainer._learner_policy.state_dict(), ckpt)
 
         trainer2 = _make_trainer()
-        trainer2.load_training_state(ckpt)
-
-    # Policy weights should match
-    for key in trainer._policy.state_dict():
-        assert torch.equal(
-            trainer._policy.state_dict()[key],
-            trainer2._policy.state_dict()[key],
-        )
-
-    # RND, reward shaper, optimizers stay at defaults
-    assert trainer2._reward_shaper._global_step == 0
-    assert trainer2._learner._optimizer is None
+        with pytest.raises(RuntimeError, match="expected version=2 canonical state"):
+            trainer2.load_training_state(ckpt)
 
 
 def test_beta_annealing_continues() -> None:
@@ -123,6 +123,132 @@ def test_beta_annealing_continues() -> None:
     assert trainer2._reward_shaper._global_step == 1000
 
 
+def test_publish_observation_emits_distance_matrix_topic() -> None:
+    """Canonical trainer should provide a low-volume live observation feed."""
+    trainer = _make_trainer()
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.messages: list[list[bytes]] = []
+
+        def send_multipart(self, parts: list[bytes]) -> None:
+            self.messages.append(parts)
+
+    fake_socket = FakeSocket()
+    trainer._pub_socket = fake_socket  # type: ignore[assignment]
+
+    dm = DistanceMatrix(
+        episode_id=1,
+        env_ids=np.array([0], dtype=np.int32),
+        matrix_shape=(8, 4),
+        depth=np.ones((1, 8, 4), dtype=np.float32),
+        delta_depth=np.zeros((1, 8, 4), dtype=np.float32),
+        semantic=np.zeros((1, 8, 4), dtype=np.int32),
+        valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
+        overhead=np.zeros((8, 8, 3), dtype=np.float32),
+        robot_pose=RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0),
+        step_id=7,
+        timestamp=1.0,
+    )
+
+    trainer._publish_observation(dm)
+
+    assert len(fake_socket.messages) == 1
+    topic, payload = fake_socket.messages[0]
+    assert topic == TOPIC_DISTANCE_MATRIX.encode("utf-8")
+    restored = deserialize(payload)
+    assert isinstance(restored, DistanceMatrix)
+    assert restored.step_id == 7
+
+
+def test_publish_perf_telemetry_tolerates_socket_send_failure() -> None:
+    """Perf-only attribution paths should fail safely if PUB transport errors."""
+    trainer = _make_trainer()
+
+    class FailingSocket:
+        def send_multipart(self, parts: list[bytes]) -> None:
+            del parts
+            raise RuntimeError("synthetic send failure")
+
+    trainer._pub_socket = FailingSocket()  # type: ignore[assignment]
+
+    trainer._publish_perf_telemetry(
+        step_id=256,
+        sps=120.0,
+        forward_pass_ms=10.0,
+        batch_step_ms=8.0,
+        memory_query_ms=1.0,
+        transition_ms=5.0,
+        tick_total_ms=25.0,
+        zero_wait_ratio=0.0,
+        ppo_update_ms=19_000.0,
+        host_extract_ms=0.5,
+        telemetry_publish_ms=0.0,
+    )
+
+
+def test_publish_runtime_perf_emits_environment_perf_event() -> None:
+    """Canonical trainer should publish coarse sdfdag runtime perf events."""
+    trainer = _make_trainer()
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.messages: list[list[bytes]] = []
+
+        def send_multipart(self, parts: list[bytes]) -> None:
+            self.messages.append(parts)
+
+    class FakeRuntime:
+        def perf_snapshot(self) -> object:
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "sps": 63.5,
+                    "last_batch_step_ms": 14.2,
+                    "ema_batch_step_ms": 13.8,
+                    "avg_batch_step_ms": 14.0,
+                    "avg_actor_step_ms": 3.5,
+                    "total_batches": 9,
+                    "total_actor_steps": 36,
+                },
+            )()
+
+        def close(self) -> None:
+            return None
+
+    fake_socket = FakeSocket()
+    trainer._pub_socket = fake_socket  # type: ignore[assignment]
+    trainer._runtime = FakeRuntime()  # type: ignore[assignment]
+
+    trainer._publish_runtime_perf(step_id=200)
+
+    assert len(fake_socket.messages) == 1
+    topic, payload = fake_socket.messages[0]
+    assert topic == TOPIC_TELEMETRY_EVENT.encode("utf-8")
+    restored = deserialize(payload)
+    assert isinstance(restored, TelemetryEvent)
+    assert restored.event_type == "environment.sdfdag.perf"
+    assert restored.step_id == 200
+
+
+def test_publish_runtime_perf_tolerates_runtime_snapshot_failure() -> None:
+    """Perf-only diagnostics should not crash when runtime perf snapshot fails."""
+    trainer = _make_trainer()
+
+    class FakeRuntime:
+        def perf_snapshot(self) -> object:
+            raise RuntimeError("synthetic perf failure")
+
+        def close(self) -> None:
+            return None
+
+    trainer._runtime = FakeRuntime()  # type: ignore[assignment]
+    trainer._pub_socket = object()  # type: ignore[assignment]
+
+    trainer._publish_runtime_perf(step_id=200)
+
+
 def test_rnd_target_network_preserved() -> None:
     """RND target network (frozen random) must be identical after reload.
 
@@ -130,7 +256,7 @@ def test_rnd_target_network_preserved() -> None:
     meaningless across scenes.
     """
     trainer = _make_trainer()
-    z = torch.randn(1, 64)
+    z = torch.randn(1, 64, device=trainer._device)
 
     # Get raw RND outputs (target + predictor) — no running-stat mutation
     with torch.no_grad():
@@ -144,7 +270,7 @@ def test_rnd_target_network_preserved() -> None:
         trainer2.load_training_state(ckpt)
 
     with torch.no_grad():
-        target_loaded, pred_loaded = trainer2._rnd(z)
+        target_loaded, pred_loaded = trainer2._rnd(z.to(trainer2._device))
 
     assert torch.allclose(target_before, target_loaded, atol=1e-6), (
         "RND target network mismatch after reload"
@@ -152,3 +278,153 @@ def test_rnd_target_network_preserved() -> None:
     assert torch.allclose(pred_before, pred_loaded, atol=1e-6), (
         "RND predictor network mismatch after reload"
     )
+
+
+def test_request_batch_step_tensor_prefers_runtime_tensor_seam() -> None:
+    """Canonical trainer should consume tensor-native runtime batches when available."""
+    trainer = _make_trainer()
+
+    class FakeTensorBatch:
+        def __init__(self) -> None:
+            self.observation_tensor = torch.ones((1, 3, 8, 4), device=trainer._device)
+            self.published_observations = {
+                0: DistanceMatrix(
+                    episode_id=3,
+                    env_ids=np.array([0], dtype=np.int32),
+                    matrix_shape=(8, 4),
+                    depth=np.ones((1, 8, 4), dtype=np.float32),
+                    delta_depth=np.zeros((1, 8, 4), dtype=np.float32),
+                    semantic=np.zeros((1, 8, 4), dtype=np.int32),
+                    valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
+                    overhead=np.zeros((8, 8, 3), dtype=np.float32),
+                    robot_pose=RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0),
+                    step_id=11,
+                    timestamp=1.0,
+                )
+            }
+
+    class FakeRuntime:
+        def batch_step_tensor(
+            self,
+            actions: tuple[object, ...],
+            step_id: int,
+            *,
+            publish_actor_ids: tuple[int, ...] = (),
+        ) -> tuple[FakeTensorBatch, tuple[object, ...]]:
+            del actions, step_id, publish_actor_ids
+            result = type("FakeResult", (), {"episode_id": 3})()
+            return FakeTensorBatch(), (result,)
+
+        def perf_snapshot(self) -> object:
+            raise AssertionError("not used")
+
+        def close(self) -> None:
+            return None
+
+    trainer._runtime = FakeRuntime()  # type: ignore[assignment]
+
+    action = type("FakeAction", (), {"env_ids": np.array([0], dtype=np.int32)})()
+    payload = trainer._request_batch_step_tensor((action,), 11, publish_actor_ids=(0,))
+
+    assert payload is not None
+    obs_batch, results, published = payload
+    assert obs_batch.shape == (1, 3, 8, 4)
+    assert len(results) == 1
+    assert 0 in published
+    assert published[0].step_id == 11
+
+
+def test_request_batch_step_tensor_actions_prefers_runtime_action_tensor_seam() -> None:
+    """Canonical trainer should prefer tensor action stepping when available."""
+    trainer = _make_trainer()
+
+    class FakeTensorBatch:
+        def __init__(self) -> None:
+            self.observation_tensor = torch.ones((1, 3, 8, 4), device=trainer._device)
+            self.published_observations: dict[int, DistanceMatrix] = {}
+
+    class FakeRuntime:
+        def batch_step_tensor_actions(
+            self,
+            action_tensor: torch.Tensor,
+            step_id: int,
+            *,
+            publish_actor_ids: tuple[int, ...] = (),
+        ) -> tuple[FakeTensorBatch, tuple[object, ...]]:
+            del publish_actor_ids
+            assert action_tensor.shape == (1, 4)
+            assert step_id == 19
+            result = type("FakeResult", (), {"episode_id": 5})()
+            return FakeTensorBatch(), (result,)
+
+        def perf_snapshot(self) -> object:
+            raise AssertionError("not used")
+
+        def close(self) -> None:
+            return None
+
+    trainer._runtime = FakeRuntime()  # type: ignore[assignment]
+
+    payload = trainer._request_batch_step_tensor_actions(
+        torch.ones((1, 4), device="cpu", dtype=torch.float32),
+        19,
+        publish_actor_ids=(0,),
+    )
+
+    assert payload is not None
+    obs_batch, results, published = payload
+    assert obs_batch.shape == (1, 3, 8, 4)
+    assert len(results) == 1
+    assert published == {}
+
+
+def test_load_initial_observation_batch_prefers_tensor_reset_seam() -> None:
+    """Canonical trainer should seed initial rollout state from tensor resets."""
+    trainer = _make_trainer()
+
+    class FakeRuntime:
+        def reset_tensor(
+            self,
+            episode_id: int,
+            *,
+            actor_id: int = 0,
+            materialize: bool = False,
+        ) -> tuple[torch.Tensor, DistanceMatrix | None]:
+            assert episode_id == 0
+            obs = torch.full((3, 8, 4), float(actor_id + 1), device=trainer._device)
+            published = None
+            if materialize:
+                published = DistanceMatrix(
+                    episode_id=episode_id,
+                    env_ids=np.array([actor_id], dtype=np.int32),
+                    matrix_shape=(8, 4),
+                    depth=np.ones((1, 8, 4), dtype=np.float32) * float(actor_id + 1),
+                    delta_depth=np.zeros((1, 8, 4), dtype=np.float32),
+                    semantic=np.zeros((1, 8, 4), dtype=np.int32),
+                    valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
+                    overhead=np.zeros((8, 8, 3), dtype=np.float32),
+                    robot_pose=RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0),
+                    step_id=0,
+                    timestamp=1.0,
+                )
+            return obs, published
+
+        def perf_snapshot(self) -> object:
+            raise AssertionError("not used")
+
+        def close(self) -> None:
+            return None
+
+    trainer._runtime = FakeRuntime()  # type: ignore[assignment]
+
+    def _fail_obs_to_tensor(_obs: DistanceMatrix) -> torch.Tensor:
+        raise AssertionError("canonical initial observation path should not call _obs_to_tensor")
+
+    trainer.__dict__["_obs_to_tensor"] = _fail_obs_to_tensor
+
+    obs_batch, published = trainer._load_initial_observation_batch()
+
+    assert obs_batch.shape == (1, 3, 8, 4)
+    assert float(obs_batch[0, 0, 0, 0]) == 1.0
+    assert 0 in published
+    assert published[0].step_id == 0

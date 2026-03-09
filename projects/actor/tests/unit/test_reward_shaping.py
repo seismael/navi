@@ -124,6 +124,26 @@ def test_shape_batch() -> None:
     assert (totals > 0).all()
 
 
+def test_step_batch_matches_repeated_single_steps() -> None:
+    """Batch step advancement should match repeated scalar step() calls."""
+    shaper_a = _make_shaper(
+        intrinsic_coeff_init=1.0,
+        intrinsic_coeff_final=0.0,
+        intrinsic_anneal_steps=100,
+    )
+    shaper_b = _make_shaper(
+        intrinsic_coeff_init=1.0,
+        intrinsic_coeff_final=0.0,
+        intrinsic_anneal_steps=100,
+    )
+
+    for _ in range(7):
+        shaper_a.step()
+    shaper_b.step_batch(7)
+
+    assert abs(shaper_a.beta - shaper_b.beta) < 1e-6
+
+
 def test_default_collision_penalty_is_zero() -> None:
     """Default collision_penalty should be 0.0 (backend supplies its own).
 

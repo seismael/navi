@@ -8,9 +8,9 @@ geometric simulation from temporal cognition and asynchronous observability.
 ┌─────────────────────┐    ZMQ PUB/SUB     ┌──────────────────────┐
 │  Simulation Layer   │ ──────────────────▶ │    Brain Layer       │
 │  (environment)  │ ◀── REQ/REP ────── │    (actor)           │
-│  Pluggable backends │                     │  Sacred CNN+Mamba2   │
-│  Voxel · Habitat ·  │                     │  +Memory+PPO engine  │
-│  Mesh               │                     └──────────┬───────────┘
+│  Canonical SDF/DAG  │                     │  Sacred CNN+Mamba2   │
+│  runtime + diag     │                     │  +Memory+PPO engine  │
+│  references         │                     └──────────┬───────────┘
 └─────────┬───────────┘                                │
           │ PUB                                   PUB  │
           ▼                                            ▼
@@ -31,8 +31,8 @@ accommodate a new data source.
 - **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
 - **Windows** or Linux (PowerShell scripts target Windows; Makefile targets
   run on both via `make`)
-- **Optional:** `habitat-sim` for Habitat backend, `mamba-ssm` for Mamba2
-  temporal core, `faiss-cpu` for fast episodic memory KNN
+- **Optional:** `habitat-sim` for Habitat adapter diagnostics, `faiss-cpu` for
+  fast episodic memory KNN
 
 ## Project Layout
 
@@ -56,8 +56,7 @@ uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560
 # Terminal 2 — Brain Layer
 cd projects/actor
 uv sync
-uv run navi-actor run --sub tcp://localhost:5559 --pub tcp://*:5557 \
-    --mode step --step-endpoint tcp://localhost:5560
+uv run navi-actor serve --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
 
 # Terminal 3 — Gallery Layer (optional — passive observer)
 cd projects/auditor
@@ -65,17 +64,56 @@ uv sync
 uv run navi-auditor record --sub tcp://localhost:5559,tcp://localhost:5557 --out session.zarr
 ```
 
+### Per-Project Shortcuts
+
+```bash
+# Environment service shortcut (same as: navi-environment serve)
+cd projects/environment
+uv sync
+uv run environment
+
+# Brain service shortcut (same as: navi-actor serve)
+cd ../actor
+uv sync
+uv run brain
+
+# Dashboard shortcut (same as: navi-auditor dashboard)
+cd ../auditor
+uv sync
+uv run dashboard
+```
+
 ### One-Command Launch (Windows PowerShell)
 
+Repository launchers default to the pinned Python runtime in `.python-version`
+(`3.12.11`). `run-ghost-stack.ps1` also accepts `-PythonVersion` when you need
+to override it explicitly.
+
 ```powershell
-# Default voxel backend
-./scripts/run-ghost-stack.ps1
+# Inference stack with canonical SDF/DAG backend and a precompiled asset
+./scripts/run-ghost-stack.ps1 -Backend sdfdag -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag
 
-# Habitat backend
-./scripts/run-ghost-stack.ps1 -Backend habitat -HabitatScene /path/to/scene.glb
+# Inference stack with canonical SDF/DAG backend and compile-on-demand from a mesh scene
+./scripts/run-ghost-stack.ps1 -Backend sdfdag -HabitatScene ./data/scenes/sample_apartment.glb -AutoCompileGmDag
 
-# With a pre-trained checkpoint
-./scripts/run-ghost-stack.ps1 -ActorPolicyCheckpoint "checkpoints/policy_step_10000.pt"
+# With a pre-trained checkpoint on the canonical runtime
+./scripts/run-ghost-stack.ps1 -Backend sdfdag -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag -ActorPolicyCheckpoint "checkpoints/policy_step_10000.pt"
+
+# Training mode on the canonical SDF/DAG runtime
+./scripts/run-ghost-stack.ps1 -Train -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag -TotalSteps 500000
+```
+
+### Wrapper Scripts (Windows)
+
+```powershell
+# Environment wrapper
+./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560
+
+# Brain wrapper
+./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
+
+# Dashboard wrapper
+./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560
 ```
 
 ### Compile Mesh Assets
@@ -86,46 +124,54 @@ Convert `.ply`, `.obj`, or `.stl` meshes into the canonical sparse Zarr format:
 cd projects/environment
 uv run navi-environment compile-world \
     --source ../../data/scenes/world.ply --output ../../data/scenes/world.zarr
+
+# OBJ source
+uv run navi-environment compile-world \
+    --source ../../data/scenes/world.obj --source-format obj --output ../../data/scenes/world.zarr
+
+# STL source
+uv run navi-environment compile-world \
+    --source ../../data/scenes/world.stl --source-format stl --output ../../data/scenes/world.zarr
 ```
 
 ## Training
 
-### Online PPO Training (single scene)
-
-```bash
-# Start Environment in Terminal 1 (see Quick Start above), then:
-cd projects/actor
-uv run navi-actor train-ppo --sub tcp://localhost:5559 \
-    --step-endpoint tcp://localhost:5560 --steps 10000 \
-    --checkpoint-every 1000 --checkpoint-dir artifacts/checkpoints
-```
-
-### Sequential Multi-Scene Training (Habitat)
+### Canonical SDF/DAG Training
 
 ```powershell
-# Downloads 40+ HSSD stages, then trains sequentially with knowledge accumulation
-./scripts/download-habitat-data.ps1
-./scripts/train-habitat-sequential.ps1
+./scripts/train.ps1 -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag
 ```
 
 ### All-Night Continuous Training (Optimized)
 
-Run the fully-optimized continuous training engine that cycles through 48 scenes with Ghost-Matrix Persistence:
+Run the canonical long-duration training engine on a compiled `.gmdag` asset with Ghost-Matrix Persistence:
 
 ```powershell
-./scripts/train-all-night.ps1
+./scripts/train-all-night.ps1 -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag
 ```
+
+`train` and `train-all-night` now expose one canonical throughput-tuned launch
+surface on the compiled-path runtime. Override individual knobs only when doing
+targeted experiments.
 
 ### Live Dashboard (standalone — decoupled via ZMQ PUB/SUB)
 
-Monitor training progress, real-time depth views, and PPO curves:
+Monitor a single live actor view (actor 0 by default) in real time:
 
 ```powershell
 ./scripts/run-dashboard.ps1
 ```
 
 The dashboard runs independently from training. Connect it to any running
-Environment or Actor to observe live spherical depth views and PPO metrics.
+Environment or Actor to observe the selected live actor depth view.
+Use `--enable-actor-selector` if you need to switch actors interactively.
+The status bar now shows compact live observability beside mode flags
+(`TRAINING`, `WAITING`, etc.), including stream stall time, SPS, reward EMA,
+episode count, latest step, optimizer wall-time, and zero-wait ratio.
+Full metric history remains available through logs, telemetry events, and
+recorder artifacts.
+Default reporting/mode detection in training relies on low-volume telemetry
+events to avoid rollout-loop stalls.
 
 ## Repository Commands
 
@@ -156,6 +202,7 @@ All inter-service communication uses v2 contracts over ZeroMQ:
 |----------|-------------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System layers, SDF theory, algorithmic design decisions |
 | [docs/ACTOR.md](docs/ACTOR.md) | Cognitive engine specification (sacred, immutable) |
+| [docs/TRAINING.md](docs/TRAINING.md) | Canonical overnight training, checkpointing, dashboard attach, and recovery flow |
 | [docs/SIMULATION.md](docs/SIMULATION.md) | Simulation layer, backends, raycasting, world generators |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | Canonical wire format — models, serialization, ZMQ topics |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Theoretical performance baselines & throughput targets (roadmap) |
@@ -165,8 +212,9 @@ All inter-service communication uses v2 contracts over ZeroMQ:
 
 | Script | Purpose |
 |--------|---------|
-| [`scripts/run-ghost-stack.ps1`](scripts/run-ghost-stack.ps1) | One-command full stack launch |
-| [`scripts/train-habitat-sequential.ps1`](scripts/train-habitat-sequential.ps1) | Sequential multi-scene training |
+| [`scripts/run-ghost-stack.ps1`](scripts/run-ghost-stack.ps1) | One-command full stack launch, including canonical `sdfdag` `.gmdag` flows |
+| [`scripts/train.ps1`](scripts/train.ps1) | Canonical training on one compiled `.gmdag` asset |
+| [`scripts/train-all-night.ps1`](scripts/train-all-night.ps1) | Canonical long-duration training on one compiled `.gmdag` asset |
 | [`scripts/download-habitat-data.ps1`](scripts/download-habitat-data.ps1) | Download HSSD/ReplicaCAD scenes |
 | [`scripts/generate_sample_scene.py`](scripts/generate_sample_scene.py) | Generate sample PointNav episodes |
 | [`scripts/bench_raycast.py`](scripts/bench_raycast.py) | Raycast engine benchmark |

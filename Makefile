@@ -4,7 +4,7 @@
 PROJECTS := contracts environment actor auditor
 PROJECTS_DIR := projects
 
-.PHONY: sync-all test-all lint-all format-all typecheck-all check-all clean-all help
+.PHONY: sync-all test-all lint-all format-all typecheck-all check-all clean-all bench-temporal help
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -29,3 +29,6 @@ check-all: lint-all typecheck-all test-all ## Run lint + typecheck + tests (CI)
 
 clean-all: ## Remove .venv, __pycache__, .mypy_cache, .pytest_cache in all sub-projects
 	@powershell -NoProfile -Command "$$projects='$(PROJECTS)'.Split(' '); foreach ($$proj in $$projects) { Write-Host ''; Write-Host ('========== clean: ' + $$proj + ' =========='); $$root = Join-Path '$(PROJECTS_DIR)' $$proj; Remove-Item -Recurse -Force (Join-Path $$root '.venv'), (Join-Path $$root '__pycache__'), (Join-Path $$root '.mypy_cache'), (Join-Path $$root '.pytest_cache'), (Join-Path $$root '.ruff_cache') -ErrorAction SilentlyContinue; Get-ChildItem $$root -Recurse -Directory -Filter __pycache__ -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }"
+
+bench-temporal: ## Run temporal-core bake-off and save JSON artifact
+	@powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-temporal-bakeoff.ps1

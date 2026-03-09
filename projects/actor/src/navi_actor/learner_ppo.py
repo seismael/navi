@@ -12,11 +12,18 @@ from torch import Tensor
 if TYPE_CHECKING:
     from navi_actor.cognitive_policy import CognitiveMambaPolicy
     from navi_actor.rnd import RNDModule
-    from navi_actor.rollout_buffer import TrajectoryBuffer
+    from navi_actor.rollout_buffer import MultiTrajectoryBuffer, TrajectoryBuffer
 
 __all__: list[str] = ["PpoLearner", "PpoMetrics"]
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _prepare_minibatch_tensor(tensor: Tensor, device: torch.device) -> Tensor:
+    """Reuse CUDA-resident minibatch tensors instead of re-copying them."""
+    if tensor.device == device:
+        return tensor
+    return tensor.to(device=device, non_blocking=True)
 
 
 @dataclass(frozen=True)
@@ -55,7 +62,6 @@ class PpoLearner:
         self._learning_rate = learning_rate
         self._rnd_learning_rate = rnd_learning_rate
         self._optimizer: torch.optim.Adam | None = None
-        self._value_optimizer: torch.optim.Adam | None = None
         self._rnd_optimizer: torch.optim.Adam | None = None
 
     def set_learning_rate(
@@ -69,9 +75,6 @@ class PpoLearner:
         if self._optimizer is not None:
             for param_group in self._optimizer.param_groups:
                 param_group["lr"] = self._learning_rate
-        if self._value_optimizer is not None:
-            for param_group in self._value_optimizer.param_groups:
-                param_group["lr"] = self._learning_rate
         if self._rnd_optimizer is not None:
             for param_group in self._rnd_optimizer.param_groups:
                 param_group["lr"] = self._rnd_learning_rate
@@ -82,23 +85,29 @@ class PpoLearner:
         Covers the entire model: encoder + temporal core + actor head + critic head.
         """
         if self._optimizer is None:
+            use_foreach = policy.device.type == "cuda"
             self._optimizer = torch.optim.Adam(
-                policy.parameters(), lr=self._learning_rate
+                policy.parameters(),
+                lr=self._learning_rate,
+                foreach=use_foreach,
             )
         return self._optimizer
 
     def _get_rnd_optimizer(self, rnd: RNDModule) -> torch.optim.Adam:
         """Lazily create or return the RND predictor optimizer."""
         if self._rnd_optimizer is None:
+            use_foreach = next(rnd.predictor.parameters()).device.type == "cuda"
             self._rnd_optimizer = torch.optim.Adam(
-                rnd.predictor.parameters(), lr=self._rnd_learning_rate
+                rnd.predictor.parameters(),
+                lr=self._rnd_learning_rate,
+                foreach=use_foreach,
             )
         return self._rnd_optimizer
 
     def train_ppo_epoch(
         self,
         policy: CognitiveMambaPolicy,
-        buffer: TrajectoryBuffer,
+        buffer: TrajectoryBuffer | MultiTrajectoryBuffer,
         *,
         ppo_epochs: int = 4,
         minibatch_size: int = 64,
@@ -111,7 +120,7 @@ class PpoLearner:
         device = policy.device
         policy.train()
 
-        _LOGGER.debug("Starting PPO epoch with %d samples (epochs=%d, batch=%d)", 
+        _LOGGER.debug("Starting PPO epoch with %d samples (epochs=%d, batch=%d)",
                       len(buffer), ppo_epochs, minibatch_size)
 
         # For gradient clipping
@@ -128,13 +137,17 @@ class PpoLearner:
 
         for _epoch in range(ppo_epochs):
             for mb in buffer.sample_minibatches(minibatch_size, seq_len):
-                obs = mb.observations.to(device)
-                acts = mb.actions.to(device)
-                old_lp = mb.old_log_probs.to(device)
-                adv = mb.advantages.to(device)
-                ret = mb.returns.to(device)
-                old_vals = mb.old_values.to(device)
-                aux_tensor = mb.aux_tensors.to(device) if mb.aux_tensors is not None else None
+                obs = _prepare_minibatch_tensor(mb.observations, device)
+                acts = _prepare_minibatch_tensor(mb.actions, device)
+                old_lp = _prepare_minibatch_tensor(mb.old_log_probs, device)
+                adv = _prepare_minibatch_tensor(mb.advantages, device)
+                ret = _prepare_minibatch_tensor(mb.returns, device)
+                old_vals = _prepare_minibatch_tensor(mb.old_values, device)
+                aux_tensor = (
+                    _prepare_minibatch_tensor(mb.aux_tensors, device)
+                    if mb.aux_tensors is not None
+                    else None
+                )
 
                 # Forward pass
                 if seq_len > 0 and obs.shape[0] >= seq_len:
@@ -151,9 +164,9 @@ class PpoLearner:
                         first_h = next((h for h in mb.hidden_states if h is not None), None)
                         if first_h is not None:
                             stacked = [h if h is not None else torch.zeros_like(first_h) for h in mb.hidden_states]
-                            h0 = torch.cat(stacked, dim=1).to(device)
+                            h0 = _prepare_minibatch_tensor(torch.cat(stacked, dim=1), device)
                     if mb.dones is not None:
-                        dones_mask = mb.dones.to(device)
+                        dones_mask = _prepare_minibatch_tensor(mb.dones, device)
 
                     new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
                         obs_seq, acts_seq, hidden=h0, dones=dones_mask, aux_seq=aux_seq,
@@ -184,8 +197,8 @@ class PpoLearner:
                 total_loss = policy_loss + self._value_coeff * vf_loss - self._entropy_coeff * ent
 
                 # Optimization step
-                optimizer.zero_grad()
-                total_loss.backward()
+                optimizer.zero_grad(set_to_none=True)
+                total_loss.backward()  # type: ignore[no-untyped-call]
                 torch.nn.utils.clip_grad_norm_(params, self._max_grad_norm)
                 optimizer.step()
 
@@ -194,8 +207,8 @@ class PpoLearner:
                 if rnd is not None and rnd_optimizer is not None:
                     z_rnd = z_mb.detach()
                     rnd_loss = rnd.distillation_loss(z_rnd)
-                    rnd_optimizer.zero_grad()
-                    rnd_loss.backward()
+                    rnd_optimizer.zero_grad(set_to_none=True)
+                    rnd_loss.backward()  # type: ignore[no-untyped-call]
                     rnd_optimizer.step()
                     rnd_loss_val = rnd_loss.item()
 

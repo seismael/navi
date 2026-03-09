@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__: list[str] = ["EnvironmentConfig"]
 
+
 def find_root_env() -> Path:
     """Search upwards for the root .env file."""
     try:
@@ -20,7 +21,22 @@ def find_root_env() -> Path:
             curr = curr.parent
     except Exception:  # noqa: S110
         pass
-    return Path(".env") # fallback
+    return Path(".env")  # fallback
+
+
+def find_default_gmdag() -> Path:
+    """Search upwards for the canonical sample `.gmdag` asset."""
+    try:
+        curr = Path(__file__).resolve().parent
+        for _ in range(6):
+            candidate = curr / "artifacts" / "gmdag" / "sample_apartment.gmdag"
+            if candidate.exists():
+                return candidate
+            curr = curr.parent
+    except Exception:  # noqa: S110
+        pass
+    return Path()
+
 
 class EnvironmentConfig(BaseSettings):
     """Environment service configuration, loadable from environment or .env."""
@@ -68,7 +84,10 @@ class EnvironmentConfig(BaseSettings):
     n_actors: int = 1
     training_mode: bool = False
     compute_overhead: bool = False
-    backend: str = "voxel"
+    backend: str = "sdfdag"
+    gmdag_file: str = str(find_default_gmdag())
+    sdf_max_steps: int = 256
+    gmdag_resolution: int = 2048
     habitat_scene: str = ""
     habitat_dataset_config: str = ""
     habitat_rgb_resolution: tuple[int, int] = (480, 640)

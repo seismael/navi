@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from navi_contracts import DistanceMatrix, RobotPose
@@ -100,27 +101,10 @@ class DistanceMatrixBuilder:
         end_x = int(cx + arrow_len * np.cos(pose.yaw))
         end_z = int(cz - arrow_len * np.sin(pose.yaw))
 
-        try:
-            import cv2 as _cv2  # local; environment has no cv2 dep
-
-            _cv2.circle(img, (cx, cz), 4, (255, 0, 255), thickness=-1)
-            _cv2.arrowedLine(
-                img, (cx, cz), (end_x, end_z), (255, 0, 255), 2, tipLength=0.35,
-            )
-        except ModuleNotFoundError:
-            # Fallback: manual 7x7 block for robot + line for heading
-            for r in range(-3, 4):
-                for c_off in range(-3, 4):
-                    rr, cc = cz + r, cx + c_off
-                    if 0 <= rr < size and 0 <= cc < size:
-                        img[rr, cc] = (255, 0, 255)
-            steps = max(abs(end_x - cx), abs(end_z - cz), 1)
-            for i in range(steps + 1):
-                t = i / steps
-                lx = int(cx + t * (end_x - cx))
-                lz = int(cz + t * (end_z - cz))
-                if 0 <= lz < size and 0 <= lx < size:
-                    img[lz, lx] = (255, 0, 255)
+        cv2.circle(img, (cx, cz), 4, (255, 0, 255), thickness=-1)
+        cv2.arrowedLine(
+            img, (cx, cz), (end_x, end_z), (255, 0, 255), 2, tipLength=0.35,
+        )
 
         return img
 

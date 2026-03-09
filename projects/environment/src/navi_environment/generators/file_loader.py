@@ -18,17 +18,15 @@ __all__: list[str] = ["FileGenerator"]
 class FileGenerator(AbstractWorldGenerator):
     """Loads pre-built voxel worlds from Zarr stores.
 
-    Supports two Zarr layouts:
-      - Dense legacy layout with ``voxels`` dataset of shape ``(Wx, Wy, Wz, 2)``.
-      - Sparse chunk layout with ``chunk_index`` + ``chunks/<cx>_<cy>_<cz>`` arrays.
+        Supports canonical sparse chunk layout with
+        ``chunk_index`` + ``chunks/<cx>_<cy>_<cz>`` arrays.
     """
 
-    __slots__ = ("_chunk_size", "_dataset", "_path", "_sparse_chunks", "_spawn")
+    __slots__ = ("_chunk_size", "_path", "_sparse_chunks", "_spawn")
 
     def __init__(self, path: str | Path, chunk_size: int = 16) -> None:
         self._path = Path(path)
         self._chunk_size = chunk_size
-        self._dataset: object | None = None
         self._sparse_chunks: dict[tuple[int, int, int], NDArray[np.float32]] | None = None
         self._spawn: tuple[float, float, float] | None = None
 
@@ -43,17 +41,7 @@ class FileGenerator(AbstractWorldGenerator):
                 return np.zeros((c, c, c, 2), dtype=np.float32)
             return sparse_chunk
 
-        assert self._dataset is not None
-        ds = self._dataset
-
-        x0, y0, z0 = cx * c, cy * c, cz * c
-        x1, y1, z1 = x0 + c, y0 + c, z0 + c
-
-        shape = ds.shape  # type: ignore[union-attr]
-        if x0 < 0 or y0 < 0 or z0 < 0 or x1 > shape[0] or y1 > shape[1] or z1 > shape[2]:
-            return np.zeros((c, c, c, 2), dtype=np.float32)
-
-        return np.asarray(ds[x0:x1, y0:y1, z0:z1], dtype=np.float32)  # type: ignore[index]
+        raise RuntimeError("Sparse chunk store was not initialized")
 
     def spawn_position(self) -> tuple[float, float, float]:
         """Return spawn position from store metadata or default center."""
@@ -65,8 +53,6 @@ class FileGenerator(AbstractWorldGenerator):
 
     def _ensure_loaded(self) -> object:
         """Lazy-load the dataset on first access."""
-        if self._dataset is not None:
-            return self._dataset
         if self._sparse_chunks is not None:
             return self._sparse_chunks
 
@@ -101,14 +87,9 @@ class FileGenerator(AbstractWorldGenerator):
                     float(spawn_attr[2]),
                 )
 
-        elif "voxels" in store:  # type: ignore[operator]
-            self._dataset = store["voxels"]  # type: ignore[index]
-
         else:
-            msg = "Unsupported Zarr world format. Expected 'voxels' or 'chunk_index'+'chunks'."
+            msg = "Unsupported Zarr world format. Expected canonical 'chunk_index'+'chunks'."
             raise ValueError(msg)
 
-        if self._dataset is not None:
-            return self._dataset
         assert self._sparse_chunks is not None
         return self._sparse_chunks

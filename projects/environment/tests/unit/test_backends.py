@@ -15,6 +15,7 @@ from navi_environment.backends.habitat_semantic_lut import HabitatSemanticLUT
 from navi_environment.backends.voxel import VoxelBackend
 from navi_environment.config import EnvironmentConfig
 from navi_environment.generators.maze import MazeGenerator
+from navi_environment.mjx_env import MjxEnvironment
 
 
 class TestSimulatorBackendABC:
@@ -126,6 +127,30 @@ class TestVoxelBackend:
             total += result.reward
 
         assert abs(result.episode_return - total) < 1e-5
+
+
+class TestMjxEnvironment:
+    """Direct command stepping should match Action-based stepping."""
+
+    def test_step_pose_commands_matches_action_step(self) -> None:
+        env_a = MjxEnvironment(dt=0.02)
+        env_b = MjxEnvironment(dt=0.02)
+        pose = RobotPose(x=1.0, y=2.0, z=3.0, roll=0.1, pitch=-0.2, yaw=0.3, timestamp=0.0)
+        linear = np.array([0.25, -0.5, 0.75], dtype=np.float32)
+        angular = np.array([0.0, 0.0, -0.4], dtype=np.float32)
+        action = Action(
+            env_ids=np.array([0], dtype=np.int32),
+            linear_velocity=linear.reshape(1, 3),
+            angular_velocity=angular.reshape(1, 3),
+            policy_id="test",
+            step_id=1,
+            timestamp=1.0,
+        )
+
+        pose_from_action = env_a.step_pose(pose, action, 1.0)
+        pose_from_commands = env_b.step_pose_commands(pose, linear, angular, 1.0)
+
+        assert pose_from_action == pose_from_commands
 
 
 class TestDatasetAdapterProtocol:

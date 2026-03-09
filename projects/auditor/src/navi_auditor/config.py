@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__: list[str] = ["AuditorConfig"]
+
+_SettingsBase = cast(type[BaseModel], BaseSettings)
 
 def find_root_env() -> Path:
     """Search upwards for the root .env file."""
@@ -22,7 +25,7 @@ def find_root_env() -> Path:
         pass
     return Path(".env") # fallback
 
-class AuditorConfig(BaseSettings):
+class AuditorConfig(_SettingsBase):
     """Auditor service configuration, loadable from environment or .env."""
 
     model_config = SettingsConfigDict(

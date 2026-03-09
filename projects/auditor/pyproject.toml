@@ -19,9 +19,6 @@ dependencies = [
     "pyqtgraph>=0.13",
     "trimesh>=4.0",
     "PyOpenGL>=3.1",
-    "torch>=2.10.0",
-    "torchvision>=0.25.0",
-    "torchaudio>=2.10.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +45,7 @@ packages = ["src/navi_auditor"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = ["--strict-markers", "--strict-config", "-ra", "--tb=short"]
+cache_dir = "tests/.pytest_cache_local"
 markers = [
     "slow: marks tests as slow",
     "integration: marks integration tests",
@@ -82,7 +80,6 @@ module = [
     "trimesh.*",
     "OpenGL",
     "OpenGL.*",
-    "pydantic_settings",
 ]
 ignore_missing_imports = true
 

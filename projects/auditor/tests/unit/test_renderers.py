@@ -123,7 +123,7 @@ class TestComputeNavMetrics:
     def test_empty_input_returns_defaults(self) -> None:
         depth = np.zeros((0, 0), dtype=np.float32)
         valid = np.zeros((0, 0), dtype=bool)
-        fwd, left, right = compute_nav_metrics(depth, valid)
+        fwd, _left, _right = compute_nav_metrics(depth, valid)
         assert fwd == 1.0
 
 

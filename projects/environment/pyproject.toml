@@ -9,17 +9,25 @@ description = "Navi Environment — Ghost-Matrix Simulation Layer (headless step
 requires-python = ">=3.12"
 dependencies = [
     "navi-contracts",
+    "pydantic-settings>=2.7",
     "pyzmq>=26.0",
     "msgpack>=1.0",
     "numpy>=1.26",
+    "torch==2.5.1",
+    "torch-sdf",
     "jax>=0.4.33",
     "jaxlib>=0.4.33",
-    "mujoco>=3.2.6",
     "typer>=0.12",
     "zarr>=3.0",
     "trimesh>=4.0",
+    "opencv-python>=4.10",
     "rtree>=1.0",
     "embreex>=2.17.0",
+]
+
+[project.optional-dependencies]
+mjx = [
+    "mujoco>=3.2.6",
 ]
 
 [project.scripts]
@@ -28,11 +36,19 @@ environment = "navi_environment.cli:serve_shortcut"
 
 [tool.uv.sources]
 navi-contracts = { path = "../contracts", editable = true }
+torch-sdf = { path = "../torch-sdf", editable = true }
+torch = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = ["--strict-markers", "--strict-config", "-ra", "--tb=short"]
+cache_dir = "tests/.pytest_cache_local"
 markers = [
     "slow: marks tests as slow",
     "integration: marks integration tests",
@@ -59,7 +75,6 @@ module = [
     "zarr",
     "navi_contracts",
     "navi_contracts.*",
-    "pydantic_settings",
     "trimesh",
 ]
 ignore_missing_imports = true

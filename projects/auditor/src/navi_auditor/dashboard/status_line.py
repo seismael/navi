@@ -1,0 +1,75 @@
+"""Formatting helpers for compact dashboard status-line telemetry."""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from navi_auditor.stream_engine import StreamState
+
+
+def _last_value(values: Sequence[float] | None) -> float | None:
+    if values is None:
+        return None
+    if len(values) == 0:
+        return None
+    return float(values[-1])
+
+
+def _fmt_number(value: float | None, decimals: int = 1) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.{decimals}f}"
+
+
+def _fmt_stall_seconds(value: float | None) -> str:
+    if value is None:
+        return "--"
+    if value < 1.0:
+        return f"{value * 1000.0:.0f}ms"
+    return f"{value:.1f}s"
+
+
+def build_status_metrics_line(
+    state: StreamState | None,
+    *,
+    now: float | None = None,
+) -> str:
+    """Build a compact one-line telemetry summary for the dashboard top bar."""
+    if state is None:
+        return "stall=-- | sps=-- | ema=-- | ep=0 | step=--"
+
+    now_ts = time.time() if now is None else now
+    stall_s = None
+    if state.last_rx_time > 0.0:
+        stall_s = max(0.0, now_ts - state.last_rx_time)
+
+    sps = _last_value(state.perf_sps_history)
+    if sps is None:
+        sps = _last_value(state.env_perf_sps_history)
+    reward_ema = _last_value(state.ppo_reward_ema_history)
+    if reward_ema is None:
+        reward_ema = _last_value(state.reward_history)
+    opt_ms = _last_value(state.perf_opt_ms_history)
+    if opt_ms is None:
+        opt_ms = _last_value(state.env_perf_batch_ms_history)
+    zero_wait = _last_value(state.perf_zero_wait_history)
+    episodes = len(state.episode_return_history)
+
+    step_id: int | None = None
+    if len(state.telemetry_buffer) > 0:
+        step_id = int(state.telemetry_buffer[-1].step_id)
+    elif state.latest_matrix is not None:
+        step_id = int(state.latest_matrix.step_id)
+
+    return (
+        f"stall={_fmt_stall_seconds(stall_s)}"
+        f" | sps={_fmt_number(sps, 1)}"
+        f" | ema={_fmt_number(reward_ema, 3)}"
+        f" | ep={episodes}"
+        f" | step={step_id if step_id is not None else '--'}"
+        f" | opt={_fmt_number(opt_ms, 0)}ms"
+        f" | zw={_fmt_number(None if zero_wait is None else zero_wait * 100.0, 1)}%"
+    )

@@ -305,6 +305,7 @@ class MeshSceneBackend(SimulatorBackend):
             # Return dummy result; actual first step happens next call
             return obs, StepResult(
                 step_id=step_id, env_id=actor_id, done=False,
+                episode_id=a.episode_id,
                 truncated=False, reward=0.0, episode_return=0.0,
                 timestamp=time.time(),
             )
@@ -375,7 +376,14 @@ class MeshSceneBackend(SimulatorBackend):
         a.needs_reset = done
 
         if collision:
-            _log.debug("Actor %d in persistent collision. Reward: %0.2f", actor_id, reward)
+            _log.debug("Actor %d collided. Applying nudge.", actor_id)
+            # Collision Nudge: Move 0.5m backwards to free the agent
+            import dataclasses
+            a.pose = dataclasses.replace(
+                a.pose,
+                x=a.pose.x - 0.5 * math.cos(a.pose.yaw),
+                z=a.pose.z - 0.5 * math.sin(a.pose.yaw)
+            )
 
         now = time.time()
         # Update timestamp by creating new pose (frozen)
@@ -388,6 +396,7 @@ class MeshSceneBackend(SimulatorBackend):
         result = StepResult(
             step_id=step_id,
             env_id=actor_id,
+            episode_id=a.episode_id,
             done=done,
             truncated=truncated,
             reward=reward,
@@ -443,7 +452,7 @@ class MeshSceneBackend(SimulatorBackend):
             if a.needs_reset:
                 a.episode_id += 1
                 self.reset(a.episode_id, actor_id=aid)
-            
+
             # Kinematics
             self._step_actor_kinematics(actions[idx], aid)
 
@@ -457,19 +466,19 @@ class MeshSceneBackend(SimulatorBackend):
         # Vectorized generation of origins and ray directions
         poses = np.array([[self._actors[aid].pose.x, self._actors[aid].pose.y, self._actors[aid].pose.z] for aid in actor_ids], dtype=np.float32)
         yaws = np.array([self._actors[aid].pose.yaw for aid in actor_ids], dtype=np.float32)
-        
+
         all_origins = np.repeat(poses, n_rays_per_actor, axis=0)
-        
+
         cos_y = np.cos(yaws)
         sin_y = np.sin(yaws)
-        
+
         rot = np.zeros((n, 3, 3), dtype=np.float32)
         rot[:, 0, 0] = cos_y
         rot[:, 0, 2] = sin_y
         rot[:, 1, 1] = 1.0
         rot[:, 2, 0] = -sin_y
         rot[:, 2, 2] = cos_y
-        
+
         all_dirs = np.einsum('rj,ncj->nrc', self._ray_dirs, rot).reshape(total_rays, 3)
 
         try:

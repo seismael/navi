@@ -18,9 +18,10 @@ The server delegates physics and sensing to a `SimulatorBackend` ABC:
 
 ```
 SimulatorBackend (ABC)
-  ├── VoxelBackend       — procedural voxel worlds + RaycastEngine (default)
-  ├── HabitatBackend     — Meta habitat-sim with DatasetAdapter
-  └── MeshSceneBackend   — trimesh ray-mesh intersection for .glb/.obj/.ply
+  ├── SdfDagBackend     — batched CUDA sphere tracing against compiled `.gmdag` caches
+  ├── VoxelBackend      — procedural voxel worlds + RaycastEngine (diagnostic-only)
+  ├── HabitatBackend    — Meta habitat-sim with DatasetAdapter (diagnostic-only)
+  └── MeshSceneBackend  — trimesh ray-mesh intersection for .glb/.obj/.ply (diagnostic-only)
 ```
 
 External backends (Habitat, etc.) use a `DatasetAdapter` (Protocol) internally
@@ -54,29 +55,52 @@ Procedural world generators implementing `AbstractWorldGenerator`:
 cd projects/environment
 uv sync
 
-# Default voxel backend
+# Canonical sdfdag backend (reuses the sample asset when present)
 uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560
 
-# Habitat backend (requires habitat-sim)
+# Explicit canonical asset
+uv run navi-environment serve --backend sdfdag --gmdag-file ./worlds/city.gmdag --mode step --pub tcp://*:5559 --rep tcp://*:5560
+
+# Diagnostic backends (explicit opt-in only)
+uv run navi-environment serve --backend voxel --mode step --pub tcp://*:5559 --rep tcp://*:5560
+
+# Habitat backend (diagnostic-only, requires habitat-sim)
 uv run navi-environment serve --backend habitat --habitat-scene /path/to/scene.glb --mode step --pub tcp://*:5559 --rep tcp://*:5560
 
-# Mesh backend (trimesh — no habitat-sim required)
-uv run navi-environment serve --backend mesh --mesh-scene /path/to/scene.glb --mode step --pub tcp://*:5559 --rep tcp://*:5560
+# Mesh backend (diagnostic-only, trimesh only)
+uv run navi-environment serve --backend mesh --habitat-scene /path/to/scene.glb --mode step --pub tcp://*:5559 --rep tcp://*:5560
 
 # Compile model assets (.ply/.obj/.stl) into sparse chunked world format
 uv run navi-environment compile-world --source ./worlds/city.ply --output ./worlds/city.zarr
 uv run navi-environment compile-world --source ./worlds/city.obj --source-format obj --output ./worlds/city.zarr
 
+# Compile and validate `.gmdag` assets for the canonical SDF/DAG path
+uv run navi-environment compile-gmdag --source ./worlds/city.glb --output ./worlds/city.gmdag --resolution 2048
+uv run navi-environment check-sdfdag --gmdag-file ./worlds/city.gmdag
+uv run navi-environment bench-sdfdag --gmdag-file ./worlds/city.gmdag --actors 4 --steps 200
+
 # Run with file-backed world
 uv run navi-environment serve --world-source file --world-file ./worlds/city.zarr --mode step --pub tcp://*:5559 --rep tcp://*:5560
+
+# Shortcut command (equivalent to: navi-environment serve)
+uv run environment
+```
+
+## Windows Wrapper Script
+
+```powershell
+# From repository root
+./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560
+./scripts/run-environment.ps1 --backend sdfdag --gmdag-file ./artifacts/gmdag/sample_apartment.gmdag --mode step
+./scripts/run-environment.ps1 --backend mesh --habitat-scene C:/path/to/scene.glb --mode step
 ```
 
 ## World Format
 
 - Canonical file-backed world format is Zarr only.
 - Supports sparse chunk layout (`chunk_index` + `chunks/<cx>_<cy>_<cz>`) for efficient storage.
-- Legacy dense `voxels` dataset remains readable for compatibility.
 - `compile-world` supports source model ingestion from PLY, OBJ, and ASCII STL.
+- `compile-gmdag`, `check-sdfdag`, and `bench-sdfdag` cover the canonical `.gmdag` compiler, preflight, and throughput validation path.
 
 ## Shape Convention
 

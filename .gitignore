@@ -21,6 +21,8 @@ wheels/
 
 # pytest
 .pytest_cache/
+projects/*/tests/.pytest_tmp/
+projects/*/tests/.pytest_cache_local/
 
 # ruff
 .ruff_cache/
@@ -50,6 +52,7 @@ Thumbs.db
 *logs/
 projects/*/artifacts/
 .tmp_test_outputs/
+projects/voxel-dag/build-local/
 
 # Local data captures
 *.zarr/
@@ -59,3 +62,7 @@ projects/*/artifacts/
 
 # Local Env
 .env
+
+# General
+*.log
+*.gmdag

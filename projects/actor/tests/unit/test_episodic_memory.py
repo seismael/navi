@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 from navi_actor.memory.episodic import EpisodicMemory
 
@@ -25,9 +26,9 @@ def test_empty_query() -> None:
     """Querying empty memory should return similarity=0, no match."""
     mem = _make_memory()
     vec = np.random.randn(128).astype(np.float32)
-    sim, matched, is_loop = mem.query(vec)
+    sim, _matched, is_loop = mem.query(vec)
     assert sim == 0.0
-    assert matched is None
+    assert _matched is None
     assert is_loop is False
 
 
@@ -36,10 +37,10 @@ def test_add_and_query_identical() -> None:
     mem = _make_memory(exclusion_window=0, threshold=0.9)
     vec = np.random.randn(128).astype(np.float32)
     mem.add(vec)
-    sim, matched, is_loop = mem.query(vec)
+    sim, _matched, is_loop = mem.query(vec)
     assert sim > 0.99
     assert is_loop is True
-    assert matched is not None
+    assert _matched is not None
 
 
 def test_exclusion_window() -> None:
@@ -49,7 +50,7 @@ def test_exclusion_window() -> None:
     # Add 3 vectors — all within exclusion window
     for _ in range(3):
         mem.add(vec)
-    sim, matched, is_loop = mem.query(vec)
+    sim, _matched, is_loop = mem.query(vec)
     # All stored vectors are within exclusion window → no match
     assert sim == 0.0
     assert is_loop is False
@@ -63,7 +64,7 @@ def test_outside_exclusion_window() -> None:
     # Add 2 more random vectors to push target outside window
     for _ in range(2):
         mem.add(np.random.randn(128).astype(np.float32))
-    sim, matched, is_loop = mem.query(target)
+    sim, _matched, is_loop = mem.query(target)
     assert sim > 0.9
     assert is_loop is True
 
@@ -75,26 +76,52 @@ def test_reset_clears_memory() -> None:
         mem.add(np.random.randn(128).astype(np.float32))
     mem.reset()
     vec = np.random.randn(128).astype(np.float32)
-    sim, matched, is_loop = mem.query(vec)
+    sim, _matched, is_loop = mem.query(vec)
     assert sim == 0.0
     assert is_loop is False
 
 
 def test_capacity_eviction() -> None:
     """When capacity is exceeded, oldest entries should be evicted."""
-    mem = _make_memory(capacity=5, exclusion_window=0)
-    # Add 5 vectors
-    vecs = [np.random.randn(128).astype(np.float32) for _ in range(5)]
+    mem = _make_memory(dim=8, capacity=5, exclusion_window=0, threshold=0.9)
+    vecs = [np.eye(8, dtype=np.float32)[i] for i in range(6)]
     for v in vecs:
         mem.add(v)
 
-    # 6th vector should cause eviction of the first
-    mem.add(np.random.randn(128).astype(np.float32))
+    assert mem.size == 5
 
-    # Original first vector may not be found with high similarity
-    # (it should have been evicted)
-    sim, _, _ = mem.query(vecs[0])
-    # We can't guarantee 0.0 due to random similarity but it should be lower
+    sim, matched, is_loop = mem.query(vecs[0])
+    assert sim < 0.1
+    assert matched is not None
+    assert is_loop is False
+
+
+def test_capacity_eviction_overwrites_oldest_entries() -> None:
+    """Eviction should retain the newest entries in the fixed-capacity ring."""
+    mem = _make_memory(dim=8, capacity=4, exclusion_window=0, threshold=0.9)
+
+    for i in range(8):
+        mem.add(np.eye(8, dtype=np.float32)[i])
+
+    assert mem.size == 4
+
+    sim, matched, is_loop = mem.query(np.eye(8, dtype=np.float32)[0])
+    assert sim < 0.1
+    assert matched is not None
+    assert is_loop is False
+
+
+def test_tensor_batch_query_and_add_stay_vectorized() -> None:
+    mem = _make_memory(dim=4, capacity=6, exclusion_window=1, threshold=0.8)
+    basis = torch.eye(4, dtype=torch.float32)
+
+    mem.add_batch_tensor(basis)
+    similarities, loop_flags = mem.query_batch_tensor(basis)
+
+    assert similarities.shape == (4,)
+    assert loop_flags.shape == (4,)
+    assert similarities[-1].item() < 0.1
+    assert torch.all(loop_flags[:-1])
 
 
 def test_orthogonal_vectors_no_loop() -> None:

@@ -1,10 +1,10 @@
-"""Tests for TrajectoryBuffer (PPO) and legacy RolloutBuffer."""
+"""Tests for TrajectoryBuffer (PPO)."""
 
 from __future__ import annotations
 
 import torch
 
-from navi_actor.rollout_buffer import PPOTransition, TrajectoryBuffer
+from navi_actor.rollout_buffer import MultiTrajectoryBuffer, PPOTransition, TrajectoryBuffer
 
 
 def _make_transition(
@@ -139,7 +139,7 @@ def test_truncation_bootstrap() -> None:
         truncated=True,
     )
     buf_trunc.append(tr_trunc)
-    buf_trunc.compute_returns_and_advantages(last_value=0.0)
+    buf_trunc.compute_returns_and_advantages(last_value=value)
 
     # Buffer with a true termination at the end
     buf_done = TrajectoryBuffer(gamma=gamma, gae_lambda=gae_lambda)
@@ -192,3 +192,75 @@ def test_truncation_still_cuts_gae_trace() -> None:
     assert adv_cont_0 != adv_trunc_0, (
         "GAE trace should be cut at truncation boundary"
     )
+
+
+def test_preallocated_tensor_storage_matches_standard_path() -> None:
+    rewards = [1.0, 0.5, -0.25, 2.0]
+    dones = [False, False, True, False]
+
+    standard = TrajectoryBuffer(gamma=0.99, gae_lambda=0.95)
+    preallocated = TrajectoryBuffer(gamma=0.99, gae_lambda=0.95, capacity=len(rewards))
+
+    for reward, done in zip(rewards, dones, strict=True):
+        transition = _make_transition(reward=reward, done=done, value=0.25)
+        standard.append(transition)
+        preallocated.append_fields(
+            observation=transition.observation,
+            action=transition.action,
+            log_prob=torch.tensor(transition.log_prob, dtype=torch.float32),
+            value=torch.tensor(transition.value, dtype=torch.float32),
+            reward=torch.tensor(transition.reward, dtype=torch.float32),
+            done=torch.tensor(transition.done, dtype=torch.bool),
+            truncated=torch.tensor(transition.truncated, dtype=torch.bool),
+            hidden_state=transition.hidden_state,
+            aux_tensor=transition.aux_tensor,
+        )
+
+    standard.compute_returns_and_advantages(last_value=0.0)
+    preallocated.compute_returns_and_advantages(last_value=torch.tensor(0.0))
+
+    assert torch.allclose(preallocated._advantages.cpu(), standard._advantages.cpu())
+    assert torch.allclose(preallocated._returns.cpu(), standard._returns.cpu())
+
+    standard_batches = list(standard.sample_minibatches(batch_size=4, seq_len=0))
+    preallocated_batches = list(preallocated.sample_minibatches(batch_size=4, seq_len=0))
+    assert len(standard_batches) == len(preallocated_batches) == 1
+    assert standard_batches[0].observations.shape == preallocated_batches[0].observations.shape
+    assert standard_batches[0].actions.shape == preallocated_batches[0].actions.shape
+
+
+def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+    hidden_a = torch.randn(1, 2, 8)
+    hidden_b = torch.randn(1, 2, 8)
+
+    for step, hidden in enumerate((hidden_a, hidden_b), start=1):
+        obs = torch.randn(2, 3, 16, 8)
+        actions = torch.randn(2, 4)
+        log_probs = torch.randn(2)
+        values = torch.full((2,), 0.5 * step)
+        rewards = torch.full((2,), float(step))
+        dones = torch.tensor([False, step == 2], dtype=torch.bool)
+        truncateds = torch.zeros(2, dtype=torch.bool)
+        aux = torch.randn(2, 3)
+        buffer.append_batch(
+            observations=obs,
+            actions=actions,
+            log_probs=log_probs,
+            values=values,
+            rewards=rewards,
+            dones=dones,
+            truncateds=truncateds,
+            hidden_batch=hidden,
+            aux_tensors=aux,
+        )
+
+    buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
+    batches = list(buffer.sample_minibatches(batch_size=4, seq_len=2))
+
+    assert batches
+    first = batches[0]
+    assert first.observations.shape[0] == 4
+    assert len(first.hidden_states) == 2
+    assert first.dones is not None
+    assert first.dones.shape == (2, 2)

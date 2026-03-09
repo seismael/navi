@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import typer
 
-from navi_contracts import setup_logging
 from navi_auditor.config import AuditorConfig
 from navi_auditor.matrix_viewer import MatrixViewer
 from navi_auditor.recorder import Recorder
 from navi_auditor.rewinder import Rewinder
 from navi_auditor.storage.zarr_backend import ZarrBackend
+from navi_contracts import setup_logging
 
 __all__: list[str] = ["app"]
 
@@ -78,6 +78,18 @@ def dashboard(
         None,
         help="Environment REP address for Tab-toggle manual stepping",
     ),
+    passive: bool = typer.Option(
+        False,
+        help="Run in passive actor-only mode with no environment SUB/REQ sockets.",
+    ),
+    actor_id: int = typer.Option(
+        0,
+        help="Actor ID to display (default: 0).",
+    ),
+    enable_actor_selector: bool = typer.Option(
+        False,
+        help="Enable actor selector UI. Disabled by default for maximum throughput.",
+    ),
     hz: float = typer.Option(30.0, help="Dashboard + teleop tick rate"),
     linear_speed: float = typer.Option(1.5, help="Max horizontal linear speed"),
     yaw_rate: float = typer.Option(1.5, help="Max yaw rate"),
@@ -91,18 +103,22 @@ def dashboard(
     config = AuditorConfig()
 
     # CLI overrides
-    m_sub = matrix_sub or config.matrix_sub_address
-    a_sub = actor_sub or config.actor_sub_address
-    s_end = step_endpoint or config.step_endpoint
+    m_sub = "" if passive else (matrix_sub if matrix_sub is not None else config.matrix_sub_address)
+    a_sub = actor_sub if actor_sub is not None else config.actor_sub_address
+    s_end = "" if passive else (step_endpoint if step_endpoint is not None else config.step_endpoint)
 
     typer.echo("Initialising Ghost-Matrix RL Dashboard...")
     typer.echo("  Tab=toggle manual/AI  WASD/arrows=move  ESC=quit")
+    if passive:
+        typer.echo("  Mode=passive actor-only (no environment control sockets)")
 
     scene_path = scene if scene else None
     dashboard_runner = MatrixViewer(
         matrix_sub=m_sub,
         actor_sub=a_sub,
         step_endpoint=s_end,
+        actor_id=actor_id,
+        enable_actor_selector=enable_actor_selector,
         hz=hz,
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,
