@@ -1,190 +1,95 @@
-# SIMULATION.md — Simulation Layer Architecture
-
-**Subsystem:** Environment — Simulation Layer  
-**Package:** `navi-environment`  
-**Status:** Active canonical specification  
-**Policy:** See [AGENTS.md](../AGENTS.md) for implementation rules and non-negotiables
-
----
+# SIMULATION.md — Canonical Environment Runtime
 
 ## 1. Overview
 
-The Simulation Layer executes headless environment stepping via pluggable
-backends and produces canonical `DistanceMatrix v2` observations. It is the
-sole source of spatial truth for the training pipeline — all environmental
-data flows through this layer before reaching the Brain.
+The environment layer now exposes one active runtime only:
 
-**Responsibilities:**
+- compiled `.gmdag` assets prepared from source scenes
+- CUDA sphere tracing through `projects/torch-sdf`
+- `DistanceMatrix v2` observations preserved for the actor contract
+- coarse `environment.sdfdag.perf` telemetry for throughput tracking
+- staged corpus refresh that removes transient downloads after successful integration
 
-- Execute simulation steps via `SimulatorBackend` implementations.
-- Receive `Action v2` commands from the Brain.
-- Publish `DistanceMatrix v2` observations in canonical `(1, Az, El)` shape.
-- Publish `TelemetryEvent` for pose tracking and diagnostics.
-- Support step-mode (REQ/REP) and async-mode (PUB/SUB) operation.
+The environment remains the sole spatial truth layer for Navi.
 
-**ZMQ server:** `EnvironmentServer` binds a PUB socket (default `tcp://*:5559`)
-and a REP socket (default `tcp://*:5560`). In step mode, it polls for
-`StepRequest` messages with a 500 ms idle re-publish interval to support late
-subscribers. In async mode, it subscribes to `action_v2` and steps continuously.
-
-### 1.1. Canonical Launch Commands
+## 2. Canonical Commands
 
 ```bash
-# Environment service (step mode)
-uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560
+# Environment service
+uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag
 
-# Canonical compiled-path backend
-uv run navi-environment serve --backend sdfdag --gmdag-file ./worlds/city.gmdag --mode step --pub tcp://*:5559 --rep tcp://*:5560
-
-# Shortcut command (equivalent to serve)
+# Shortcut
 uv run environment
 
-# Compile source meshes to canonical sparse Zarr
-uv run navi-environment compile-world --source ./worlds/city.ply --output ./worlds/city.zarr
-uv run navi-environment compile-world --source ./worlds/city.obj --source-format obj --output ./worlds/city.zarr
-uv run navi-environment compile-world --source ./worlds/city.stl --source-format stl --output ./worlds/city.zarr
+# Prepare or refresh the full corpus
+uv run navi-environment prepare-corpus --force-recompile
 
-# Compile source meshes to `.gmdag` via the internal voxel-dag project
-uv run navi-environment compile-gmdag --source ./worlds/city.glb --output ./worlds/city.gmdag --resolution 2048
+# Compile one explicit source scene
+uv run navi-environment compile-gmdag --source ./data/scenes/replicacad/frl_apartment_stage.glb --output ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag --resolution 512
 
-# Preflight the canonical SDF/DAG stack and validate asset metadata
-uv run navi-environment check-sdfdag --gmdag-file ./worlds/city.gmdag
-
-# Benchmark the canonical batched runtime directly in the environment layer
-uv run navi-environment bench-sdfdag --gmdag-file ./worlds/city.gmdag --actors 4 --steps 200
+# Runtime preflight and throughput validation
+uv run navi-environment check-sdfdag --gmdag-file ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag
+uv run navi-environment bench-sdfdag --gmdag-file ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag --actors 4 --steps 200
 ```
 
----
+## 3. Runtime Architecture
 
-## 2. Backend Architecture
-
-All simulation is encapsulated behind the `SimulatorBackend` abstract base class,
-enabling pluggable environment implementations with zero changes to the server,
-wire protocol, or training engine.
+`SimulatorBackend` remains the environment abstraction boundary, but the repository now keeps only one production implementation:
 
 ```text
-SimulatorBackend (ABC)
-  ├── SdfDagBackend        — Batched CUDA sphere tracing against `.gmdag` caches (canonical training runtime)
-  ├── VoxelBackend         — Procedural voxel worlds + RaycastEngine (diagnostic reference)
-  ├── HabitatBackend       — Meta habitat-sim with HabitatAdapter (external adapter diagnostics)
-  └── MeshSceneBackend     — trimesh ray-mesh intersection for .glb/.obj/.ply (diagnostic reference)
+SimulatorBackend
+  └── SdfDagBackend — batched CUDA sphere tracing against compiled `.gmdag` caches
 ```
 
-`SdfDagBackend` is the repository's canonical training runtime. `VoxelBackend`,
-`MeshSceneBackend`, and `HabitatBackend` remain available only for targeted
-diagnostics, adapter validation, and regression comparison outside canonical
-training launch surfaces.
+Key runtime properties:
 
-`SdfDagBackend` is also the canonical environment-side performance source for
-the compiled path: it records rolling batch throughput internally, the server
-emits coarse `environment.sdfdag.perf` telemetry every 100 batch steps, and the
-same perf snapshot surface powers the `bench-sdfdag` CLI.
+- one canonical compiled-scene execution path
+- no procedural generators
+- no mesh, habitat, or voxel fallback runtime
+- no sparse-Zarr world format in the active environment surface
 
-### 2.1. SimulatorBackend ABC
+## 4. Corpus Preparation
 
-**Module:** `backends/base.py`
+`prepare-corpus` discovers source scenes, compiles missing or stale `.gmdag` assets, and writes:
 
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `reset(episode_id)` | `→ DistanceMatrix` | Reset environment, return initial observation |
-| `step(action, step_id)` | `→ (DistanceMatrix, StepResult)` | Apply action, return observation + result |
-| `perf_snapshot()` | `→ object \| None` | Coarse runtime metrics for canonical performance telemetry |
-| `close()` | `→ None` | Release resources |
-| `pose` (property) | `→ RobotPose` | Current 6-DOF robot pose |
-| `episode_id` (property) | `→ int` | Current episode counter |
+- source manifest under the source root
+- compiled manifest under the compiled corpus root
 
-All backends produce `DistanceMatrix` observations with shape `(1, Az, El)` for
-`depth`, `delta_depth`, `semantic`, and `valid_mask` arrays.
+Canonical refresh policy:
 
-### 2.2. VoxelBackend
+- default compile resolution is `512`
+- compiled assets with the wrong stored resolution are rebuilt automatically during refresh
+- `scripts/refresh-scene-corpus.ps1` stages source downloads and only promotes the compiled corpus after a full successful rebuild
+- transient source downloads are removed after successful promotion so the persistent runtime depends on the compiled corpus, not raw meshes
 
-**Module:** `backends/voxel.py`
+Canonical roots:
 
-The default backend for procedural world diagnostics. Delegates environment
-generation to an `AbstractWorldGenerator`, physics to `MjxEnvironment`, and
-observation to `DistanceMatrixBuilder` + `RaycastEngine`.
+- transient source staging: `artifacts/tmp/corpus-refresh/downloads/`
+- compiled corpus: `artifacts/gmdag/corpus/`
 
-This backend remains valuable for fast procedural experiments, but it is not
-the long-term high-throughput target for compiled real-world scenes.
+## 5. Observation Contract
 
-**Component chain:**
+The environment still publishes the actor’s required contract unchanged:
 
-1. `AbstractWorldGenerator` → produces voxel chunks `(N, 5)` as
-   `[x, y, z, density, semantic_id]`.
-2. `SparseVoxelGrid` → dict-based sparse chunk storage keyed by `(cx, cy, cz)`.
-3. `SlidingWindow` → materializes only chunks near the actor, culling
-   out-of-range geometry.
-4. `FrustumLoader` + `LookAheadBuffer` → predictive chunk prefetching based on
-   velocity vector and frustum projection.
-5. `MjxEnvironment` → body-frame kinematic pose stepping with configurable dt.
-   Collision constraint via `_constrain_translation()` — nearest-occupied-voxel
-   distance with configurable `barrier_distance`.
-6. `DistanceMatrixBuilder` → raycasts local voxels into `(Az, El)` spherical
-   depth, computes delta-depth (frame differencing), valid-mask, overhead
-   minimap, and packs into `DistanceMatrix`.
-7. `RaycastEngine` → vectorized `np.minimum.at` scatter-reduce projection of
-   voxels into spherical bins.
+- `depth`
+- `delta_depth`
+- `semantic`
+- `valid_mask`
 
-**Reward system (structured, multi-signal):**
+All arrays remain shaped `(1, Az, El)`.
 
-| Signal | Value | Trigger |
-|--------|-------|---------|
-| Target discovery | up to 5.0 | Proximity to semantic ID 10 voxels (radius 3.0) |
-| Exploration | 0.3 | New 2×2 floor cell visited |
-| Progress | 0.8 × distance | Forward translation magnitude |
-| Collision | -2.0 | Motion blockage detected |
-| Anti-circling | -0.5 | High yaw travel + low position travel over 20-step window |
+## 6. Runtime Ports
 
-### 2.3. HabitatBackend
+- `5559` PUB: `distance_matrix_v2`
+- `5560` REP: `step_request_v2` / `step_result_v2`
 
-**Module:** `backends/habitat_backend.py`
+## 7. Validation
 
-Wraps Meta's `habitat-sim` into the `SimulatorBackend` interface. Uses
-equirectangular depth + semantic sensors at `(elevation_bins, azimuth_bins)`
-resolution.
-
-**Sensor setup:**
-
-- `equirect_depth` — `EquirectangularSensor` with `SensorType.DEPTH`, produces
-  float32 depth in metres.
-- `equirect_semantic` — `EquirectangularSensor` with `SensorType.SEMANTIC`,
-  produces uint32 instance IDs.
-
-**Coordinate mapping:** Habitat uses Y-up, forward = -Z — compatible with
-Navi's coordinate system. Agent rotation around Y-axis maps directly to yaw.
-
-**Action conversion:** Navi's 4-DOF continuous action `[fwd, vert, lat, yaw]`
-is converted to Habitat velocity control by computing world-frame velocity from
-the agent's current yaw, applying translation, rotating by yaw delta, and
-snapping to the navmesh.
-
-**Episode management:** Supports PointNav episodes from JSON dataset files
-following the Habitat format. Goal proximity reward and goal-reached termination
-are integrated.
-
-All observation conversion is delegated to the `HabitatAdapter` (see §3).
-
-### 2.4. MeshSceneBackend
-
-**Module:** `backends/mesh_backend.py`
-
-A lightweight backend that loads `.glb`, `.obj`, or `.ply` meshes via `trimesh`
-and performs equirectangular raycasting without requiring `habitat-sim`. Useful
-for testing with arbitrary 3D models when Habitat is not installed.
-
-Mesh is retained only as a correctness and regression reference for targeted
-diagnostics. Canonical training no longer routes through this backend.
-
-**Features:**
-
-- **Ghost-Matrix persistence:** Collisions apply penalties but do **not** set
-  `done=True` during training.
-- **Hard truncation:** Episodes are truncated at the configured maximum step
-  count to preserve episodic diversity.
-- **Equirectangular raycasting:** Generates `(Az, El)` spherical depth tensors
-  via `trimesh.ray` intersection, matching the canonical observation format.
-- **Coordinate system:** Uses Navi's standard Y-up, forward-X convention with
-  automatic scene centering and spawn point computation.
+```bash
+uv run ruff check .
+uv run mypy src/
+uv run pytest tests/
+```
 
 ---
 

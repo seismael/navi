@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 __all__: list[str] = ["MjxBackendInfo", "MjxEnvironment"]
 
-# Dynamic speed scaling constants (shared with MeshSceneBackend)
+# Dynamic speed scaling constants used by the canonical kinematics layer.
 # Threshold is in **metres** — depth is un-normalised before comparison.
 _SAFE_DEPTH_THRESHOLD: float = 1.5
 _MIN_SPEED_FACTOR: float = 0.05
@@ -210,7 +210,7 @@ class MjxEnvironment:
     ) -> float:
         """Proximity-based speed factor from front hemisphere depth.
 
-        See ``MeshSceneBackend._compute_speed_factor`` for details.
+        The speed factor is derived from the most recent front-facing depth.
 
         Args:
             prev_depth: (Az, El) normalised depth from the last step,

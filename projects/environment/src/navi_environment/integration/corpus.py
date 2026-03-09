@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
-from datetime import datetime, timezone
 
-from navi_environment.integration.voxel_dag import compile_gmdag_world
+from navi_environment.integration.voxel_dag import compile_gmdag_world, load_gmdag_asset
 
 __all__ = [
     "CompiledSceneEntry",
     "PreparedSceneCorpus",
     "SceneSourceEntry",
+    "discover_compiled_scene_entries",
     "discover_scene_sources",
     "find_default_gmdag_corpus_root",
     "find_default_scene_root",
     "prepare_training_scene_corpus",
+    "resolve_compiled_scene_query",
     "resolve_scene_query",
 ]
 
@@ -160,6 +162,79 @@ def _load_manifest_entries(manifest_path: Path) -> list[SceneSourceEntry]:
     raise RuntimeError(msg)
 
 
+def _load_compiled_manifest_entries(manifest_path: Path) -> list[CompiledSceneEntry]:
+    with manifest_path.open(encoding="utf-8-sig") as handle:
+        manifest_data: Any = json.load(handle)
+
+    scenes: Any
+    if isinstance(manifest_data, list):
+        scenes = manifest_data
+    elif isinstance(manifest_data, dict):
+        scenes = manifest_data.get("scenes", [])
+    else:
+        scenes = []
+
+    entries: list[CompiledSceneEntry] = []
+    for item in scenes:
+        if isinstance(item, str):
+            compiled_path = _resolve_manifest_scene_path(item, manifest_path)
+            if compiled_path.suffix.lower() != ".gmdag":
+                continue
+            entries.append(
+                CompiledSceneEntry(
+                    source_path=compiled_path,
+                    compiled_path=compiled_path,
+                    dataset="compiled",
+                    scene_name=compiled_path.stem,
+                )
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        raw_compiled_path = item.get("gmdag_path") or item.get("path") or item.get("scene")
+        if not isinstance(raw_compiled_path, str):
+            continue
+        compiled_path = _resolve_manifest_scene_path(raw_compiled_path, manifest_path)
+        if compiled_path.suffix.lower() != ".gmdag":
+            continue
+        raw_source_path = item.get("source_path") if isinstance(item.get("source_path"), str) else raw_compiled_path
+        source_path = _resolve_manifest_scene_path(raw_source_path, manifest_path)
+        dataset = item.get("dataset") if isinstance(item.get("dataset"), str) else "compiled"
+        scene_name = item.get("scene_name") if isinstance(item.get("scene_name"), str) else compiled_path.stem
+        entries.append(
+            CompiledSceneEntry(
+                source_path=source_path,
+                compiled_path=compiled_path,
+                dataset=dataset,
+                scene_name=scene_name,
+            )
+        )
+
+    if not entries:
+        msg = f"Unsupported compiled manifest structure: {manifest_path}"
+        raise RuntimeError(msg)
+    return entries
+
+
+def _scan_compiled_scene_entries(gmdag_root: Path) -> list[CompiledSceneEntry]:
+    """Discover compiled scenes directly from the filesystem.
+
+    This keeps canonical training usable even if a compiled manifest exists but
+    contains stale paths from a previous staging location.
+    """
+    resolved_root = gmdag_root.resolve()
+    return [
+        CompiledSceneEntry(
+            source_path=path.resolve(),
+            compiled_path=path.resolve(),
+            dataset=_infer_dataset(path.resolve(), resolved_root),
+            scene_name=path.stem,
+        )
+        for path in sorted(resolved_root.rglob("*.gmdag"))
+        if path.is_file()
+    ]
+
+
 def discover_scene_sources(
     source_root: Path | None = None,
     *,
@@ -207,6 +282,43 @@ def discover_scene_sources(
     return filtered
 
 
+def discover_compiled_scene_entries(
+    gmdag_root: Path | None = None,
+    *,
+    manifest_path: Path | None = None,
+) -> list[CompiledSceneEntry]:
+    """Discover compiled `.gmdag` entries from a manifest or corpus root."""
+    entries: list[CompiledSceneEntry] = []
+    resolved_root = (gmdag_root or find_default_gmdag_corpus_root()).resolve()
+    if manifest_path is not None:
+        entries = _load_compiled_manifest_entries(manifest_path.resolve())
+    else:
+        manifest_candidate = _default_compiled_manifest_path(resolved_root)
+        if manifest_candidate.exists():
+            try:
+                entries = _load_compiled_manifest_entries(manifest_candidate)
+            except RuntimeError:
+                entries = []
+        if not entries:
+            entries = _scan_compiled_scene_entries(resolved_root)
+
+    filtered: list[CompiledSceneEntry] = []
+    seen_paths: set[Path] = set()
+    for entry in entries:
+        if not entry.compiled_path.exists():
+            continue
+        if entry.compiled_path in seen_paths:
+            continue
+        seen_paths.add(entry.compiled_path)
+        filtered.append(entry)
+
+    if not filtered:
+        fallback_entries = _scan_compiled_scene_entries(resolved_root)
+        if fallback_entries:
+            return fallback_entries
+    return filtered
+
+
 def resolve_scene_query(scene_query: str, entries: list[SceneSourceEntry]) -> SceneSourceEntry:
     """Resolve a single explicit scene query to one unique entry."""
     query = scene_query.strip()
@@ -241,6 +353,45 @@ def resolve_scene_query(scene_query: str, entries: list[SceneSourceEntry]) -> Sc
     return matches[0]
 
 
+def resolve_compiled_scene_query(
+    scene_query: str,
+    entries: list[CompiledSceneEntry],
+) -> CompiledSceneEntry:
+    """Resolve a scene query against a compiled corpus."""
+    query = scene_query.strip()
+    if not query:
+        msg = "Scene query must be non-empty"
+        raise RuntimeError(msg)
+
+    query_path = Path(query).expanduser()
+    if query_path.exists():
+        resolved = query_path.resolve()
+        for entry in entries:
+            if entry.compiled_path == resolved or entry.source_path == resolved:
+                return entry
+        msg = f"Scene exists but is not part of the compiled corpus: {resolved}"
+        raise RuntimeError(msg)
+
+    normalized = query.replace("\\", "/").lower()
+    matches = [
+        entry
+        for entry in entries
+        if entry.scene_name.lower() == normalized
+        or entry.compiled_path.name.lower() == normalized
+        or entry.source_path.name.lower() == normalized
+        or entry.compiled_path.as_posix().lower().endswith(normalized)
+        or entry.source_path.as_posix().lower().endswith(normalized)
+    ]
+    if not matches:
+        msg = f"No compiled scene matched query: {scene_query}"
+        raise RuntimeError(msg)
+    if len(matches) > 1:
+        options = ", ".join(entry.compiled_path.as_posix() for entry in matches[:5])
+        msg = f"Compiled scene query is ambiguous: {scene_query}. Matches: {options}"
+        raise RuntimeError(msg)
+    return matches[0]
+
+
 def _compiled_output_path(source_path: Path, *, source_root: Path, gmdag_root: Path) -> Path:
     if source_path.suffix.lower() == ".gmdag":
         return source_path.resolve()
@@ -270,21 +421,43 @@ def _write_source_manifest(entries: list[SceneSourceEntry], manifest_path: Path,
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _write_compiled_manifest(entries: list[CompiledSceneEntry], manifest_path: Path, *, source_root: Path, gmdag_root: Path) -> None:
-    payload = {
-        "generated": datetime.now(timezone.utc).isoformat(),
-        "source_root": str(source_root),
-        "gmdag_root": str(gmdag_root),
-        "scene_count": len(entries),
-        "scenes": [
+def _write_compiled_manifest(
+    entries: list[CompiledSceneEntry],
+    manifest_path: Path,
+    *,
+    source_root: Path,
+    gmdag_root: Path,
+    requested_resolution: int,
+) -> None:
+    scene_payload: list[dict[str, Any]] = []
+    compiled_resolutions: set[int] = set()
+    for entry in entries:
+        resolution: int | None = None
+        if entry.compiled_path.exists():
+            try:
+                resolution = int(load_gmdag_asset(entry.compiled_path).resolution)
+            except (FileNotFoundError, RuntimeError):
+                resolution = None
+        if resolution is not None:
+            compiled_resolutions.add(resolution)
+        scene_payload.append(
             {
                 "source_path": entry.source_path.as_posix(),
                 "gmdag_path": entry.compiled_path.as_posix(),
                 "dataset": entry.dataset,
                 "scene_name": entry.scene_name,
+                "resolution": resolution,
             }
-            for entry in entries
-        ],
+        )
+
+    payload = {
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "source_root": str(source_root),
+        "gmdag_root": str(gmdag_root),
+        "scene_count": len(entries),
+        "requested_resolution": requested_resolution,
+        "compiled_resolutions": sorted(compiled_resolutions),
+        "scenes": scene_payload,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -297,7 +470,7 @@ def prepare_training_scene_corpus(
     gmdag_file: Path | None = None,
     source_root: Path | None = None,
     gmdag_root: Path | None = None,
-    resolution: int = 2048,
+    resolution: int = 512,
     min_scene_bytes: int = 1000,
     force_recompile: bool = False,
 ) -> PreparedSceneCorpus:
@@ -313,6 +486,7 @@ def prepare_training_scene_corpus(
     resolved_gmdag_root = (gmdag_root or find_default_gmdag_corpus_root()).resolve()
     resolved_source_manifest = _default_source_manifest_path(resolved_source_root)
     resolved_compiled_manifest = _default_compiled_manifest_path(resolved_gmdag_root)
+    resolved_manifest_path = manifest_path.resolve() if manifest_path is not None else None
 
     if gmdag_file is not None:
         compiled = gmdag_file.expanduser().resolve()
@@ -336,9 +510,25 @@ def prepare_training_scene_corpus(
             scene_entries=(entry,),
         )
 
+    if not force_recompile:
+        compiled_entries = discover_compiled_scene_entries(
+            resolved_gmdag_root,
+            manifest_path=resolved_manifest_path,
+        )
+        if compiled_entries:
+            if scene:
+                compiled_entries = [resolve_compiled_scene_query(scene, compiled_entries)]
+            return PreparedSceneCorpus(
+                source_root=resolved_source_root,
+                gmdag_root=resolved_gmdag_root,
+                source_manifest_path=resolved_source_manifest,
+                compiled_manifest_path=resolved_compiled_manifest,
+                scene_entries=tuple(compiled_entries),
+            )
+
     discovered = discover_scene_sources(
         resolved_source_root,
-        manifest_path=manifest_path.resolve() if manifest_path is not None else None,
+        manifest_path=resolved_manifest_path,
         min_scene_bytes=min_scene_bytes,
     )
 
@@ -358,6 +548,14 @@ def prepare_training_scene_corpus(
             needs_compile = force_recompile or not compiled_path.exists()
             if compiled_path.exists() and compiled_path.stat().st_mtime < entry.path.stat().st_mtime:
                 needs_compile = True
+            if compiled_path.exists():
+                try:
+                    compiled_resolution = int(load_gmdag_asset(compiled_path).resolution)
+                except (FileNotFoundError, RuntimeError):
+                    needs_compile = True
+                else:
+                    if compiled_resolution != resolution:
+                        needs_compile = True
             if needs_compile:
                 compiled_path.parent.mkdir(parents=True, exist_ok=True)
                 compile_gmdag_world(
@@ -379,6 +577,7 @@ def prepare_training_scene_corpus(
         resolved_compiled_manifest,
         source_root=resolved_source_root,
         gmdag_root=resolved_gmdag_root,
+        requested_resolution=resolution,
     )
 
     return PreparedSceneCorpus(

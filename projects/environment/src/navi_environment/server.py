@@ -48,7 +48,7 @@ class EnvironmentServer:
       on the PUB socket.
 
     The simulation logic is fully encapsulated in a
-    :class:`SimulatorBackend` implementation (voxel, habitat, etc.).
+    :class:`SimulatorBackend` implementation.
     """
 
     def __init__(

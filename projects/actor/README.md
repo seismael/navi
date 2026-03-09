@@ -45,18 +45,18 @@ uv run brain
 
 ## Canonical Training
 
-Run the only production training surface directly on the compiled sdfdag runtime:
+Run the only production training surface directly on the canonical corpus runtime:
 
 ```bash
 cd projects/actor
-uv run navi-actor train --gmdag-file ../../artifacts/gmdag/sample_apartment.gmdag --actors 4 --total-steps 100000 --checkpoint-every 25000 --checkpoint-dir ../../checkpoints
+uv run navi-actor train
 ```
 
 Repository wrappers keep the same canonical path:
 
 ```powershell
-./scripts/train.ps1 -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag
-./scripts/train-all-night.ps1 -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag
+./scripts/train.ps1
+./scripts/train-all-night.ps1
 ```
 
 Run Actor with learned policy checkpoint:

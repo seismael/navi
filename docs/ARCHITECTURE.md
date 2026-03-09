@@ -1,97 +1,63 @@
-# ARCHITECTURE.md — Ghost-Matrix System Architecture
+# ARCHITECTURE.md — Canonical Ghost-Matrix Architecture
 
-**System:** Navi — Ghost-Matrix Throughput RL  
-**Status:** Active canonical specification  
-**Policy:** See [AGENTS.md](../AGENTS.md) for implementation rules and non-negotiables
+## 1. System Objective
 
----
+Navi is a throughput-first reinforcement learning system for geometric navigation.
+The active architecture is intentionally narrow:
 
-## 1. System Objective & Design Philosophy
+- source scenes are staged transiently during corpus refresh
+- source scenes are compiled into `.gmdag` assets
+- environment execution runs through one canonical `sdfdag` backend
+- actor training runs through one canonical in-process trainer
+- auditor tooling remains passive and non-blocking
 
-Navi is engineered for **ultimate-throughput reinforcement learning** in autonomous
-agentic navigation. The architecture fundamentally decouples geometric simulation
-from temporal cognition and asynchronous observability. It abandons legacy
-rendering pipelines — specifically polygon rasterization, bounding volume
-hierarchies, and pixel-grid convolutions — in favour of pure mathematical
-proximity evaluation.
+## 2. Active Runtime Boundary
 
-### 1.1. The Mathematical Purity Principle
+The repository keeps one production environment path:
 
-The environment is treated as a continuous scalar field. The cognitive agent is
-**geometry-blind**, perceiving the world exclusively through raw, mathematically
-exact proximity tensors — spherical depth arrays and semantic class matrices.
-Visual aesthetics (RGB textures, lighting, camera images) are structurally
-eradicated from the training execution path, enforcing **zero-shot topological
-generalization** across unseen environments.
+```text
+transient source staging -> voxel-dag compiler -> .gmdag corpus -> torch-sdf runtime -> environment adapter -> DistanceMatrix -> actor
+```
 
-### 1.2. The "No Stall" Mandate
+Responsibilities stay split:
 
-Rendering is strictly diagnostic. The simulation engine must never wait for the
-neural network's backward pass. Hardware utilization must achieve maximum parity
-between GPU compute cores and the memory bus. Training throughput is the primary
-architectural success metric.
+- `projects/environment` owns scene preparation, runtime execution, and observation shaping
+- `projects/actor` owns PPO, memory, curiosity, and policy execution
+- `projects/auditor` owns passive observability only
 
-### 1.3. The Sacred Engine Principle
+Canonical training integrates environment stepping at the CLI boundary only. The actor service contract is unchanged.
 
-The training engine (`CognitiveMambaPolicy`) is **immutable**. It is never
-modified to accommodate new simulators, sensor types, or data sources. External
-data always connects through a `DatasetAdapter` that transforms *to* the
-engine's canonical `(1, Az, El)` DistanceMatrix format. The adapter is the
-**only** place where axis transposes, depth normalization, semantic class
-remapping, delta-depth computation, and env-dimension insertion are performed.
-
-The temporal stage inside the sacred pipeline remains a single canonical runtime
-backend. Backend selection is benchmark-governed and must satisfy cross-platform
-support targets (native Windows, Linux, WSL2) and throughput floor requirements.
-
-The active runtime evolution path is therefore below the actor boundary:
-`projects/voxel-dag` compiles `.gmdag` assets, `projects/torch-sdf` executes
-batched CUDA sphere tracing, and `projects/environment` adapts the output back
-to the actor's canonical `(1, Az, El)` `DistanceMatrix` contract.
-
-### 1.3.1. Canonical Training Boundary
-
-Canonical high-throughput training now targets one unified execution surface:
-
-- `projects/environment` still owns simulation backends and observation shaping.
-- `projects/actor` still owns PPO, memory, curiosity, and the sacred policy.
-- The canonical training CLI instantiates the environment backend directly and
-  steps it in-process to remove the Environment<->Actor ZMQ control-path barrier
-  from the rollout hot loop.
-
-This is an orchestration-level integration only. It does not relax project
-sovereignty for long-running services or change the actor contract. There is no
-second canonical training architecture alongside it.
-
-What still remains after that architectural cleanup is internal hot-path
-cleanup: canonical training must now remove observation host staging,
-action host staging, and per-actor Python transition work inside the single
-trainer rather than introducing any new runtime surfaces.
-
-### 1.4. Canonical Launch Commands
-
-Runtime commands are standardized across the repository to keep launches
-stateless, reproducible, and aligned with service isolation.
+## 3. Launch Surfaces
 
 | Scope | Command | Notes |
 |------|---------|-------|
-| Full stack (inference, voxel) | `./scripts/run-ghost-stack.ps1 -Backend voxel` | Environment + Actor + Dashboard |
-| Full stack (inference, mesh) | `./scripts/run-ghost-stack.ps1 -Backend mesh -HabitatScene C:/path/to/scene.glb` | Mesh backend requires scene path |
-| Full stack (inference, sdfdag) | `./scripts/run-ghost-stack.ps1 -Backend sdfdag -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag` | Canonical compiled-path runtime using a prebuilt `.gmdag` asset |
-| Full stack (training, canonical) | `./scripts/run-ghost-stack.ps1 -Train` | Standard 4-actor fleet on the single canonical in-process sdfdag trainer, using the full discovered corpus by default |
-| Actor trainer | `uv run --project projects/actor navi-actor train` | Single canonical training entrypoint with direct in-process sdfdag stepping, full-corpus default, and continuous runtime unless explicitly bounded |
-| Environment service | `uv run --project projects/environment environment` | Shortcut for `navi-environment serve` |
-| Brain service | `uv run --project projects/actor brain` | Shortcut for `navi-actor serve` |
-| Dashboard service | `uv run --project projects/auditor dashboard` | Shortcut for `navi-auditor dashboard` |
-| Environment wrapper | `./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560` | Windows wrapper |
-| Brain wrapper | `./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560` | Windows wrapper |
-| Dashboard wrapper | `./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560` | Windows wrapper |
-| Compile mesh assets | `uv run --project projects/environment navi-environment compile-world --source data/scenes/world.ply --output data/scenes/world.zarr` | Canonical mesh-to-Zarr pipeline |
-| Compile `.gmdag` assets | `uv run --project projects/environment navi-environment compile-gmdag --source data/scenes/world.glb --output data/scenes/world.gmdag --resolution 2048` | Performance-path compiler orchestration |
+| Full stack (training) | `./scripts/run-ghost-stack.ps1 -Train` | canonical continuous training surface |
+| Full stack (inference) | `./scripts/run-ghost-stack.ps1 -GmDagFile <asset>` | canonical service-mode stack |
+| Corpus refresh | `./scripts/refresh-scene-corpus.ps1` | staged overwrite-first source + compiled corpus refresh |
+| Actor trainer | `uv run --project projects/actor navi-actor train` | full-corpus default, continuous by default |
+| Environment service | `uv run --project projects/environment environment` | shortcut for `navi-environment serve` |
+| Dashboard service | `uv run --project projects/auditor dashboard` | passive viewer |
 
-For canonical training, the repository should resolve the full discovered scene
-corpus by default, compile or refresh `.gmdag` assets as needed, and only use
-`-GmDagFile`, manifest, or named-scene inputs as explicit narrowing overrides.
+## 4. Core Principles
+
+- one canonical runtime path
+- one canonical training surface
+- no compatibility shims for removed backends
+- no CPU fallback in the compiled runtime path
+- actor wire contract remains `DistanceMatrix`
+- corpus defaults are full-discovery and continuous training
+- runtime depends on the compiled corpus, not retained raw downloads
+
+## 5. Performance Direction
+
+Performance work is concentrated in:
+
+- compiled corpus preparation
+- GPU-resident ray buffers and DAG data
+- batched environment stepping
+- tensor-native actor rollout storage and update paths
+
+Legacy procedural, mesh, habitat, and sparse-Zarr environment paths are no longer part of the active architecture.
 
 ### 1.5. Canonical-Only Compatibility Policy
 

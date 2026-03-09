@@ -4,7 +4,6 @@ param(
     [string]$CorpusRoot = "",
     [string]$GmDagRoot = "",
     [string]$GmDagFile = "",
-    [string]$HabitatScene = "",
     [switch]$AutoCompileGmDag,
     [int]$GmDagResolution = 512,
     [int]$TotalSteps = 0,
@@ -83,63 +82,6 @@ function Initialize-CudaEnvironment {
     $env:PATH = "$cudaBin;$cudaNvvp;$env:PATH"
 }
 
-function Resolve-SdfDagAsset {
-    param(
-        [string]$RepoRoot,
-        [string]$GmDagFile,
-        [string]$HabitatScene,
-        [switch]$AutoCompile,
-        [int]$Resolution,
-        [string]$PythonVersion
-    )
-
-    Initialize-CudaEnvironment
-
-    if (-not [string]::IsNullOrWhiteSpace($GmDagFile)) {
-        return (Resolve-Path $GmDagFile).Path
-    }
-
-    $defaultAsset = Join-Path $RepoRoot "artifacts\gmdag\sample_apartment.gmdag"
-    if ((-not $AutoCompile) -and [string]::IsNullOrWhiteSpace($HabitatScene) -and (Test-Path $defaultAsset)) {
-        return (Resolve-Path $defaultAsset).Path
-    }
-
-    if ((-not $AutoCompile) -and [string]::IsNullOrWhiteSpace($HabitatScene)) {
-        $defaultScene = Join-Path $RepoRoot "data\scenes\sample_apartment.glb"
-        if (Test-Path $defaultScene) {
-            $HabitatScene = $defaultScene
-            $AutoCompile = $true
-        }
-    }
-
-    if (-not $AutoCompile) {
-        throw "GmDagFile is required unless -AutoCompileGmDag is set."
-    }
-    if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
-        throw "HabitatScene is required when using -AutoCompileGmDag."
-    }
-
-    $sourcePath = (Resolve-Path $HabitatScene).Path
-    $cacheDir = Join-Path $RepoRoot "artifacts\gmdag"
-    if (-not (Test-Path $cacheDir)) {
-        New-Item -ItemType Directory -Path $cacheDir | Out-Null
-    }
-    $outputPath = Join-Path $cacheDir (([System.IO.Path]::GetFileNameWithoutExtension($sourcePath)) + ".gmdag")
-
-    Write-Host "Compiling canonical gmdag cache..."
-    & uv run --python $PythonVersion --project (Join-Path $RepoRoot "projects\environment") `
-        navi-environment compile-gmdag `
-        --source $sourcePath `
-        --output $outputPath `
-        --resolution $Resolution
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "gmdag compilation failed with exit code $LASTEXITCODE"
-    }
-
-    return $outputPath
-}
-
 function Stop-NaviProcesses {
     Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and (
@@ -175,14 +117,8 @@ $resolvedGmDagFile = if (-not [string]::IsNullOrWhiteSpace($GmDagFile)) {
     ""
 }
 
-$sceneOverride = if (-not [string]::IsNullOrWhiteSpace($Scene)) {
-    $Scene
-} else {
-    $HabitatScene
-}
-
-$resolvedScene = if (-not [string]::IsNullOrWhiteSpace($sceneOverride)) {
-    (Resolve-Path $sceneOverride).Path
+$resolvedScene = if (-not [string]::IsNullOrWhiteSpace($Scene)) {
+    (Resolve-Path $Scene).Path
 } else {
     ""
 }

@@ -107,6 +107,8 @@ class MultiTrajectoryBuffer:
         if seq_len > 0:
             # BPTT sampling: (N, L) -> (N * L/seq_len, seq_len) sequences
             n_seqs_per_actor = rollout_len // seq_len
+            if n_seqs_per_actor == 0:
+                return
             total_seqs = n_actors * n_seqs_per_actor
 
             obs_seqs = all_obs[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len, *all_obs.shape[2:])

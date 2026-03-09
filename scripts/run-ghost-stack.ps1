@@ -7,10 +7,13 @@
 
 .EXAMPLE
     # Inference on the canonical compiled runtime
-    .\run-ghost-stack.ps1 -Backend sdfdag -GmDagFile .\artifacts\gmdag\sample_apartment.gmdag
+    .\run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag
 
-    # Canonical PPO training with live dashboard
-    .\run-ghost-stack.ps1 -Train -GmDagFile .\artifacts\gmdag\sample_apartment.gmdag -TotalSteps 500000
+    # Canonical PPO training on the full discovered corpus with live dashboard
+    .\run-ghost-stack.ps1 -Train
+
+    # Canonical PPO training with an explicit scene override and refresh
+    .\run-ghost-stack.ps1 -Train -Scene .\data\scenes\replicacad\frl_apartment_stage.glb -AutoCompileGmDag
 
   # Resume from checkpoint
   .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint "checkpoints\policy_step_0010000.pt"
@@ -20,21 +23,21 @@ param(
     [switch]$Train,
 
     # ── Common ──
-    [string]$Backend = "sdfdag",
     [int]$AzimuthBins = 256,
     [int]$ElevationBins = 48,
-    [string]$HabitatScene = "",
+    [string]$Scene = "",
+    [string]$CorpusRoot = "",
+    [string]$GmDagRoot = "",
     [string]$GmDagFile = "",
     [switch]$AutoCompileGmDag,
     [int]$GmDagResolution = 512,
-    [string]$HabitatDatasetConfig = "",
     [string]$PythonVersion = "3.12",
     [switch]$NoPreKill,
     [switch]$NoDashboard,
 
     # ── Training params ──
     [string]$Manifest = "",
-    [int]$TotalSteps = 500000,
+    [int]$TotalSteps = 0,
     [int]$CheckpointEvery = 25000,
     [string]$CheckpointDir = "checkpoints",
     [string]$Checkpoint = "",
@@ -173,17 +176,12 @@ function Initialize-CudaEnvironment {
 function Resolve-SdfDagAsset {
     param(
         [string]$RepoRoot,
-        [string]$Backend,
         [string]$GmDagFile,
-        [string]$HabitatScene,
+        [string]$Scene,
         [switch]$AutoCompile,
         [int]$Resolution,
         [string]$PythonVersion
     )
-
-    if ($Backend -ne "sdfdag") {
-        return ""
-    }
 
     Initialize-CudaEnvironment
 
@@ -192,28 +190,23 @@ function Resolve-SdfDagAsset {
         return $resolved.Path
     }
 
-    $defaultAsset = Join-Path $RepoRoot "artifacts\gmdag\sample_apartment.gmdag"
-    if ((-not $AutoCompile) -and [string]::IsNullOrWhiteSpace($HabitatScene) -and (Test-Path $defaultAsset)) {
-        return (Resolve-Path $defaultAsset).Path
-    }
-
-    if ((-not $AutoCompile) -and [string]::IsNullOrWhiteSpace($HabitatScene)) {
-        $defaultScene = Join-Path $RepoRoot "data\scenes\sample_apartment.glb"
-        if (Test-Path $defaultScene) {
-            $HabitatScene = $defaultScene
-            $AutoCompile = $true
+    $compiledCorpusRoot = Join-Path $RepoRoot "artifacts\gmdag\corpus"
+    if ((-not $AutoCompile) -and [string]::IsNullOrWhiteSpace($Scene) -and (Test-Path $compiledCorpusRoot)) {
+        $compiledCandidates = Get-ChildItem -Path $compiledCorpusRoot -Recurse -File -Filter "*.gmdag" | Sort-Object FullName
+        if ($compiledCandidates.Count -gt 0) {
+            return $compiledCandidates[0].FullName
         }
     }
 
     if (-not $AutoCompile) {
-        throw "GmDagFile is required when Backend=sdfdag unless -AutoCompileGmDag is set."
+        throw "GmDagFile is required unless a compiled corpus asset already exists or -AutoCompileGmDag is set with -Scene."
     }
-    if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
-        throw "HabitatScene is required for -AutoCompileGmDag when Backend=sdfdag."
+    if ([string]::IsNullOrWhiteSpace($Scene)) {
+        throw "Scene is required for -AutoCompileGmDag on the canonical runtime."
     }
 
-    $sourcePath = (Resolve-Path $HabitatScene).Path
-    $cacheDir = Join-Path $RepoRoot "artifacts\gmdag"
+    $sourcePath = (Resolve-Path $Scene).Path
+    $cacheDir = Join-Path $RepoRoot "artifacts\gmdag\corpus\manual"
     if (-not (Test-Path $cacheDir)) {
         New-Item -ItemType Directory -Path $cacheDir | Out-Null
     }
@@ -259,7 +252,17 @@ function Wait-ForPorts {
 
 $repoRoot = Get-RepoRoot
 $logsDir = Join-Path $repoRoot "scripts\logs"
-$resolvedGmDagFile = Resolve-SdfDagAsset -RepoRoot $repoRoot -Backend $Backend -GmDagFile $GmDagFile -HabitatScene $HabitatScene -AutoCompile:$AutoCompileGmDag -Resolution $GmDagResolution -PythonVersion $PythonVersion
+
+$resolvedGmDagFile = ""
+if ($Train) {
+    Initialize-CudaEnvironment
+    if (-not [string]::IsNullOrWhiteSpace($GmDagFile)) {
+        $resolvedGmDagFile = (Resolve-Path $GmDagFile).Path
+    }
+}
+else {
+    $resolvedGmDagFile = Resolve-SdfDagAsset -RepoRoot $repoRoot -GmDagFile $GmDagFile -Scene $Scene -AutoCompile:$AutoCompileGmDag -Resolution $GmDagResolution -PythonVersion $PythonVersion
+}
 
 if (-not $NoPreKill) {
     Write-Host "Stopping stale Navi processes..."
@@ -271,11 +274,37 @@ if (-not $NoPreKill) {
 # Canonical training launch: train (in-process env+actor) + dashboard
 # ═══════════════════════════════════════════════════════════════════
 if ($Train) {
-    if ($Backend -ne "sdfdag") {
-        throw "Canonical training requires -Backend sdfdag. Diagnostic backends are not supported on the training surface."
+    $sceneOverride = if (-not [string]::IsNullOrWhiteSpace($Scene)) {
+        $Scene
     }
-    if (-not [string]::IsNullOrWhiteSpace($Manifest)) {
-        throw "Canonical training no longer accepts -Manifest. Pass -GmDagFile or -AutoCompileGmDag instead."
+    else { "" }
+
+    $resolvedScene = if (-not [string]::IsNullOrWhiteSpace($sceneOverride)) {
+        (Resolve-Path $sceneOverride).Path
+    }
+    else {
+        ""
+    }
+
+    $resolvedManifest = if (-not [string]::IsNullOrWhiteSpace($Manifest)) {
+        (Resolve-Path $Manifest).Path
+    }
+    else {
+        ""
+    }
+
+    $resolvedCorpusRoot = if (-not [string]::IsNullOrWhiteSpace($CorpusRoot)) {
+        (Resolve-Path $CorpusRoot).Path
+    }
+    else {
+        ""
+    }
+
+    $resolvedGmDagRoot = if (-not [string]::IsNullOrWhiteSpace($GmDagRoot)) {
+        (Resolve-Path $GmDagRoot).Path
+    }
+    else {
+        ""
     }
 
     # Resolve checkpoint dir to absolute
@@ -295,10 +324,30 @@ if ($Train) {
         "--checkpoint-dir", $CheckpointDir,
         "--log-every", $LogEvery,
         "--rollout-length", $RolloutLength,
-        "--gmdag-file", $resolvedGmDagFile,
+        "--compile-resolution", $GmDagResolution,
         "--azimuth-bins", "$AzimuthBins",
         "--elevation-bins", "$ElevationBins"
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedGmDagFile)) {
+        $trainArgs += @("--gmdag-file", $resolvedGmDagFile)
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($resolvedScene)) {
+        $trainArgs += @("--scene", $resolvedScene)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedManifest)) {
+        $trainArgs += @("--manifest", $resolvedManifest)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedCorpusRoot)) {
+        $trainArgs += @("--corpus-root", $resolvedCorpusRoot)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedGmDagRoot)) {
+        $trainArgs += @("--gmdag-root", $resolvedGmDagRoot)
+    }
+    if ($AutoCompileGmDag) {
+        $trainArgs += "--force-corpus-refresh"
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
         $trainArgs += @("--checkpoint", $Checkpoint)
@@ -311,10 +360,10 @@ if ($Train) {
     try {
         Write-Host "========================================================"
         Write-Host "  Navi Ghost-Matrix Training"
-        Write-Host "  Backend    : $Backend"
-        Write-Host "  GmDag      : $resolvedGmDagFile"
+        Write-Host "  Backend    : sdfdag"
+        Write-Host "  Corpus     : $(if ($resolvedGmDagFile) { $resolvedGmDagFile } elseif ($resolvedScene) { $resolvedScene } elseif ($resolvedManifest) { $resolvedManifest } elseif ($resolvedCorpusRoot) { $resolvedCorpusRoot } else { 'auto-discovered canonical corpus' })"
         Write-Host "  Actors     : $NumActors (Standard Fleet)"
-        Write-Host "  Total Steps: $TotalSteps"
+        Write-Host "  Total Steps: $(if ($TotalSteps -le 0) { 'continuous until stopped' } else { $TotalSteps })"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
         Write-Host "  Dashboard  : $(if ($NoDashboard) { 'disabled' } else { 'enabled' })"
         Write-Host "========================================================"
@@ -398,37 +447,11 @@ if ($Train) {
         "--mode", "step",
         "--pub", $EnvironmentPub,
         "--rep", $EnvironmentRep,
-        "--backend", $Backend,
         "--actors", "$NumActors",
         "--azimuth-bins", "$AzimuthBins",
         "--elevation-bins", "$ElevationBins"
     )
-
-if ($Backend -eq "voxel") {
-    $envArgs += @("--generator", "arena")
-}
-elseif ($Backend -eq "habitat") {
-    if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
-        throw "HabitatScene is required when Backend=habitat"
-    }
-    $envArgs += @("--habitat-scene", $HabitatScene)
-    if (-not [string]::IsNullOrWhiteSpace($HabitatDatasetConfig)) {
-        $envArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
-    }
-}
-elseif ($Backend -eq "mesh") {
-    if ([string]::IsNullOrWhiteSpace($HabitatScene)) {
-        throw "HabitatScene is required when Backend=mesh (path to .glb/.obj scene)"
-    }
-    $envArgs += @("--habitat-scene", $HabitatScene)
-    $envArgs += @("--max-distance", "15")
-    if (-not [string]::IsNullOrWhiteSpace($HabitatDatasetConfig)) {
-        $envArgs += @("--habitat-dataset-config", $HabitatDatasetConfig)
-    }
-}
-elseif ($Backend -eq "sdfdag") {
-    $envArgs += @("--gmdag-file", $resolvedGmDagFile)
-}
+$envArgs += @("--gmdag-file", $resolvedGmDagFile)
 
 $actorArgs = @(
     "run",
@@ -478,7 +501,7 @@ try {
         Write-Host "  $envLogOut"
         Write-Host "  $actorLogOut"
 
-        & uv run --python $PythonVersion --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560" $(if (-not [string]::IsNullOrWhiteSpace($HabitatScene)) { "--scene"; $HabitatScene })
+        & uv run --python $PythonVersion --project (Join-Path $repoRoot "projects\auditor") navi-auditor dashboard --matrix-sub "tcp://localhost:5559" --actor-sub "tcp://localhost:5557" --step-endpoint "tcp://localhost:5560" $(if (-not [string]::IsNullOrWhiteSpace($Scene)) { "--scene"; $Scene })
     }
     else {
         Write-Host "Dashboard disabled. Processes running in background."

@@ -12,13 +12,11 @@ __all__: list[str] = ["SimulatorBackend"]
 
 
 class SimulatorBackend(ABC):
-    """Strategy interface for a pluggable simulation backend.
+    """Strategy interface for the environment runtime backend.
 
     Implementations produce ``DistanceMatrix`` observations and
     ``StepResult`` step outcomes via a unified ``reset`` / ``step``
-    contract.  The current voxel-based pipeline (``VoxelBackend``) and
-    future Habitat integration (``HabitatBackend``) both implement
-    this interface.
+    contract. The canonical runtime currently uses ``SdfDagBackend``.
 
     All backends produce ``DistanceMatrix`` observations with shape
     ``(1, Az, El)`` for depth / semantic / delta_depth / valid_mask
@@ -87,7 +85,7 @@ class SimulatorBackend(ABC):
         """Step all actors in one call.
 
         The default implementation loops over *actions* sequentially,
-        calling :meth:`step` for each.  Backends that can exploit
+        calling :meth:`step` for each. Backends that can exploit
         parallelism (e.g. GPU-batched raycasting) should override this
         method.
 

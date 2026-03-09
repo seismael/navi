@@ -197,7 +197,7 @@ def train(
     min_scene_bytes: int = typer.Option(1000, help="Ignore small scene files"),
     shuffle: bool = typer.Option(True, help="Shuffle scene pool"),
     gmdag_file: str = typer.Option("", help="Single compiled .gmdag cache for canonical sdfdag training"),
-    compile_resolution: int = typer.Option(2048, help="Compiler voxel resolution for source-scene corpus preparation"),
+    compile_resolution: int = typer.Option(512, help="Compiler voxel resolution for source-scene corpus preparation"),
     force_corpus_refresh: bool = typer.Option(False, help="Force overwrite/recompile of the prepared training corpus"),
     azimuth_bins: int = typer.Option(128, help="Expected azimuth resolution"),
     elevation_bins: int = typer.Option(24, help="Expected elevation resolution"),

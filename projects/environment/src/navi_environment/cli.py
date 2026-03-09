@@ -12,20 +12,12 @@ import typer
 
 from navi_contracts import Action, setup_logging
 from navi_environment.config import EnvironmentConfig
-from navi_environment.generators.arena import ArenaGenerator
-from navi_environment.generators.city import CityGenerator
-from navi_environment.generators.file_loader import FileGenerator
-from navi_environment.generators.maze import MazeGenerator
-from navi_environment.generators.open3d_voxel import Open3DVoxelGenerator
-from navi_environment.generators.rooms import RoomsGenerator
 from navi_environment.integration.corpus import prepare_training_scene_corpus
 from navi_environment.integration.voxel_dag import compile_gmdag_world, probe_sdfdag_runtime
 from navi_environment.server import EnvironmentServer
-from navi_environment.transformers import WorldCompileConfig, WorldModelCompiler
 
 if TYPE_CHECKING:
     from navi_environment.backends.base import SimulatorBackend
-    from navi_environment.generators.base import AbstractWorldGenerator
 
 __all__: list[str] = ["app"]
 
@@ -34,109 +26,34 @@ app = typer.Typer(
     help="Layer 1: The Environment",
 )
 
-_DIAGNOSTIC_BACKENDS = {"voxel", "habitat", "mesh"}
-
-
 def _default_gmdag_option() -> str:
-    """Expose the canonical sample asset on user-facing launch surfaces."""
+    """Expose the first discovered compiled corpus asset when available."""
     return EnvironmentConfig().gmdag_file
 
 
-def _build_generator(config: EnvironmentConfig) -> AbstractWorldGenerator:
-    """Instantiate the correct world generator from config."""
-    if config.world_source == "file":
-        if not config.world_file:
-            typer.echo("Error: --world-file is required when --world-source=file", err=True)
-            raise typer.Exit(code=1)
-        return FileGenerator(path=config.world_file, chunk_size=config.chunk_size)
-
-    # Procedural generators
-    if config.generator == "arena":
-        return ArenaGenerator(
-            seed=config.seed,
-            chunk_size=config.chunk_size,
-        )
-    if config.generator == "city":
-        return CityGenerator(
-            seed=config.seed,
-            chunk_size=config.chunk_size,
-        )
-    if config.generator == "maze":
-        return MazeGenerator(
-            seed=config.seed,
-            chunk_size=config.chunk_size,
-            complexity=0.5,
-        )
-    if config.generator == "open3d":
-        return Open3DVoxelGenerator(
-            seed=config.seed,
-            chunk_size=config.chunk_size,
-        )
-    if config.generator == "rooms":
-        return RoomsGenerator(
-            seed=config.seed,
-            chunk_size=config.chunk_size,
-        )
-
-    typer.echo(f"Unknown generator: {config.generator}", err=True)
-    raise typer.Exit(code=1)
-
-
 def _build_backend(config: EnvironmentConfig) -> SimulatorBackend:
-    """Create the appropriate SimulatorBackend based on config.backend."""
-    if config.backend == "sdfdag":
-        from navi_environment.backends.sdfdag_backend import SdfDagBackend
+    """Create the canonical SDF/DAG simulator backend."""
+    if config.backend != "sdfdag":
+        typer.echo("Error: unsupported backend. Canonical runtime requires backend=sdfdag.", err=True)
+        raise typer.Exit(code=1)
 
-        if not config.gmdag_file:
-            typer.echo("Error: --gmdag-file is required when --backend=sdfdag", err=True)
-            raise typer.Exit(code=1)
+    from navi_environment.backends.sdfdag_backend import SdfDagBackend
 
-        status = probe_sdfdag_runtime(Path(config.gmdag_file))
-        if status.issues:
-            for issue in status.issues:
-                typer.echo(f"Error: {issue}", err=True)
-            raise typer.Exit(code=1)
+    if not config.gmdag_file and not config.scene_pool:
+        typer.echo(
+            "Error: no compiled .gmdag asset was resolved. "
+            "Run `scripts/refresh-scene-corpus.ps1` or pass --gmdag-file explicitly.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
-        return SdfDagBackend(config)
+    status = probe_sdfdag_runtime(Path(config.gmdag_file) if config.gmdag_file else None)
+    if status.issues:
+        for issue in status.issues:
+            typer.echo(f"Error: {issue}", err=True)
+        raise typer.Exit(code=1)
 
-    if config.backend == "habitat":
-        try:
-            from navi_environment.backends.habitat_backend import HabitatBackend
-        except ImportError as exc:
-            typer.echo(
-                "Error: habitat-sim is not installed. "
-                "Install it with: conda install -c aihabitat habitat-sim",
-                err=True,
-            )
-            raise typer.Exit(code=1) from exc
-
-        if not config.habitat_scene:
-            typer.echo("Error: --habitat-scene is required when --backend=habitat", err=True)
-            raise typer.Exit(code=1)
-
-        return HabitatBackend(config)
-
-    if config.backend == "mesh":
-        from navi_environment.backends.mesh_backend import MeshSceneBackend
-
-        if not config.habitat_scene:
-            typer.echo("Error: --habitat-scene is required when --backend=mesh", err=True)
-            raise typer.Exit(code=1)
-
-        return MeshSceneBackend(config)
-
-    if config.backend == "voxel":
-        from navi_environment.backends.voxel import VoxelBackend
-
-        generator = _build_generator(config)
-        return VoxelBackend(config, generator)
-
-    typer.echo(
-        "Error: unsupported backend. Canonical runtime requires backend=sdfdag; "
-        "voxel, mesh, and habitat are diagnostic-only and must be requested explicitly.",
-        err=True,
-    )
-    raise typer.Exit(code=1)
+    return SdfDagBackend(config)
 
 
 def _benchmark_actions(*, actor_count: int, step_id: int) -> tuple[Action, ...]:
@@ -166,61 +83,26 @@ def serve(
         help="ZMQ SUB address for Action (async mode)",
     ),
     mode: str = typer.Option("step", help="Mode: step (REQ/REP) or async (PUB/SUB)"),
-    world_source: str = typer.Option("procedural", help="World source: procedural or file"),
-    world_file: str = typer.Option("", help="Path to world file (.zarr)"),
-    generator: str = typer.Option("arena", help="Generator type: arena, city, maze, open3d, rooms"),
-    window_radius: int = typer.Option(2, help="Window radius in chunk units"),
-    lookahead_margin: int = typer.Option(8, help="Look-ahead margin in chunks"),
-    seed: int = typer.Option(42, help="Random seed for procedural generation"),
-    chunk_size: int = typer.Option(16, help="Chunk side length in voxels"),
-    barrier_distance: float = typer.Option(0.75, help="Minimum standoff to occupied voxels"),
-    collision_probe_radius: float = typer.Option(
-        1.5, help="Collision probe radius around candidate pose"
-    ),
     azimuth_bins: int = typer.Option(256, help="Distance-matrix azimuth bins"),
     elevation_bins: int = typer.Option(48, help="Distance-matrix elevation bins"),
     max_distance: float = typer.Option(30.0, help="Distance normalization range"),
-    backend: str = typer.Option(
-        "sdfdag",
-        help="Simulator backend: sdfdag (canonical) or explicit diagnostic backend voxel|mesh|habitat",
-    ),
+    backend: str = typer.Option("sdfdag", hidden=True),
     gmdag_file: str = typer.Option(
         _default_gmdag_option(),
-        help="Path to compiled .gmdag world cache for the canonical sdfdag backend",
+        help="Path to compiled .gmdag world cache for the canonical runtime",
     ),
     sdf_max_steps: int = typer.Option(256, help="Maximum sphere-tracing iterations per ray for sdfdag backend"),
-    habitat_scene: str = typer.Option("", help="Habitat scene file (.glb)"),
-    habitat_dataset_config: str = typer.Option(
-        "", help="Habitat dataset config (.json) for PointNav episodes"
-    ),
-    habitat_rgb_height: int = typer.Option(480, help="Habitat RGB camera height"),
-    habitat_rgb_width: int = typer.Option(640, help="Habitat RGB camera width"),
     actors: int = typer.Option(1, help="Number of actors sharing the scene"),
 ) -> None:
     """Start the Environment service."""
     setup_logging("navi_environment")
     default_config = EnvironmentConfig()
 
-    if backend in _DIAGNOSTIC_BACKENDS:
-        typer.echo(
-            f"Warning: backend={backend} is diagnostic-only. Canonical production runtime uses backend=sdfdag.",
-            err=True,
-        )
-
     config = EnvironmentConfig(
         pub_address=pub or default_config.pub_address,
         rep_address=rep or default_config.rep_address,
         action_sub_address=action_sub or default_config.action_sub_address,
         mode=mode,
-        world_source=world_source,
-        world_file=world_file,
-        generator=generator,
-        window_radius=window_radius,
-        lookahead_margin=lookahead_margin,
-        seed=seed,
-        chunk_size=chunk_size,
-        barrier_distance=barrier_distance,
-        collision_probe_radius=collision_probe_radius,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
         max_distance=max_distance,
@@ -228,9 +110,6 @@ def serve(
         backend=backend,
         gmdag_file=gmdag_file,
         sdf_max_steps=sdf_max_steps,
-        habitat_scene=habitat_scene,
-        habitat_dataset_config=habitat_dataset_config,
-        habitat_rgb_resolution=(habitat_rgb_height, habitat_rgb_width),
     )
 
     sim_backend = _build_backend(config)
@@ -240,7 +119,7 @@ def serve(
         f"Environment starting — backend={config.backend}, mode={config.mode}, "
         f"actors={config.n_actors}, "
         f"pub={config.pub_address}, rep={config.rep_address}, "
-        f"generator={config.generator}, seed={config.seed}",
+        f"gmdag={config.gmdag_file}",
     )
     server.run()
 
@@ -250,46 +129,11 @@ def serve_shortcut() -> None:
     app(["serve"])
 
 
-@app.command("compile-world")
-def compile_world(
-    source: str = typer.Option(..., "--source", help="Input source model path (.ply/.obj/.stl)"),
-    output: str = typer.Option(..., "--output", help="Output .zarr world store path"),
-    source_format: str = typer.Option(
-        "auto",
-        "--source-format",
-        help="Source format: auto, ply, obj, stl",
-    ),
-    chunk_size: int = typer.Option(16, help="Output chunk side length in voxels"),
-    voxel_size: float = typer.Option(1.0, help="Voxel size for quantization"),
-    semantic_id: int = typer.Option(6, help="Semantic ID to assign to occupied voxels"),
-) -> None:
-    """Compile a source world model into canonical sparse voxel chunks."""
-    setup_logging("navi_environment_compiler")
-    compiler = WorldModelCompiler()
-    result = compiler.compile(
-        source_path=source,
-        output_path=output,
-        config=WorldCompileConfig(
-            chunk_size=chunk_size,
-            voxel_size=voxel_size,
-            semantic_id=semantic_id,
-            source_format=source_format,
-        ),
-    )
-    typer.echo(
-        "Compiled world — "
-        f"voxels={result.occupied_voxels}, "
-        f"chunks={result.chunk_count}, "
-        f"spawn={result.spawn_position}, "
-        f"out={result.output_path}",
-    )
-
-
 @app.command("compile-gmdag")
 def compile_gmdag(
     source: str = typer.Option(..., "--source", help="Input source model path (.glb/.obj/.ply/.stl)"),
     output: str = typer.Option(..., "--output", help="Output .gmdag world cache path"),
-    resolution: int = typer.Option(2048, help="Compiler voxel resolution for DAG generation"),
+    resolution: int = typer.Option(512, help="Compiler voxel resolution for DAG generation"),
 ) -> None:
     """Compile a source model into a `.gmdag` cache via the internal voxel-dag project."""
     setup_logging("navi_environment_gmdag_compiler")
@@ -313,7 +157,7 @@ def prepare_corpus(
     manifest: str = typer.Option("", help="Manifest of source or compiled scenes"),
     corpus_root: str = typer.Option("", help="Root directory for source-scene discovery"),
     gmdag_root: str = typer.Option("", help="Root directory for compiled `.gmdag` outputs"),
-    resolution: int = typer.Option(2048, help="Compiler voxel resolution for corpus preparation"),
+    resolution: int = typer.Option(512, help="Compiler voxel resolution for corpus preparation"),
     min_scene_bytes: int = typer.Option(1000, help="Ignore tiny invalid scene files"),
     force_recompile: bool = typer.Option(False, help="Overwrite compiled `.gmdag` outputs during refresh"),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON summary instead of text"),

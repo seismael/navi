@@ -18,12 +18,13 @@ from navi_actor.cli import (
     train,
 )
 from navi_actor.config import ActorConfig
+from navi_environment.integration.corpus import CompiledSceneEntry, PreparedSceneCorpus
 
 _RUNNER = CliRunner()
 
 
 def _option_default(func: object, name: str) -> object:
-    default = inspect.signature(func).parameters[name].default
+    default = inspect.signature(cast(object, func)).parameters[name].default
     assert isinstance(default, OptionInfo)
     return default.default
 
@@ -31,17 +32,17 @@ def _option_default(func: object, name: str) -> object:
 def test_validate_sdfdag_training_scenes_accepts_gmdag_assets() -> None:
     """Canonical training scene pools should accept compiled assets only."""
     _validate_sdfdag_training_scenes([
-        str(Path("artifacts/gmdag/sample_apartment.gmdag")),
-        str(Path("artifacts/gmdag/arena.gmdag")),
+        str(Path("artifacts/gmdag/corpus/replicacad/stage_one.gmdag")),
+        str(Path("artifacts/gmdag/corpus/hssd/stage_two.gmdag")),
     ])
 
 
 @pytest.mark.parametrize(
     "scene_path",
     [
-        "data/scenes/sample_apartment.glb",
-        "data/scenes/sample_apartment.obj",
-        "data/scenes/sample_episodes.json",
+        "data/scenes/replicacad/frl_apartment_stage.glb",
+        "data/scenes/replicacad/frl_apartment_stage.obj",
+        "data/scenes/scene_manifest_all.json",
     ],
 )
 def test_validate_sdfdag_training_scenes_rejects_non_gmdag_assets(
@@ -170,8 +171,9 @@ def test_train_uses_single_canonical_trainer(
     )
 
     assert result.exit_code == 0
-    assert captured["gmdag_file"] == str(scene_path)
-    assert captured["scene_pool"] == (str(scene_path),)
+    resolved_scene_path = str(scene_path.resolve())
+    assert captured["gmdag_file"] == resolved_scene_path
+    assert captured["scene_pool"] == (resolved_scene_path,)
     assert captured["started"] is True
     assert captured["stopped"] is True
     assert captured["total_steps"] == 64
@@ -181,3 +183,123 @@ def test_train_uses_single_canonical_trainer(
     assert config.emit_observation_stream is False
     assert config.emit_training_telemetry is False
     assert config.emit_perf_telemetry is False
+
+
+def test_train_defaults_to_prepared_canonical_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical training should prepare the full corpus by default."""
+    captured: dict[str, object] = {}
+    scratch_dir = Path("tests/.tmp_local") / f"cli-corpus-{uuid4().hex}"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    compiled_one = scratch_dir / "corpus" / "scene_one.gmdag"
+    compiled_two = scratch_dir / "corpus" / "scene_two.gmdag"
+    compiled_one.parent.mkdir(parents=True, exist_ok=True)
+    compiled_one.write_bytes(b"G" * 2048)
+    compiled_two.write_bytes(b"G" * 2048)
+
+    prepared = PreparedSceneCorpus(
+        source_root=scratch_dir / "sources",
+        gmdag_root=scratch_dir / "corpus",
+        source_manifest_path=scratch_dir / "sources" / "scene_manifest_all.json",
+        compiled_manifest_path=scratch_dir / "corpus" / "gmdag_manifest.json",
+        scene_entries=(
+            CompiledSceneEntry(
+                source_path=scratch_dir / "sources" / "scene_one.glb",
+                compiled_path=compiled_one,
+                dataset="set_a",
+                scene_name="scene_one",
+            ),
+            CompiledSceneEntry(
+                source_path=scratch_dir / "sources" / "scene_two.glb",
+                compiled_path=compiled_two,
+                dataset="set_b",
+                scene_name="scene_two",
+            ),
+        ),
+    )
+
+    def fake_prepare_training_scene_corpus(**kwargs: object) -> PreparedSceneCorpus:
+        captured["prepare_kwargs"] = kwargs
+        return prepared
+
+    class FakeTrainer:
+        def __init__(self, config: object, *, gmdag_file: str, scene_pool: tuple[str, ...]) -> None:
+            captured["config"] = config
+            captured["gmdag_file"] = gmdag_file
+            captured["scene_pool"] = scene_pool
+
+        def load_training_state(self, checkpoint: str) -> None:
+            captured["checkpoint"] = checkpoint
+
+        def start(self) -> None:
+            captured["started"] = True
+
+        def train(
+            self,
+            *,
+            total_steps: int,
+            log_every: int,
+            checkpoint_every: int,
+            checkpoint_dir: str,
+        ) -> object:
+            captured["total_steps"] = total_steps
+            captured["log_every"] = log_every
+            captured["checkpoint_every"] = checkpoint_every
+            captured["checkpoint_dir"] = checkpoint_dir
+            return type(
+                "Metrics",
+                (),
+                {
+                    "total_steps": total_steps,
+                    "episodes": 0,
+                    "reward_ema": 0.0,
+                    "policy_loss": 0.0,
+                },
+            )()
+
+        def stop(self) -> None:
+            captured["stopped"] = True
+
+        def save_training_state(self, path: Path) -> None:
+            captured["final_checkpoint"] = path
+
+    monkeypatch.setattr(
+        "navi_actor.cli.prepare_training_scene_corpus",
+        fake_prepare_training_scene_corpus,
+    )
+    monkeypatch.setattr(
+        "navi_actor.cli._build_canonical_trainer",
+        lambda config, *, gmdag_file, scene_pool: FakeTrainer(
+            config,
+            gmdag_file=gmdag_file,
+            scene_pool=scene_pool,
+        ),
+    )
+    monkeypatch.setattr("navi_actor.cli._validate_bindable", lambda address, label: None)
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "train",
+            "--checkpoint-dir",
+            str(scratch_dir / "ckpts"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["prepare_kwargs"] == {
+        "scene": "",
+        "manifest_path": None,
+        "gmdag_file": None,
+        "source_root": None,
+        "gmdag_root": None,
+        "resolution": 512,
+        "min_scene_bytes": 1000,
+        "force_recompile": False,
+    }
+    assert captured["gmdag_file"] in {str(compiled_one), str(compiled_two)}
+    assert set(cast(tuple[str, ...], captured["scene_pool"])) == {str(compiled_one), str(compiled_two)}
+    assert captured["total_steps"] == 0
+    assert captured["started"] is True
+    assert captured["stopped"] is True

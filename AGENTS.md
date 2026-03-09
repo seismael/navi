@@ -28,6 +28,7 @@ Navi is a modular ecosystem of isolated projects. Each project is a sovereign en
 - **Resolution Defaults:**
   - `NAVI_AZIMUTH_BINS=256`
   - `NAVI_ELEVATION_BINS=48` (High-fidelity navigation)
+  - `NAVI_GMDAG_RESOLUTION=512` (Canonical corpus compile profile for the 256x48 observation contract)
 
 ### 2.2 Simple Launch Commands
 Each project must provide a dedicated `uv run` shortcut and a corresponding wrapper script in `scripts/`:
@@ -65,7 +66,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 ### 2.8 SDF/DAG Integration Standard
 - **Internal Performance Domains:** `projects/voxel-dag` and `projects/torch-sdf` are sovereign internal domains and must be integrated as first-class projects, not copied into service packages.
 - **Performance-First Path:** Canonical runtime evolution prioritizes `.gmdag` compilation plus batched `torch_sdf.cast_rays()` execution before any actor-brain redesign work.
-- **Canonical Training Runtime:** All actor training entrypoints (`train`, `run-ghost-stack.ps1 -Train`, and wrapper training scripts) MUST run only on the `sdfdag` backend over compiled `.gmdag` assets. Mesh, voxel, and habitat backends are diagnostic-only once cutover is complete and must not remain on canonical training surfaces.
+- **Canonical Training Runtime:** All actor training entrypoints (`train`, `run-ghost-stack.ps1 -Train`, and wrapper training scripts) MUST run only on the `sdfdag` backend over compiled `.gmdag` assets.
 - **Unified Training Direction:** Canonical high-throughput training MUST use one in-process unified trainer that removes the Environment<->Actor ZMQ control path from the rollout hot loop. Parallel training architectures, equivalent alternate modes, and dual canonical surfaces are forbidden.
 - **Actor Preservation:** Environment and compiler upgrades MUST preserve the actor-side `DistanceMatrix` contract so `RayViTEncoder` and `Mamba2TemporalCore` remain unchanged.
 - **No CPU Fallback In Canonical Path:** The canonical SDF/DAG runtime must fail fast when CUDA or the compiled backend is unavailable rather than silently degrading to a slower path.
@@ -73,6 +74,9 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **CLI-Level Integration Rule:** Any direct actor-to-environment integration for canonical training MUST occur at CLI or orchestration boundaries. Service packages remain sovereign; the actor may instantiate environment backends only in the single canonical training entrypoint, not as a permanent service-to-service dependency surface.
 - **Tensor-Native Training Rule:** Canonical training internals MUST prefer CUDA tensor representations for observations, actions, rewards, and rollout storage. Materializing Python `DistanceMatrix` or `Action` objects inside the rollout hot path is forbidden except for coarse diagnostics, replay, or external service surfaces.
 - **Corpus Refresh Rule:** Canonical training may auto-compile source scene meshes into `.gmdag` assets, and dataset refresh tooling MUST support overwrite-first refresh of source data and compiled outputs when explicitly requested.
+- **Compile Profile Rule:** Canonical corpus refresh, environment CLI compilation, and actor training wrappers MUST default to `.gmdag` compile resolution `512` unless the user explicitly overrides it.
+- **Transactional Refresh Rule:** Canonical corpus refresh MUST stage downloaded source datasets and newly compiled outputs outside the live corpus, promote the compiled corpus only after a successful rebuild, and remove transient source downloads after successful integration.
+- **Resolution Mismatch Rule:** When a discovered compiled `.gmdag` asset does not match the requested canonical compile resolution, refresh tooling MUST automatically replace it rather than silently reusing it.
 
 ### 2.6 Compatibility Elimination Standard
 - **Canonical-Only Runtime:** Backward-compatible runtime paths are forbidden. Keep only actively emitted, actively consumed, canonical event and API paths.
@@ -93,12 +97,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 
 ## 3) Performance Mandates
 
-### 3.1 Batched Raycasting (Mesh Backend)
-- The `MeshSceneBackend` MUST use batched raycasting in `batch_step`.
-- Individual actor rays must be concatenated into a single `intersects_location` call to leverage SIMD/Parallel throughput.
-- **Benchmark:** Target ≥ 15 SPS for 4 actors at 256x48 on standard hardware.
-
-### 3.1.1 Batched Sphere Tracing (SDF/DAG Target Path)
+### 3.1 Batched Sphere Tracing (SDF/DAG Canonical Path)
 - The high-performance target runtime is `.gmdag` compilation via `projects/voxel-dag` followed by batched `torch_sdf.cast_rays()` execution from `projects/torch-sdf`.
 - The SDF/DAG backend MUST keep DAG data and ray buffers GPU-resident across steps.
 - Observation adaptation back to `(1, Az, El)` `DistanceMatrix` format MUST be vectorized and must not introduce avoidable CPU copies in the hot path.
@@ -179,9 +178,9 @@ Every instruction MUST follow this exact sequence. Implementation without alignm
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| **Rollout Throughput (4 Actors)** | ≥ 60 SPS | ACHIEVED (via Batched Raycasting) |
+| **Rollout Throughput (4 Actors)** | ≥ 60 SPS | ACHIEVED (via batched SDF/DAG execution) |
 | **Inference Latency (CPU)** | ≤ 15ms/actor | ACHIEVED (via ViT Caching) |
-| **Environment Latency (4 Actors)** | ≤ 25ms | ACHIEVED (via trimesh batching) |
+| **Environment Latency (4 Actors)** | ≤ 25ms | ACHIEVED (via compiled SDF/DAG batching) |
 
 ---
 *Status: Active canonical specification (Feb 2026)*

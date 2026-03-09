@@ -1,151 +1,88 @@
-# TRAINING.md — Canonical SDF/DAG Training Operations
-
-**Subsystem:** End-to-end runtime operations  
-**Status:** Active canonical training guide  
-**Policy:** See [AGENTS.md](../AGENTS.md) for canonical-only runtime rules
-
----
+# TRAINING.md — Canonical Corpus Training Operations
 
 ## 1. Canonical Path
 
-Canonical actor training runs on one path only:
+Canonical training runs on one production surface only:
 
-1. Discover the canonical source-scene corpus unless an explicit scene override is supplied.
-2. Compile or refresh the required `.gmdag` assets.
-3. Launch `train` on backend `sdfdag`.
-3. Attach the auditor dashboard over ZMQ if live inspection is needed.
+1. Discover the full source-scene corpus under `data/scenes/` unless explicitly narrowed.
+2. Prepare or refresh compiled `.gmdag` assets.
+3. Launch `navi-actor train` on the in-process `sdfdag` backend.
+4. Attach the auditor dashboard only if live inspection is needed.
 
-`train` is the only production training command and runs with direct in-process
-`sdfdag` stepping.
+Default behavior:
 
-By default, canonical training uses the full discovered dataset corpus and runs
-continuously until the user explicitly supplies a stop condition.
-
-Mesh, voxel, and habitat backends are diagnostic-only and must not be used for production training.
-
----
+- full discovered corpus
+- continuous training until stopped
+- staged overwrite-first corpus refresh when explicitly requested
+- compiled-corpus reuse by default after refresh, even if raw source downloads were cleaned
 
 ## 2. Prerequisites
 
 - Python `3.12`
 - CUDA-capable machine with working PyTorch CUDA runtime
-- A populated dataset corpus under `data/scenes/` or an explicit compiled `.gmdag` override
-- Free ZMQ port `5557` for actor telemetry
-- Free ZMQ ports `5559` and `5560` only if you also attach diagnostic tools that still listen on environment sockets
+- free port `5557` for actor telemetry
 
-If you need to build one explicit asset manually:
+## 3. Refresh And Preflight
 
 ```powershell
-uv run --python 3.12 --project .\projects\environment navi-environment compile-gmdag --source .\data\scenes\sample_apartment.glb --output .\artifacts\gmdag\sample_apartment.gmdag --resolution 2048
+./scripts/refresh-scene-corpus.ps1
+
+uv run --project .\projects\environment navi-environment check-sdfdag --gmdag-file .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag
+uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-file .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag --actors 4 --steps 200
 ```
 
----
-
-## 3. Preflight Check
-
-Validate the canonical runtime before long runs:
+## 4. Canonical Commands
 
 ```powershell
-uv run --python 3.12 --project .\projects\environment navi-environment bench-sdfdag --gmdag-file .\artifacts\gmdag\sample_apartment.gmdag --actors 4 --steps 200
-```
-
-This confirms the `.gmdag` asset loads, CUDA is available, and the environment can sustain batched `torch-sdf` stepping.
-
----
-
-## 4. Training Commands
-
-### 4.1. Canonical Training
-
-```powershell
+# Standard continuous training
 ./scripts/train.ps1
-```
 
-This default canonical launch should discover all available dataset scenes,
-prepare the compiled `.gmdag` corpus, and continue training until stopped.
-
-### 4.2. Long-Duration Training
-
-```powershell
+# Long-duration wrapper
 ./scripts/train-all-night.ps1
-```
 
-### 4.3. Unified Stack Launcher
-
-```powershell
+# Full stack training launcher
 ./scripts/run-ghost-stack.ps1 -Train
 ```
 
-### 4.4. Explicit Override Examples
+Explicit narrowing remains available when requested:
 
 ```powershell
-./scripts/train.ps1 -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag
+./scripts/train.ps1 -Scene .\data\scenes\replicacad\frl_apartment_stage.glb -AutoCompileGmDag
 ./scripts/train.ps1 -TotalSteps 500000
 ./scripts/run-ghost-stack.ps1 -Train -TotalSteps 500000
 ```
 
-Use explicit scene or duration overrides only when narrowing the canonical
-default behavior on purpose.
+## 5. Checkpoints
 
----
+- periodic checkpoints use the configured checkpoint directory
+- final checkpoints are written as `policy_final.pt` when enabled
+- resume with `-ResumeCheckpoint` on wrappers or `--checkpoint` on the actor CLI
 
-## 5. Dashboard Attach
+Example:
 
-Attach the dashboard to a running training session. In the canonical direct trainer,
-actor telemetry on `5557` is guaranteed while environment sockets may remain idle:
+```powershell
+./scripts/train-all-night.ps1 -ResumeCheckpoint .\checkpoints\all_night\policy_step_0025000.pt
+```
+
+## 6. Dashboard Attach
 
 ```powershell
 ./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560
 ```
 
-Expected window title:
-
-```text
-Ghost-Matrix RL Auditor
-```
-
-Expected log pattern:
-
-```text
-auditor.stream poll total=... topics={dm:..., action:0, telem:...}
-```
-
----
-
-## 6. Checkpoints
-
-- Periodic checkpoints are written under the configured checkpoint directory.
-- Final checkpoint is typically written as `policy_final.pt`.
-- Resume by passing `-ResumeCheckpoint` to the wrapper or `--checkpoint` to the actor CLI.
-
-Example:
-
-```powershell
-./scripts/train-all-night.ps1 -GmDagFile ./artifacts/gmdag/sample_apartment.gmdag -ResumeCheckpoint .\checkpoints\all_night\policy_step_0025000.pt
-```
-
----
+The canonical trainer guarantees actor telemetry on `5557`. Environment sockets may be idle during direct in-process training.
 
 ## 7. Recovery
-
-If ports are stuck after a crash:
 
 ```powershell
 Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like '*navi-environment*' -or $_.CommandLine -like '*navi-actor*' -or $_.CommandLine -like '*navi-auditor*') } | ForEach-Object { try { & taskkill /PID $_.ProcessId /T /F *> $null } catch {} }
 ```
 
-Then confirm that `5557` is no longer held before restarting training. If you also run
-diagnostic environment tools, clear `5559` and `5560` as well.
-
----
-
 ## 8. Operational Notes
 
-- Canonical launchers should default to the full discovered training corpus rather than a single sample scene.
-- Canonical corpus tooling should refresh source data and compiled `.gmdag` assets with overwrite semantics when explicitly requested.
-- Canonical training wrappers now default to the throughput-tuned compiled-path profile (`128x24`, minibatch `64`, BPTT `8`, rollout `512`).
-- Override individual knobs only for explicit experiments; the repository no longer advertises alternate training profiles.
-- Dashboard mode detection depends on low-volume telemetry to avoid rollout stalls.
-- The canonical trainer keeps the actor contract intact while removing the
-	environment step socket from the rollout hot loop; this is the primary path
-	for closing the remaining Navi vs Topo-nav architecture gap.
+- production training advertises only the canonical `sdfdag` path
+- wrappers default to the throughput-safe profile (`128x24`, minibatch `64`, BPTT `8`, rollout `512`)
+- corpus compilation defaults to `512`, aligned with the canonical `256x48` environment observation contract
+- `refresh-scene-corpus.ps1` stages downloads and removes transient source assets after a successful corpus promotion
+- use explicit overrides only for deliberate experiments
+- dashboard mode detection stays on low-volume telemetry to avoid rollout stalls

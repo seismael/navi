@@ -96,7 +96,16 @@ function Get-OptMetrics {
 $repoRoot = Get-RepoRoot
 $resolvedGmDag = $GmDagFile
 if ([string]::IsNullOrWhiteSpace($resolvedGmDag)) {
-    $resolvedGmDag = Join-Path $repoRoot "artifacts/gmdag/sample_apartment.gmdag"
+    $compiledCorpusRoot = Join-Path $repoRoot "artifacts/gmdag/corpus"
+    $compiledCandidates = if (Test-Path $compiledCorpusRoot) {
+        Get-ChildItem -Path $compiledCorpusRoot -Recurse -File -Filter "*.gmdag" | Sort-Object FullName
+    } else {
+        @()
+    }
+    if ($compiledCandidates.Count -eq 0) {
+        throw "No compiled corpus asset found. Run scripts/refresh-scene-corpus.ps1 or pass -GmDagFile explicitly."
+    }
+    $resolvedGmDag = $compiledCandidates[0].FullName
 }
 $resolvedGmDag = (Resolve-Path $resolvedGmDag).Path
 

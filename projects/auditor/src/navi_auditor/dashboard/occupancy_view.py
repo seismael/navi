@@ -114,7 +114,7 @@ class OccupancyMap:
     def load_scene(self, scene_path: str) -> None:
         """Load a mesh scene and rasterise wall/floor faces onto the grid.
 
-        Uses the same face-normal classification as *MeshSceneBackend*:
+        Uses the canonical mesh-underlay face-normal classification:
         ``ny > 0.7`` → floor, ``ny < -0.7`` → ceiling, else → wall.
 
         Parameters
@@ -249,7 +249,7 @@ class OccupancyMap:
         local_angles = np.linspace(
             0, 2 * np.pi, az_bins, endpoint=False, dtype=np.float32,
         )
-        # Note: MeshSceneBackend uses Z-forward (0, 0, -1), so we subtract yaw
+        # The underlay mesh uses Z-forward (0, 0, -1), so we subtract yaw
         # for a standard top-down cartesian map (X=right, Z=up/forward).
         world_angles = local_angles - yaw - (np.pi / 2.0)
 

@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__: list[str] = ["EnvironmentConfig"]
+
+
+def derive_default_gmdag_resolution() -> int:
+    """Return a compile profile aligned with the active observation contract."""
+    try:
+        azimuth_bins = int(os.environ.get("NAVI_AZIMUTH_BINS", "256"))
+        elevation_bins = int(os.environ.get("NAVI_ELEVATION_BINS", "48"))
+    except ValueError:
+        azimuth_bins = 256
+        elevation_bins = 48
+
+    target = max(512, azimuth_bins * 2, elevation_bins * 8)
+    resolution = 1
+    while resolution < target:
+        resolution <<= 1
+    return resolution
 
 
 def find_root_env() -> Path:
@@ -25,13 +42,15 @@ def find_root_env() -> Path:
 
 
 def find_default_gmdag() -> Path:
-    """Search upwards for the canonical sample `.gmdag` asset."""
+    """Search upwards for the first canonical compiled corpus asset."""
     try:
         curr = Path(__file__).resolve().parent
         for _ in range(6):
-            candidate = curr / "artifacts" / "gmdag" / "sample_apartment.gmdag"
-            if candidate.exists():
-                return candidate
+            corpus_root = curr / "artifacts" / "gmdag" / "corpus"
+            if corpus_root.exists():
+                candidates = sorted(corpus_root.rglob("*.gmdag"))
+                if candidates:
+                    return candidates[0]
             curr = curr.parent
     except Exception:  # noqa: S110
         pass
@@ -62,15 +81,6 @@ class EnvironmentConfig(BaseSettings):
     )
 
     mode: str = "step"
-    world_source: str = "procedural"
-    world_file: str = ""
-    generator: str = "arena"
-    window_radius: int = 2
-    lookahead_margin: int = 8
-    seed: int = 42
-    chunk_size: int = 16
-    barrier_distance: float = 1.0
-    collision_probe_radius: float = 1.5
     max_steps_per_episode: int = 50_000
     azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")
     elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS")
@@ -87,8 +97,8 @@ class EnvironmentConfig(BaseSettings):
     backend: str = "sdfdag"
     gmdag_file: str = str(find_default_gmdag())
     sdf_max_steps: int = 256
-    gmdag_resolution: int = 2048
-    habitat_scene: str = ""
-    habitat_dataset_config: str = ""
-    habitat_rgb_resolution: tuple[int, int] = (480, 640)
+    gmdag_resolution: int = Field(
+        default=derive_default_gmdag_resolution(),
+        validation_alias="NAVI_GMDAG_RESOLUTION",
+    )
     scene_pool: tuple[str, ...] = ()

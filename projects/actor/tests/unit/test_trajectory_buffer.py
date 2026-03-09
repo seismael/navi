@@ -264,3 +264,32 @@ def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
     assert len(first.hidden_states) == 2
     assert first.dones is not None
     assert first.dones.shape == (2, 2)
+
+
+def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=1)
+    obs = torch.randn(2, 3, 16, 8)
+    actions = torch.randn(2, 4)
+    log_probs = torch.randn(2)
+    values = torch.full((2,), 0.5)
+    rewards = torch.ones(2)
+    dones = torch.zeros(2, dtype=torch.bool)
+    truncateds = torch.zeros(2, dtype=torch.bool)
+    hidden = torch.randn(1, 2, 8)
+
+    buffer.append_batch(
+        observations=obs,
+        actions=actions,
+        log_probs=log_probs,
+        values=values,
+        rewards=rewards,
+        dones=dones,
+        truncateds=truncateds,
+        hidden_batch=hidden,
+        aux_tensors=None,
+    )
+    buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
+
+    batches = list(buffer.sample_minibatches(batch_size=4, seq_len=8))
+
+    assert batches == []

@@ -59,7 +59,7 @@ class DatasetAdapter(Protocol):
     * Valid-mask computation
     * Delta-depth computation (frame differencing)
 
-    Backends (e.g. ``HabitatBackend``) own the adapter and call
+    External data-source backends own the adapter and call
     ``adapt()`` on every raw observation dict.
     """
 
