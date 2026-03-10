@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -85,7 +85,7 @@ class MjxEnvironment:
         action: Action,
         timestamp: float,
         *,
-        prev_depth: NDArray[np.float32] | None = None,
+        prev_depth: NDArray[np.float32] | Any | None = None,
         max_distance: float = 30.0,
     ) -> RobotPose:
         """Step the robot pose by one simulation tick.
@@ -106,9 +106,6 @@ class MjxEnvironment:
 
         where ``alpha`` is the smoothing factor (default 0.3).
         """
-        linear: NDArray[np.float32]
-        angular: NDArray[np.float32]
-
         raw_lin = (
             action.linear_velocity[0]
             if action.linear_velocity.ndim == 2
@@ -136,7 +133,7 @@ class MjxEnvironment:
         angular_velocity: NDArray[np.float32],
         timestamp: float,
         *,
-        prev_depth: NDArray[np.float32] | None = None,
+        prev_depth: NDArray[np.float32] | Any | None = None,
         max_distance: float = 30.0,
     ) -> RobotPose:
         """Step the robot pose from normalized command vectors directly."""
@@ -205,7 +202,7 @@ class MjxEnvironment:
 
     @staticmethod
     def _compute_speed_factor(
-        prev_depth: NDArray[np.float32] | None,
+        prev_depth: NDArray[np.float32] | Any | None,
         max_distance: float = 30.0,
     ) -> float:
         """Proximity-based speed factor from front hemisphere depth.
@@ -214,17 +211,35 @@ class MjxEnvironment:
 
         Args:
             prev_depth: (Az, El) normalised depth from the last step,
-                or ``None`` on the first step of an episode.
+                or ``None`` on the first step of an episode. The canonical
+                tensor-native environment path may provide a tensor here.
             max_distance: Maximum ray distance (meters) used to
                 un-normalise the depth readings.
         """
         if prev_depth is None:
             return _MIN_SPEED_FACTOR
-        az_bins = prev_depth.shape[0]
+        az_bins = int(prev_depth.shape[0])
         span = max(1, az_bins // 8)
-        front = np.concatenate([prev_depth[:span], prev_depth[-span:]], axis=0)
-        min_front = float(np.min(front)) if front.size > 0 else 1.0
+        min_front = min(
+            MjxEnvironment._min_depth_value(prev_depth[:span]),
+            MjxEnvironment._min_depth_value(prev_depth[-span:]),
+        )
         # Un-normalise to physical metres before comparing
         min_front_metres = min_front * max_distance
         factor = min_front_metres / _SAFE_DEPTH_THRESHOLD
         return float(np.clip(factor, _MIN_SPEED_FACTOR, 1.0))
+
+    @staticmethod
+    def _min_depth_value(depth_slice: NDArray[np.float32] | Any) -> float:
+        """Return the minimum depth from either a numpy array or tensor slice."""
+        if isinstance(depth_slice, np.ndarray):
+            return float(np.min(depth_slice)) if depth_slice.size > 0 else 1.0
+        if hasattr(depth_slice, "numel") and int(depth_slice.numel()) == 0:
+            return 1.0
+        if hasattr(depth_slice, "amin"):
+            min_value = depth_slice.amin()
+            if hasattr(min_value, "item"):
+                return float(min_value.item())
+            return float(min_value)
+        array_view = np.asarray(depth_slice, dtype=np.float32)
+        return float(np.min(array_view)) if array_view.size > 0 else 1.0

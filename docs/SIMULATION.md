@@ -1,16 +1,18 @@
-# SIMULATION.md — Canonical Environment Runtime
+# SIMULATION.md - Canonical Environment Runtime
 
-## 1. Overview
+## 1. Executive Summary
 
-The environment layer now exposes one active runtime only:
+The environment layer is the spatial truth layer of Navi. In the current repo it
+has one active production runtime:
 
-- compiled `.gmdag` assets prepared from source scenes
+- compiled `.gmdag` assets under `artifacts/gmdag/corpus/`
 - CUDA sphere tracing through `projects/torch-sdf`
-- `DistanceMatrix v2` observations preserved for the actor contract
-- coarse `environment.sdfdag.perf` telemetry for throughput tracking
-- staged corpus refresh that removes transient downloads after successful integration
+- one batched `SdfDagBackend`
+- contract-preserving `DistanceMatrix` publication for service and diagnostics
+- optional tensor-native seams for the canonical trainer
 
-The environment remains the sole spatial truth layer for Navi.
+The environment does not own the sacred actor. It owns the world query,
+kinematic update, reward seam, and contract-preserving adaptation layer.
 
 ## 2. Canonical Commands
 
@@ -34,73 +36,223 @@ uv run navi-environment bench-sdfdag --gmdag-file ./artifacts/gmdag/corpus/repli
 
 ## 3. Runtime Architecture
 
-`SimulatorBackend` remains the environment abstraction boundary, but the repository now keeps only one production implementation:
+`SimulatorBackend` remains the abstract environment boundary, but only one
+production implementation is active:
 
 ```text
 SimulatorBackend
-  └── SdfDagBackend — batched CUDA sphere tracing against compiled `.gmdag` caches
+  -> SdfDagBackend
+     -> loaded DAG asset metadata
+     -> contiguous DAG tensor on CUDA
+     -> reusable ray origin and direction buffers
+     -> reusable distance and semantic output buffers
+     -> optional materialization for publish surfaces
 ```
 
 Key runtime properties:
 
 - one canonical compiled-scene execution path
-- no procedural generators
-- no mesh, habitat, or voxel fallback runtime
-- no sparse-Zarr world format in the active environment surface
-- the CUDA ray tracer must stop at the configured environment horizon rather than a separate hardcoded kernel limit
+- CUDA-only execution on the production path
+- batched actor stepping is mandatory
+- the CUDA ray tracer stops at the configured environment horizon
+- the actor may consume equivalent CUDA tensors directly on the canonical path
+- service mode and diagnostics may still materialize `DistanceMatrix` objects
 
-## 4. Corpus Preparation
+## 4. Corpus Preparation And Promotion
 
-`prepare-corpus` discovers source scenes, compiles missing or stale `.gmdag` assets, and writes:
+### 4.1 Source Discovery
 
-- source manifest under the source root
-- compiled manifest under the compiled corpus root
+`prepare-corpus` discovers scenes from:
 
-Canonical refresh policy:
+- an explicit `--scene` override
+- an explicit manifest
+- or canonical source discovery roots
 
-- default compile resolution is `512`
-- compiled assets with the wrong stored resolution are rebuilt automatically during refresh
-- `scripts/refresh-scene-corpus.ps1` stages source downloads and only promotes the compiled corpus after a full successful rebuild
-- transient source downloads are removed after successful promotion so the persistent runtime depends on the compiled corpus, not raw meshes
-- promoted `gmdag_manifest.json` files rewrite `source_path` to the live compiled asset path; deleted scratch download paths must not remain in the live corpus metadata
+When the user does not narrow the corpus, full discovered corpus coverage is the
+default production training dataset.
 
-Canonical scene/episode policy:
+### 4.2 Compilation Policy
 
-- collision during training remains non-terminal; the backend reverts the pose, applies a penalty, and continues the episode
-- hard truncation remains `2000` steps by default
-- scene-pool rotation defaults to `16` completed episodes per scene across the fleet, reducing expensive scene swaps and giving actors more time to recover and explore locally
-- near-obstacle reward includes a positive clearance-delta signal when an actor increases free space after getting close to geometry
-- horizon-saturated observations now incur a starvation penalty once invalid rays dominate the sphere beyond the configured threshold
-- very near valid hits now incur a proximity penalty so persistent wall-hugging is discouraged without changing collision non-terminal behavior
+Canonical compile policy is:
 
-TSDF-derived integration policy:
+- default resolution `512`
+- overwrite-first refresh when explicitly requested
+- automatic replacement of compiled assets with mismatched stored resolution
+- promotion only after a successful staged rebuild
 
-- the first accepted TSDF-derived runtime change is horizon alignment between `EnvironmentConfig.max_distance` and `torch-sdf` kernel termination
-- starvation/proximity reward shaping is implemented at the environment reward seam using already-produced batched depth/validity tensors
-- compiler-side truncation radius and Morton/Z-order storage remain benchmark-gated experiments until they prove better than the current `.gmdag` path
+### 4.3 Live Artifact Policy
+
+The persistent runtime depends on compiled assets, not retained raw downloads.
+
+After a successful corpus refresh:
+
+- transient source downloads may be removed
+- live manifests must point at promoted `.gmdag` assets
+- scratch download paths must not remain in promoted metadata
 
 Canonical roots:
 
 - transient source staging: `artifacts/tmp/corpus-refresh/downloads/`
 - compiled corpus: `artifacts/gmdag/corpus/`
 
-## 5. Observation Contract
+## 5. Step Lifecycle
 
-The environment still publishes the actor’s required contract unchanged:
+A single batched environment step on the canonical runtime does the following:
+
+1. receive actions or action-equivalent tensors for `B` actors
+2. integrate body-frame motion through `MjxEnvironment`
+3. update actor origins and world-frame directions
+4. invoke `torch_sdf.cast_rays()` on preallocated CUDA buffers
+5. reshape batched outputs into `(Az, El)` depth, semantic, and validity grids
+6. compute environment-side reward terms
+7. either:
+   - return tensor-native observation batches to the trainer, or
+   - materialize `DistanceMatrix` objects for publication or service replies
+
+The important architectural point is that steps 4 through 6 already have the
+information needed for most production training logic. Rebuilding Python objects
+is therefore optional on the fast path, not required.
+
+## 6. Observation Contract And Geometry Conventions
+
+### 6.1 Public Observation Contract
+
+The environment publishes the actor's required fields unchanged:
 
 - `depth`
 - `delta_depth`
 - `semantic`
 - `valid_mask`
 
-All arrays remain shaped `(1, Az, El)`.
+Wire arrays remain shaped `(1, Az, El)` per environment.
 
-## 6. Runtime Ports
+### 6.2 Tensor-Native Trainer Seam
+
+The canonical trainer may consume the equivalent CUDA tensor with channels:
+
+- channel `0`: normalized depth
+- channel `1`: semantic ids cast to `float32`
+- channel `2`: validity mask cast to `float32`
+
+Per-actor shape is `(3, Az, El)`. Batched trainer shape is `(B, 3, Az, El)`.
+
+### 6.3 Spherical Convention
+
+The canonical spherical convention is:
+
+- `matrix_shape == (azimuth_bins, elevation_bins)`
+- forward ray is azimuth bin `0`
+- forward direction is local `-Z`
+- dashboard forward-FOV extraction must roll the azimuth seam before cropping
+
+## 7. Fixed-Horizon Policy
+
+The canonical environment horizon is `EnvironmentConfig.max_distance`.
+That same value controls:
+
+- CUDA ray termination
+- depth normalization
+- horizon-saturation semantics
+- invalidity of rays that exceed the configured horizon
+
+Dynamic per-step trace radius is not part of the canonical runtime.
+
+## 8. Reward And Episode Semantics
+
+### 8.1 Persistence-First Collision Handling
+
+Canonical training is persistence-first:
+
+- collision is non-terminal
+- invalid motion is reverted
+- a penalty is applied
+- the episode continues
+
+### 8.2 Scene Residency
+
+Canonical scene rotation is throughput-aware:
+
+- hard truncation defaults to `2000` steps
+- scene-pool rotation defaults to `16` completed episodes per scene across the fleet
+- actors stay on a scene long enough to recover, explore, and exploit local
+  geometry rather than rotating after trivial failure events
+
+### 8.3 Environment-Side Shaping Terms
+
+The environment reward seam includes:
+
+- obstacle-clearance reward for increasing free space while near geometry
+- starvation penalty when horizon-saturated observations dominate the sphere
+- proximity penalty when very near valid hits dominate the sphere
+
+These terms are derived from already-produced depth and validity tensors.
+No second observation pipeline is required.
+
+## 9. External Data And Sim-to-Real Boundary
+
+The imported OmniSense material is adopted in a narrow, production-safe form.
+
+`DatasetAdapter` remains the only valid place for:
+
+- axis transpose
+- coordinate normalization
+- semantic remapping
+- external sensor projection into the spherical contract
+
+This is a boundary rule, not a license to reopen multiple production runtime
+paths.
+
+### 9.1 Domain Randomization Direction
+
+Noise injection and hardware-robustness transformations remain valid design
+ideas, but they belong after mathematical world query and before training or
+inference consumption. They should be treated as optional environment-side
+post-processing, not as new compiler or actor responsibilities.
+
+### 9.2 Sensor Bridge Direction
+
+Real-world hardware compatibility remains conceptually simple:
+
+- point clouds or stitched depth sensors must be projected into the canonical
+  spherical contract
+- the actor should not need to know whether those inputs came from simulation or
+  real hardware
+
+That remains a design direction, not a second canonical runtime.
+
+## 10. Service Surfaces
+
+### 10.1 Runtime Ports
 
 - `5559` PUB: `distance_matrix_v2`
-- `5560` REP: `step_request_v2` / `step_result_v2`
+- `5560` REP: `step_request_v2` and `step_result_v2`
 
-## 7. Validation
+### 10.2 Service-Mode Validity
+
+Service mode remains valid for:
+
+- integration testing
+- manual stepping
+- dashboard teleoperation
+- recorder and rewinder workflows
+
+Service mode is not the canonical throughput path, but it remains an important
+operational and validation surface.
+
+## 11. Dataset QA Direction
+
+The imported dashboard proposal for a dataset-auditor pinhole camera is kept as
+an important diagnostic direction:
+
+- render compiled scenes through the same mathematical runtime used for training
+- avoid geometry export or browser-only surrogate visualizations
+- prefer proof through the real runtime over convenience rendering
+
+This is a passive validation surface and should remain optional.
+
+## 12. Validation
+
+Core validation commands:
 
 ```bash
 uv run ruff check .
@@ -108,302 +260,10 @@ uv run mypy src/
 uv run pytest tests/
 ```
 
----
-
-## 3. DatasetAdapter Protocol
-
-**Module:** `backends/adapter.py`
-
-Formalizes the boundary between external data sources and the training engine's
-canonical DistanceMatrix contract. The adapter is the **only** place where raw
-external observations are transformed into the engine's format.
-
-```python
-@runtime_checkable
-class DatasetAdapter(Protocol):
-    @property
-    def metadata(self) -> AdapterMetadata: ...
-
-    def adapt(self, raw_obs: dict[str, Any], step_id: int) -> dict[str, NDArray]: ...
-
-    def reset(self) -> None: ...
-```
-
-### 3.1. AdapterMetadata
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `azimuth_bins` | `int` | Output azimuth resolution |
-| `elevation_bins` | `int` | Output elevation resolution |
-| `max_distance` | `float` | Maximum depth in metres (normalization divisor) |
-| `semantic_classes` | `int` | Number of semantic classes produced (0…N-1) |
-
-### 3.2. Adapt Transform Chain
-
-The `adapt()` method performs the following transformations in order:
-
-1. **Axis transpose:** Raw `(El, Az)` → canonical `(Az, El)`.
-2. **Depth normalization:** Metres → `[0, 1]` via `clip(d, 0, max_dist) / max_dist`.
-3. **Semantic remapping:** External instance/category IDs → Navi's `[0, 10]`
-   range via `HabitatSemanticLUT`.
-4. **Delta-depth computation:** Frame difference `depth_t - depth_{t-1}`.
-5. **Valid-mask computation:** `raw_depth > 0` (marks bins with actual ray hits).
-6. **Overhead minimap generation:** Top-down projection from depth data with
-   Turbo-style distance colormap.
-7. **Env-dimension insertion:** `(Az, El)` → `(1, Az, El)`.
-
-### 3.3. Implemented Adapters
-
-**HabitatAdapter** (`backends/habitat_adapter.py`):
-
-Converts Habitat equirectangular sensor output to canonical arrays. Uses
-`HabitatSemanticLUT` for semantic remapping — a uint8 lookup table built from
-`habitat_sim.SemanticScene.objects` that maps instance IDs to Navi's 0–10
-semantic range via the `REPLICACAD_CATEGORY_MAP`.
-
-**Navi semantic ID table:**
-
-| ID | Category | Examples |
-|----|----------|----------|
-| 0 | Air / empty | Void, unknown |
-| 1 | Floor / ground | Floor surfaces |
-| 2 | Wall / barrier | Walls |
-| 3 | Ceiling / overhead | Ceiling |
-| 4 | Furniture / obstacle | Chair, table, sofa, bed, cabinet |
-| 5 | Object / interactable | Lamp, book, cushion, appliance |
-| 6 | Structure | Door, window, column, stairs |
-| 7 | Vegetation / organic | Plants |
-| 8 | Water / liquid | — |
-| 9 | Hazard / dynamic obstacle | — |
-| 10 | Target / goal | Navigation targets |
-
-### 3.4. SOLID Adapter Ecosystem (Roadmap)
-
-Following the Open/Closed Principle, additional adapters can be implemented
-without modifying the training engine:
-
-- **PointCloudAdapter** (planned): Ingests raw `.las` / `.ply` LiDAR scans,
-  computing continuous surface normals and projecting into spherical depth.
-- **ProceduralAdapter** (planned): Wraps procedural generation algorithms,
-  translating algorithmic structures into geometric boundaries.
-- **IsaacAdapter** (planned): Bridge to NVIDIA Isaac Sim for high-fidelity
-  robot simulation.
-
----
-
-## 4. World Compilation Pipeline
-
-Two world-compilation paths currently coexist in Navi:
-
-- **Sparse Zarr voxel worlds** for the current `VoxelBackend` flow.
-- **`.gmdag` worlds** for the internal `projects/voxel-dag` + `projects/torch-sdf`
-  performance path.
-
-The performance-first direction of the repository is to promote `.gmdag` to the
-canonical compiled-world format for high-throughput training once the runtime
-backend is validated.
-
-### 4.1. WorldModelCompiler / PlyWorldCompiler
-
-**Module:** `transformers/compiler.py`
-
-Offline tool that converts mesh assets into the canonical sparse Zarr chunk
-format for `VoxelBackend` consumption.
-
-This compiler remains part of the repository for the current voxel path, but it
-is no longer the sole strategic compilation story.
-
-**Supported input formats:** PLY, OBJ, ASCII STL.
-
-**Output:** Zarr archive with sparse chunk layout:
-- `chunk_index` — array mapping chunk coordinates to data offsets.
-
-### 4.2. Internal `.gmdag` Compiler Path
-
-The imported `projects/voxel-dag` project is now the in-repo compiler domain
-for the high-performance Ghost-Matrix path.
-
-- **Input:** `.glb`, `.obj`, `.ply`, and related mesh assets.
-- **Output:** `.gmdag` binary caches with cubic world alignment and DAG-compressed
-  distance payloads.
-- **Entry points:** `projects/voxel-dag/src/main.cpp` and the package entry
-  point exposed by `projects/voxel-dag/pyproject.toml`.
-
-Navi surfaces this flow through `navi-environment compile-gmdag` so the
-Environment project can own orchestration without reimplementing the compiler.
-`navi-environment check-sdfdag` is the paired preflight command for validating
-compiler/runtime readiness and `.gmdag` metadata before rollout.
-`navi-environment bench-sdfdag` runs the same canonical batched backend without
-the actor layer so throughput can be measured directly before stack cutover.
-- `chunks/<cx>_<cy>_<cz>` — per-chunk voxel arrays `(N, 5)`.
-
-**CLI:**
-
-```bash
-uv run navi-environment compile-world \
-  --source ./worlds/city.ply \
-  --source-format ply \
-  --output ./worlds/city.zarr
-```
-
-### 4.2. World Generators
-
-**Module:** `generators/`
-
-Procedural world generators implementing `AbstractWorldGenerator`:
-
-| Generator | Description |
-|-----------|-------------|
-| `ArenaGenerator` | Simple walled arena with optional pillars/obstacles |
-| `CityGenerator` | Multi-block urban layout with buildings and streets |
-| `MazeGenerator` | Recursive maze with configurable complexity |
-| `RoomsGenerator` | Connected room layouts with doorways |
-| `Open3DVoxelGenerator` | Open3D-based voxelization of mesh files |
-| `FileLoaderGenerator` | Loads pre-compiled Zarr world files |
-
-Each generator implements:
-- `generate_chunk(cx, cy, cz) → NDArray` — produce voxel data for a chunk.
-- `spawn_position() → (x, y, z)` — deterministic starting position.
-
----
-
-## 5. Raycasting Engine
-
-### 5.1. RaycastEngine
-
-**Module:** `raycast.py`
-
-Vectorized spherical-projection Z-buffer that projects local voxels into
-discretized azimuth/elevation bins.
-
-**Algorithm:**
-
-1. Compute relative positions of all voxels to the robot.
-2. Convert to spherical coordinates:
-   - Azimuth: $\theta = \text{atan2}(z, x)$ (horizontal XZ plane).
-   - Elevation: $\phi = \text{atan2}(y, \sqrt{x^2 + z^2})$ (vertical lift).
-3. Discretize into bin indices: $\theta \to [0, \text{Az})$,
-   $\phi \to [0, \text{El})$.
-4. Normalize distances: $d_{norm} = \text{clip}(d / d_{max}, 0, 1)$.
-5. **Scatter-reduce:** `np.minimum.at(depth_flat, flat_indices, normalized)` —
-   nearest hit per bin.
-6. **Semantic assignment:** Sort by distance, scatter closest voxel's semantic
-   ID per bin.
-7. **Valid mask:** Mark any bin that received at least one hit.
-
-**Performance:** Scales to 256×128+ bins and tens of thousands of voxels
-without measurable overhead. Fully vectorized — no Python for-loops in the
-hot path.
-
-### 5.2. DistanceMatrixBuilder
-
-**Module:** `distance_matrix_v2.py`
-
-Wraps `RaycastEngine` and adds:
-
-- **Heading-relative rotation:** Voxel positions are rotated into the robot's
-  forward-facing frame before projection, so the depth panorama is centered
-  on the robot's heading direction.
-- **Delta-depth:** Temporal velocity awareness channel — per-bin change since
-  the last step.
-- **Overhead minimap:** 256×256 BGR top-down view centered on the robot with
-  semantic colormap and heading arrow.
-
-### 5.3. MjxEnvironment
-
-**Module:** `mjx_env.py`
-
-Body-frame kinematic pose stepping. Integrates velocity commands from `Action`
-into pose updates using configurable time delta (default `dt=1.0`).
-
-### 5.4. Chunk Pruning
-
-**Module:** `pruning.py`
-
-Utilities for memory-efficient chunk lifecycle management. Prunes chunks that
-fall outside the sliding window radius, reducing memory footprint during
-long-running training sessions in large environments.
-
----
-
-## 6. Shape Convention
-
-All backends produce arrays with the following canonical conventions:
-
-| Property | Value |
-|----------|-------|
-| `matrix_shape` | `(azimuth_bins, elevation_bins)` — default `(256, 48)` |
-| Axis ordering | `(n_envs, azimuth, elevation)` |
-| Single-env shape | `n_envs = 1` → `(1, Az, El)` |
-| Depth range | `[0, 1]` — normalized by `max_distance` (default 30.0 m) |
-| Semantic range | `int32` in `[0, 10]` |
-| Overhead minimap | `(256, 256, 3)` BGR uint8 or float32 |
-
----
-
-## 7. Roadmap: SDF Compiler & DAG Engine
-
-### 7.1. SDF Compiler
-
-Offline mathematical distance field evaluation from adapted geometry. The
-compiler calculates the exact distance to the nearest geometric boundary for
-all points in simulated space, yielding a continuous Signed Distance Field.
-
-### 7.2. Sparse Voxel Octree (SVO) Compression
-
-The environment is recursively subdivided into an octree. If a large region
-contains no geometry and a uniform SDF gradient, subdivision halts — empty
-space is represented by a single high-level node. This reduces memory footprint
-by orders of magnitude compared to dense grids.
-
-### 7.3. DAG Deduplication
-
-The octree is folded into a **Directed Acyclic Graph** by identifying
-mathematically identical SDF branches across the environment and merging their
-memory pointers. For procedural environments with repetitive structures
-(corridors, rooms), this achieves further orders-of-magnitude compression,
-ensuring the environment fits within GPU L1/L2 caches for bandwidth-optimal
-parallel raycasting.
-
-### 7.4. `.gmdag` Binary Format
-
-The compiler outputs `.gmdag` (Ghost-Matrix DAG) binary cache files. Leaf nodes
-contain the tuple `[float32 distance, int32 semantic_id]`. The runtime engine
-operates exclusively on compiled `.gmdag` caches — it possesses no knowledge of
-the original dataset format.
-
-### 7.5. CUDA/Triton Sphere Tracing Kernel
-
-A GPU-optimized kernel executes sphere tracing across the DAG structure.
-Memory access patterns are localized to exploit the DAG's deduplication. The
-kernel outputs structured float tensors directly in PyTorch's memory space
-(zero CPU-GPU transfer). See [ARCHITECTURE.md §8.3](ARCHITECTURE.md) for
-full specification.
-
----
-
-## 8. Configuration Reference
-
-**Module:** `config.py` — `EnvironmentConfig`
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `pub_address` | `str` | `tcp://*:5559` | PUB socket bind address |
-| `rep_address` | `str` | `tcp://*:5560` | REP socket bind address |
-| `action_sub_address` | `str` | `tcp://localhost:5557` | SUB socket for async mode |
-| `mode` | `str` | `step` | `step` (REQ/REP) or `async` (SUB/PUB) |
-| `backend` | `str` | `sdfdag` | Backend selection: `sdfdag` (canonical). `voxel`, `habitat`, and `mesh` remain diagnostic-only. |
-| `world_source` | `str` | `procedural` | `procedural` or `file` |
-| `world_file` | `str` | `""` | Path to Zarr world file (when `file` source) |
-| `generator` | `str` | `arena` | World generator: `arena`, `city`, `maze`, `rooms`, `open3d` |
-| `chunk_size` | `int` | 16 | Voxel chunk edge length |
-| `window_radius` | `int` | 2 | Sliding window radius in chunks |
-| `lookahead_margin` | `int` | 8 | Predictive prefetch distance |
-| `barrier_distance` | `float` | 0.0 | Minimum standoff from occupied voxels |
-| `collision_probe_radius` | `float` | 1.5 | Radius for collision constraint check |
-| `azimuth_bins` | `int` | 256 | Azimuth resolution |
-| `elevation_bins` | `int` | 128 | Elevation resolution |
-| `max_distance` | `float` | 30.0 | Maximum observation distance (metres) |
-| `habitat_scene` | `str` | `""` | Path to Habitat `.glb` scene (Habitat only) |
-| `habitat_dataset_config` | `str` | `""` | Path to PointNav episode JSON (Habitat only) |
-| `seed` | `int` | 42 | Random seed for procedural generation |
+Important current checks include:
+
+- fixed-horizon clamp and validity contract tests
+- live compiled-corpus validation
+- live `SdfDagBackend` step validation against real `.gmdag` assets
+- runtime readiness checks via `check-sdfdag`
+- environment throughput attribution via `bench-sdfdag`

@@ -1,80 +1,107 @@
-# PARALLEL.md — Ghost-Matrix Parallelization & Multi-Actor Topologies
+# PARALLEL.md - Canonical Multi-Actor Execution And Research Boundaries
 
-## 1. Executive Summary
+## 1. Purpose
 
-This document defines the parallel execution architecture for the Ghost-Matrix ecosystem. Scaling Reinforcement Learning (RL) requires processing massive volumes of experiential data. When deploying multiple actors within the same mathematical environment (the Sparse Voxel DAG), the architecture must explicitly resolve whether these actors function as isolated data-gatherers or as a cooperative cognitive swarm.
+This document explains how Navi uses multiple actors today and how that differs
+from broader multi-agent or swarm ideas found in the imported material.
 
-This specification investigates the two distinct mathematical paradigms of parallelization—**Distributed Experience Accumulation** and **Swarm Cognition (Multi-Agent RL)**—and defines the exact, most efficient implementation paths for the Signed Distance Field (SDF) Core Engine.
+The short version is:
 
----
+- Navi absolutely depends on batched multi-actor execution
+- but it does so for distributed experience accumulation under one global
+  learner, not for production swarm cognition
 
-## 2. The Physics of Shared Environments (SDF Core Efficiency)
+## 2. Physics Of Shared Compiled Worlds
 
-Before defining the cognitive sharing mechanisms, the mechanical efficiency of placing multiple actors in the *same* environment must be established.
+The compiled `sdfdag` runtime makes same-scene multi-actor execution efficient:
 
-In traditional polygon engines, 1,000 actors in one environment cause geometric collision bottlenecks ( entity-to-entity checks). In the Ghost-Matrix SDF architecture, parallelizing actors in a single environment yields a massive computational advantage:
+- one `.gmdag` asset can be shared across many actors
+- one DAG tensor can stay resident on CUDA
+- batched ray queries amortize launch and memory overhead across actors
+- actors are mathematically independent unless explicit interaction terms are
+  added above the runtime
 
-* **Zero Memory Duplication:** A single `.gmdag` cache resides in VRAM.
-* **Batched Ray Execution:** The SDF Sphere Tracing kernel accepts a batched tensor of actor origins . It evaluates the foveated rays for all  actors simultaneously in a single highly parallelized CUDA/Metal wavefront.
-* **Actor Independence in Math:**  is evaluated per-ray. Actors do not inherently block each other unless explicit actor-to-actor physics are programmed into the distance function.
+This is one of the strongest performance arguments for the current architecture.
 
----
+## 3. Canonical Production Topology
 
-## 3. Paradigm A: Distributed Experience Accumulation (Independent)
+The active production topology is Paradigm A from the imported notes,
+reframed in current repo language:
 
-**Objective:** Run parallel actors exclusively to accelerate the accumulation of state-action-reward data, solving the sample inefficiency of PPO. Ultimately, only **one independent policy** is deployed during inference.
+- many actors step in parallel
+- one global policy generates actions
+- one global learner updates shared weights
+- per-actor trajectories remain logically distinct for PPO and BPTT correctness
+- episodic memory remains scoped for robust on-policy training behavior
 
-### 3.1. Theoretical Framework
+This is not merely a convenient default. It is the architecture that best fits:
 
-* **Training Phase:**  actors spawn in the exact same procedural DAG but at different starting coordinates. They act as independent parallel threads exploring the space. They do not share live sensor data.
-* **The Global Brain:** All  trajectories are periodically aggregated into a centralized `TrajectoryBuffer`. The PPO learner updates a single, global set of neural network weights () for the Ray-ViT and Mamba-2 core.
-* **Inference Phase:** A single actor is deployed. It possesses the synthesized navigation mastery of all training actors but operates autonomously without network communication.
+- current PPO training
+- current tensor-native rollout structure
+- current benchmark and attribution surfaces
+- the requirement to keep one production trainer only
 
-### 3.2. Architectural Implementation
+## 4. Current Multi-Actor Dataflow
 
-1. **Isolated Episodic Memory:** Each actor  maintains its own isolated historical tensor  within VRAM. Actor A cannot see Actor B's loop closures.
-2. **Batched Forward Pass:** The neural network executes a single forward pass on the batched ray tensor .
-3. **Efficiency:** This is the industry-standard approach for scaling PPO. It guarantees stable gradient descent because the trajectories remain independent and identically distributed (i.i.d.).
+At a high level the canonical trainer does the following:
 
----
+1. keep one batched observation tensor for all active actors
+2. run one batched policy forward pass
+3. step the environment backend for all actors together
+4. append one rollout step for all actors
+5. run PPO on the filled rollout buffer
 
-## 4. Paradigm B: Swarm Cognition (Multi-Agent RL / Shared Knowledge)
+This exploits the compiled runtime without reopening service transport in the
+hot loop.
 
-**Objective:** Actors operate simultaneously in the same environment and explicitly share knowledge. What one actor maps is instantly known to the entire swarm. This applies to both training and deployed inference (e.g., a swarm of drones mapping a cave system cooperatively).
+## 5. Why Swarm Cognition Is Not Canonical
 
-### 4.1. Theoretical Framework
+The imported swarm material was conceptually interesting, but it is not the
+current production direction.
 
-This paradigm shifts the architecture from standard RL to **Centralized Training with Decentralized Execution (CTDE)** or a fully **Centralized Swarm**.
+Reasons:
 
-* **Shared Latent Memory:** Instead of isolated episodic buffers, the system maintains a **Global Episodic Memory Matrix** .
-* **Instantaneous Loop Detection:** When Actor A traverses a corridor, its spatial embeddings  are appended to . If Actor B approaches the same corridor minutes later, its cosine similarity check  triggers a match against Actor A's history. Actor B instantly receives the  penalty and routes away, preventing redundant exploration.
+- shared global episodic memory would change the optimization problem, not just
+  the implementation details
+- cross-actor reward sharing would complicate credit assignment and PPO stability
+- truly shared memory would create new hot-path synchronization costs
+- the current repo bottlenecks are already in rollout dataflow and PPO update
+  cost, so adding swarm synchronization now would move in the wrong direction
 
-### 4.2. Architectural Implementation
+## 6. Research-Only Extension Path
 
-1. **The Global Tensor Memory Index:** A singular tensor-native cosine-similarity store accepts concurrent append operations from all actors.
-2. **Cross-Attention Sequence Modeling:** To achieve true swarm intelligence, the Mamba-2 Temporal Core can be modified. Instead of processing  isolated hidden states , the architecture implements a cross-attention layer where Actor A's Ray-ViT output  can attend to Actor B's output  if their absolute mathematical coordinates  are within a specific proximity radius.
-3. **Reward Sharing:** The reward function must be modified. If Actor A finds the objective, a discounted intrinsic reward is propagated to the hidden states of nearby actors, reinforcing cooperative swarm formations.
+Swarm-style ideas remain valid research directions only after the canonical
+single-policy parallel trainer is fully optimized.
 
----
+Research-only candidates include:
 
-## 5. Strategic Comparison & Implementation Directive
+- global episodic memory across actors
+- cooperative reward propagation
+- cross-actor latent communication
+- proximity-conditioned coordination layers
 
-Determining which paradigm to implement depends strictly on the final operational deployment of the autonomous system.
+If explored, they should be framed as explicit research branches, not as silent
+extensions of the canonical trainer.
 
-| Metric | Paradigm A: Distributed Accumulation | Paradigm B: Swarm Cognition |
-| --- | --- | --- |
-| **Primary Goal** | Train a single, highly robust agent quickly. | Deploy a cooperative fleet of agents. |
-| **Training Speed** | Extremely fast. Independent trajectories yield stable, low-variance PPO gradients. | Complex. Shared rewards and global memory increase gradient variance (Credit Assignment Problem). |
-| **Inference Mode** | 1 Actor (Isolated). |  Actors (Synchronized). |
-| **Episodic Memory** |  isolated  tensors. | 1 global  tensor. |
-| **Algorithm Class** | Standard PPO / Asynchronous Advantage. | MAPPO (Multi-Agent PPO) / QMIX. |
+## 7. Parallelism Rules That Remain Canonical
 
-### 5.1. The Performance Bottleneck in Swarm (Paradigm B)
+Regardless of research direction, the following stay true:
 
-If Paradigm B is selected, the mathematical bottleneck shifts to the **Global Episodic Memory**. Writing to a single shared memory index from 1,024 parallel actors every microsecond requires rigorous tensor locking and atomic operations to prevent race conditions. The  similarity search grows  times faster, requiring aggressive pruning of the global memory matrix to maintain sub-millisecond latency.
+- batch the environment path wherever possible
+- keep actor trajectories isolated for current PPO correctness
+- keep passive observability decoupled from rollout cadence
+- do not duplicate DAG memory per actor when shared residency is available
+- prefer tensor-native batched storage over per-actor Python transition objects
 
-### 5.2. Recommended Execution Path
+## 8. Relationship To Service Mode
 
-To build a highly robust architectural foundation, **Paradigm A (Distributed Experience Accumulation)** must be implemented first.
+Service mode may still run multiple actors, but it is not the canonical
+throughput path. It exists for diagnostics, integration, teleop, and replay.
+The production parallel architecture is the direct in-process trainer.
 
-It natively exploits the batched tensor operations of the SDF Core Engine and the Mamba-2 sequence model without requiring custom atomic memory locks. Once the Core Engine is successfully producing stable, generalized navigation policies for a single actor via batched training rollouts, the architecture can be gracefully extended into Paradigm B by decoupling the `EpisodicMemory` class into a unified globally-addressable MLX/CUDA tensor.
+## 9. Related Docs
+
+- `docs/ARCHITECTURE.md`
+- `docs/DATAFLOW.md`
+- `docs/ACTOR.md`
+- `docs/PERFORMANCE.md`

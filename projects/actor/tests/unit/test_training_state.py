@@ -280,40 +280,20 @@ def test_rnd_target_network_preserved() -> None:
     )
 
 
-def test_request_batch_step_tensor_prefers_runtime_tensor_seam() -> None:
-    """Canonical trainer should consume tensor-native runtime batches when available."""
+def test_request_batch_step_tensor_actions_requires_runtime_action_tensor_seam() -> None:
+    """Canonical trainer should fail fast if tensor action stepping is missing."""
     trainer = _make_trainer()
 
-    class FakeTensorBatch:
-        def __init__(self) -> None:
-            self.observation_tensor = torch.ones((1, 3, 8, 4), device=trainer._device)
-            self.published_observations = {
-                0: DistanceMatrix(
-                    episode_id=3,
-                    env_ids=np.array([0], dtype=np.int32),
-                    matrix_shape=(8, 4),
-                    depth=np.ones((1, 8, 4), dtype=np.float32),
-                    delta_depth=np.zeros((1, 8, 4), dtype=np.float32),
-                    semantic=np.zeros((1, 8, 4), dtype=np.int32),
-                    valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
-                    overhead=np.zeros((8, 8, 3), dtype=np.float32),
-                    robot_pose=RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0),
-                    step_id=11,
-                    timestamp=1.0,
-                )
-            }
-
     class FakeRuntime:
-        def batch_step_tensor(
+        def reset_tensor(
             self,
-            actions: tuple[object, ...],
-            step_id: int,
+            episode_id: int,
             *,
-            publish_actor_ids: tuple[int, ...] = (),
-        ) -> tuple[FakeTensorBatch, tuple[object, ...]]:
-            del actions, step_id, publish_actor_ids
-            result = type("FakeResult", (), {"episode_id": 3})()
-            return FakeTensorBatch(), (result,)
+            actor_id: int = 0,
+            materialize: bool = False,
+        ) -> tuple[torch.Tensor, DistanceMatrix | None]:
+            del episode_id, actor_id, materialize
+            return torch.ones((3, 8, 4), device=trainer._device), None
 
         def perf_snapshot(self) -> object:
             raise AssertionError("not used")
@@ -323,27 +303,38 @@ def test_request_batch_step_tensor_prefers_runtime_tensor_seam() -> None:
 
     trainer._runtime = FakeRuntime()  # type: ignore[assignment]
 
-    action = type("FakeAction", (), {"env_ids": np.array([0], dtype=np.int32)})()
-    payload = trainer._request_batch_step_tensor((action,), 11, publish_actor_ids=(0,))
-
-    assert payload is not None
-    obs_batch, results, published = payload
-    assert obs_batch.shape == (1, 3, 8, 4)
-    assert len(results) == 1
-    assert 0 in published
-    assert published[0].step_id == 11
+    with pytest.raises(RuntimeError, match="requires tensor-native runtime seams"):
+        trainer._request_batch_step_tensor_actions(
+            torch.ones((1, 4), device="cpu", dtype=torch.float32),
+            11,
+            publish_actor_ids=(0,),
+        )
 
 
-def test_request_batch_step_tensor_actions_prefers_runtime_action_tensor_seam() -> None:
-    """Canonical trainer should prefer tensor action stepping when available."""
+def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> None:
+    """Canonical trainer should step through the runtime action tensor seam."""
     trainer = _make_trainer()
 
     class FakeTensorBatch:
         def __init__(self) -> None:
             self.observation_tensor = torch.ones((1, 3, 8, 4), device=trainer._device)
+            self.reward_tensor = torch.tensor([1.25], dtype=torch.float32, device=trainer._device)
+            self.done_tensor = torch.tensor([False], dtype=torch.bool, device=trainer._device)
+            self.truncated_tensor = torch.tensor([True], dtype=torch.bool, device=trainer._device)
+            self.episode_id_tensor = torch.tensor([5], dtype=torch.int64, device=trainer._device)
             self.published_observations: dict[int, DistanceMatrix] = {}
 
     class FakeRuntime:
+        def reset_tensor(
+            self,
+            episode_id: int,
+            *,
+            actor_id: int = 0,
+            materialize: bool = False,
+        ) -> tuple[torch.Tensor, DistanceMatrix | None]:
+            del episode_id, actor_id, materialize
+            return torch.ones((3, 8, 4), device=trainer._device), None
+
         def batch_step_tensor_actions(
             self,
             action_tensor: torch.Tensor,
@@ -371,18 +362,58 @@ def test_request_batch_step_tensor_actions_prefers_runtime_action_tensor_seam() 
         publish_actor_ids=(0,),
     )
 
-    assert payload is not None
-    obs_batch, results, published = payload
-    assert obs_batch.shape == (1, 3, 8, 4)
+    step_batch, results = payload
+    assert step_batch.observation_tensor.shape == (1, 3, 8, 4)
+    assert torch.allclose(step_batch.reward_tensor, torch.tensor([1.25], dtype=torch.float32, device=trainer._device))
+    assert torch.equal(step_batch.done_tensor, torch.tensor([False], dtype=torch.bool, device=trainer._device))
+    assert torch.equal(step_batch.truncated_tensor, torch.tensor([True], dtype=torch.bool, device=trainer._device))
+    assert torch.equal(step_batch.episode_id_tensor, torch.tensor([5], dtype=torch.int64, device=trainer._device))
     assert len(results) == 1
-    assert published == {}
+    assert step_batch.published_observations == {}
 
 
-def test_load_initial_observation_batch_prefers_tensor_reset_seam() -> None:
+def test_load_initial_observation_batch_requires_tensor_reset_seam() -> None:
+    """Canonical trainer should fail fast if tensor reset is missing."""
+    trainer = _make_trainer()
+
+    class FakeRuntime:
+        def batch_step_tensor_actions(
+            self,
+            action_tensor: torch.Tensor,
+            step_id: int,
+            *,
+            publish_actor_ids: tuple[int, ...] = (),
+        ) -> tuple[object, tuple[object, ...]]:
+            del action_tensor, step_id, publish_actor_ids
+            raise AssertionError("not used")
+
+        def perf_snapshot(self) -> object:
+            raise AssertionError("not used")
+
+        def close(self) -> None:
+            return None
+
+    trainer._runtime = FakeRuntime()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="requires tensor-native runtime seams"):
+        trainer._load_initial_observation_batch()
+
+
+def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
     """Canonical trainer should seed initial rollout state from tensor resets."""
     trainer = _make_trainer()
 
     class FakeRuntime:
+        def batch_step_tensor_actions(
+            self,
+            action_tensor: torch.Tensor,
+            step_id: int,
+            *,
+            publish_actor_ids: tuple[int, ...] = (),
+        ) -> tuple[object, tuple[object, ...]]:
+            del action_tensor, step_id, publish_actor_ids
+            raise AssertionError("not used")
+
         def reset_tensor(
             self,
             episode_id: int,
@@ -417,14 +448,47 @@ def test_load_initial_observation_batch_prefers_tensor_reset_seam() -> None:
 
     trainer._runtime = FakeRuntime()  # type: ignore[assignment]
 
-    def _fail_obs_to_tensor(_obs: DistanceMatrix) -> torch.Tensor:
-        raise AssertionError("canonical initial observation path should not call _obs_to_tensor")
-
-    trainer.__dict__["_obs_to_tensor"] = _fail_obs_to_tensor
-
     obs_batch, published = trainer._load_initial_observation_batch()
 
     assert obs_batch.shape == (1, 3, 8, 4)
     assert float(obs_batch[0, 0, 0, 0]) == 1.0
     assert 0 in published
     assert published[0].step_id == 0
+
+
+def test_extract_host_rollout_scalars_skips_telemetry_columns_when_not_needed() -> None:
+    """Canonical trainer should not mirror intrinsic and loop scalars when step telemetry is off."""
+    trainer = _make_trainer()
+
+    payload = trainer._extract_host_rollout_scalars(
+        shaped_rewards=torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device),
+        intrinsic_rewards=torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device),
+        loop_similarities=torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device),
+        include_telemetry_scalars=False,
+    )
+
+    assert payload.shaped_reward_tensor.device.type == "cpu"
+    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
+    assert payload.intrinsic_reward_tensor is None
+    assert payload.loop_similarity_tensor is None
+
+
+def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() -> None:
+    """Canonical trainer should batch the unavoidable scalar host copy for telemetry ticks."""
+    trainer = _make_trainer()
+
+    payload = trainer._extract_host_rollout_scalars(
+        shaped_rewards=torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device),
+        intrinsic_rewards=torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device),
+        loop_similarities=torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device),
+        include_telemetry_scalars=True,
+    )
+
+    assert payload.intrinsic_reward_tensor is not None
+    assert payload.loop_similarity_tensor is not None
+    assert payload.shaped_reward_tensor.device.type == "cpu"
+    assert payload.intrinsic_reward_tensor.device.type == "cpu"
+    assert payload.loop_similarity_tensor.device.type == "cpu"
+    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
+    assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32))
+    assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32))

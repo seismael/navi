@@ -169,6 +169,10 @@ class SdfDagTensorStepBatch:
     """Tensor-native canonical rollout batch with optional publish materialization."""
 
     observation_tensor: Any
+    reward_tensor: Any
+    done_tensor: Any
+    truncated_tensor: Any
+    episode_id_tensor: Any
     published_observations: dict[int, DistanceMatrix]
 
 
@@ -336,10 +340,13 @@ class SdfDagBackend(SimulatorBackend):
         _obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
             actor_id=actor_id,
             step_id=0,
+            current_clearance=float(depth_batch[0].amin().detach().cpu()) * self._max_distance,
             depth_2d=depth_batch[0],
             semantic_2d=semantic_batch[0],
             valid_2d=valid_batch[0],
+            materialize_depth_cpu=True,
         )
+        assert depth_cpu is not None
         return self._materialize_observation(
             actor_id=actor_id,
             step_id=0,
@@ -389,12 +396,15 @@ class SdfDagBackend(SimulatorBackend):
         obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
             actor_id=actor_id,
             step_id=0,
+            current_clearance=float(depth_batch[0].amin().detach().cpu()) * self._max_distance,
             depth_2d=depth_batch[0],
             semantic_2d=semantic_batch[0],
             valid_2d=valid_batch[0],
+            materialize_depth_cpu=materialize,
         )
         published = None
         if materialize:
+            assert depth_cpu is not None
             published = self._materialize_observation(
                 actor_id=actor_id,
                 step_id=0,
@@ -445,7 +455,7 @@ class SdfDagBackend(SimulatorBackend):
                 actor.pose,
                 action,
                 time.time(),
-                prev_depth=actor.prev_depth,
+                prev_depth=actor.prev_depth_tensor,
                 max_distance=self._max_distance,
             )
             active_actor_ids.append(actor_id)
@@ -626,13 +636,16 @@ class SdfDagBackend(SimulatorBackend):
                 obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
                     actor_id=actor_id,
                     step_id=step_id,
+                    current_clearance=current_clearance,
                     depth_2d=depth_2d,
                     semantic_2d=semantic_2d,
                     valid_2d=valid_2d,
+                    materialize_depth_cpu=actor_id in publish_actor_set,
                 )
                 observation_tensors_by_actor[actor_id] = obs_tensor
 
                 if actor_id in publish_actor_set:
+                    assert depth_cpu is not None
                     published_observations[actor_id] = self._materialize_observation(
                         actor_id=actor_id,
                         step_id=step_id,
@@ -675,6 +688,8 @@ class SdfDagBackend(SimulatorBackend):
             ordered_observations.append(observation_tensors_by_actor[actor_id])
             ordered_results.append(results_by_actor[actor_id])
 
+        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(ordered_results)
+
         self._record_perf_sample(
             batch_seconds=time.perf_counter() - batch_started_at,
             actor_count=len(actions),
@@ -690,6 +705,10 @@ class SdfDagBackend(SimulatorBackend):
         return (
             SdfDagTensorStepBatch(
                 observation_tensor=obs_batch,
+                reward_tensor=reward_tensor,
+                done_tensor=done_tensor,
+                truncated_tensor=truncated_tensor,
+                episode_id_tensor=episode_id_tensor,
                 published_observations=published_observations,
             ),
             tuple(ordered_results),
@@ -742,7 +761,7 @@ class SdfDagBackend(SimulatorBackend):
                 command[:3],
                 np.array([0.0, 0.0, command[3]], dtype=np.float32),
                 time.time(),
-                prev_depth=actor.prev_depth,
+                prev_depth=actor.prev_depth_tensor,
                 max_distance=self._max_distance,
             )
             active_actor_ids.append(actor_id)
@@ -796,13 +815,16 @@ class SdfDagBackend(SimulatorBackend):
                 obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
                     actor_id=actor_id,
                     step_id=step_id,
+                    current_clearance=current_clearance,
                     depth_2d=depth_2d,
                     semantic_2d=semantic_2d,
                     valid_2d=valid_2d,
+                    materialize_depth_cpu=actor_id in publish_actor_set,
                 )
                 observation_tensors_by_actor[actor_id] = obs_tensor
 
                 if actor_id in publish_actor_set:
+                    assert depth_cpu is not None
                     published_observations[actor_id] = self._materialize_observation(
                         actor_id=actor_id,
                         step_id=step_id,
@@ -841,6 +863,8 @@ class SdfDagBackend(SimulatorBackend):
         ordered_observations = [observation_tensors_by_actor[actor_id] for actor_id in range(int(action_rows.shape[0]))]
         ordered_results = [results_by_actor[actor_id] for actor_id in range(int(action_rows.shape[0]))]
 
+        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(ordered_results)
+
         self._record_perf_sample(
             batch_seconds=time.perf_counter() - batch_started_at,
             actor_count=int(action_rows.shape[0]),
@@ -849,10 +873,47 @@ class SdfDagBackend(SimulatorBackend):
         return (
             SdfDagTensorStepBatch(
                 observation_tensor=obs_batch,
+                reward_tensor=reward_tensor,
+                done_tensor=done_tensor,
+                truncated_tensor=truncated_tensor,
+                episode_id_tensor=episode_id_tensor,
                 published_observations=published_observations,
             ),
             tuple(ordered_results),
         )
+
+    def _build_result_tensors(
+        self,
+        ordered_results: list[StepResult],
+    ) -> tuple[Any, Any, Any, Any]:
+        """Pack per-actor step outcomes into canonical tensor-native rollout fields."""
+        if not ordered_results:
+            empty_f32 = self._torch.empty((0,), device=self._device, dtype=self._torch.float32)
+            empty_bool = self._torch.empty((0,), device=self._device, dtype=self._torch.bool)
+            empty_i64 = self._torch.empty((0,), device=self._device, dtype=self._torch.int64)
+            return empty_f32, empty_bool, empty_bool, empty_i64
+
+        reward_tensor = self._torch.tensor(
+            [result.reward for result in ordered_results],
+            device=self._device,
+            dtype=self._torch.float32,
+        )
+        done_tensor = self._torch.tensor(
+            [result.done for result in ordered_results],
+            device=self._device,
+            dtype=self._torch.bool,
+        )
+        truncated_tensor = self._torch.tensor(
+            [result.truncated for result in ordered_results],
+            device=self._device,
+            dtype=self._torch.bool,
+        )
+        episode_id_tensor = self._torch.tensor(
+            [result.episode_id for result in ordered_results],
+            device=self._device,
+            dtype=self._torch.int64,
+        )
+        return reward_tensor, done_tensor, truncated_tensor, episode_id_tensor
 
     def close(self) -> None:
         self._dag_tensor = None  # type: ignore[assignment]
@@ -1047,10 +1108,12 @@ class SdfDagBackend(SimulatorBackend):
         *,
         actor_id: int,
         step_id: int,
+        current_clearance: float,
         depth_2d: Any,
         semantic_2d: Any,
         valid_2d: Any,
-    ) -> tuple[Any, np.ndarray, Any]:
+        materialize_depth_cpu: bool,
+    ) -> tuple[Any, np.ndarray | None, Any]:
         """Update actor observation state and build the canonical trainer tensor."""
         del step_id
         actor = self._actors[actor_id]
@@ -1061,9 +1124,14 @@ class SdfDagBackend(SimulatorBackend):
             delta_2d = depth_2d - previous_depth
 
         actor.prev_depth_tensor = depth_2d.detach().clone()
-        depth_cpu = depth_2d.detach().cpu().numpy().astype(np.float32, copy=False)
-        actor.prev_depth = depth_cpu.copy()
-        actor.prev_min_distance = float(depth_cpu.min()) * self._max_distance
+        actor.prev_min_distance = current_clearance
+        depth_cpu: np.ndarray | None = None
+        if materialize_depth_cpu:
+            depth_cpu = depth_2d.detach().cpu().numpy().astype(np.float32, copy=False)
+            assert depth_cpu is not None
+            actor.prev_depth = depth_cpu.copy()
+        else:
+            actor.prev_depth = None
 
         observation_tensor = self._torch.stack(
             (
@@ -1094,7 +1162,7 @@ class SdfDagBackend(SimulatorBackend):
             delta_depth=delta_2d[np.newaxis, ...],
             semantic=semantic_2d[np.newaxis, ...],
             valid_mask=valid_2d[np.newaxis, ...],
-            overhead=None,
+            overhead=np.zeros((256, 256, 3), dtype=np.float32),
             robot_pose=actor.pose,
             step_id=step_id,
             timestamp=time.time(),
@@ -1140,7 +1208,7 @@ class SdfDagBackend(SimulatorBackend):
     ) -> float:
         actor = self._actors[actor_id]
         reward = 0.0
-        cell = (int(math.floor(current_pose.x / 2.0)), int(math.floor(current_pose.z / 2.0)))
+        cell = (math.floor(current_pose.x / 2.0), math.floor(current_pose.z / 2.0))
         if cell not in actor.visited_cells:
             actor.visited_cells.add(cell)
             reward += _EXPLORATION_REWARD

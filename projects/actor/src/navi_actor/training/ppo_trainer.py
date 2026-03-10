@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import logging
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -22,11 +21,8 @@ from navi_actor.reward_shaping import RewardShaper
 from navi_actor.rnd import RNDModule
 from navi_actor.rollout_buffer import MultiTrajectoryBuffer
 from navi_contracts import (
-    TOPIC_ACTION,
     TOPIC_DISTANCE_MATRIX,
     TOPIC_TELEMETRY_EVENT,
-    Action,
-    BatchStepResult,
     DistanceMatrix,
     TelemetryEvent,
     serialize,
@@ -39,8 +35,6 @@ if TYPE_CHECKING:
 class CanonicalRuntime(Protocol):
     """Minimal runtime surface required by the canonical trainer."""
 
-    def reset(self, episode_id: int, *, actor_id: int = 0) -> DistanceMatrix: ...
-
     def reset_tensor(
         self,
         episode_id: int,
@@ -49,21 +43,7 @@ class CanonicalRuntime(Protocol):
         materialize: bool = False,
     ) -> tuple[torch.Tensor, DistanceMatrix | None]: ...
 
-    def batch_step(
-        self,
-        actions: tuple[Action, ...],
-        step_id: int,
-    ) -> tuple[tuple[DistanceMatrix, ...], tuple[Any, ...]]: ...
-
     def perf_snapshot(self) -> SdfDagPerfSnapshot: ...
-
-    def batch_step_tensor(
-        self,
-        actions: tuple[Action, ...],
-        step_id: int,
-        *,
-        publish_actor_ids: tuple[int, ...] = (),
-    ) -> tuple[SdfDagTensorStepBatch, tuple[Any, ...]]: ...
 
     def batch_step_tensor_actions(
         self,
@@ -155,6 +135,15 @@ class _RolloutHostBatch:
     value_tensor: torch.Tensor
     intrinsic_reward_tensor: torch.Tensor
     action_numpy: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class _RolloutHostScalarBatch:
+    """CPU mirrors for the small scalar subset still needed by Python bookkeeping."""
+
+    shaped_reward_tensor: torch.Tensor
+    intrinsic_reward_tensor: torch.Tensor | None
+    loop_similarity_tensor: torch.Tensor | None
 
 
 class PpoTrainer:
@@ -400,82 +389,42 @@ class PpoTrainer:
         # Sync weights to rollout policy after loading
         self._sync_rollout_policy()
 
-    def _request_batch_step(self, actions: tuple[Action, ...], step_id: int) -> BatchStepResult:
-        runtime = self._require_runtime()
-        observations, results = runtime.batch_step(actions, step_id)
-        return BatchStepResult(results=results, observations=observations)
-
-    def _request_batch_step_tensor(
-        self,
-        actions: tuple[Action, ...],
-        step_id: int,
-        *,
-        publish_actor_ids: tuple[int, ...] = (),
-    ) -> tuple[torch.Tensor, tuple[Any, ...], dict[int, DistanceMatrix]] | None:
-        runtime = self._require_runtime()
-        if not hasattr(runtime, "batch_step_tensor"):
-            return None
-        step_batch, results = runtime.batch_step_tensor(
-            actions,
-            step_id,
-            publish_actor_ids=publish_actor_ids,
-        )
-        return step_batch.observation_tensor, results, step_batch.published_observations
-
     def _request_batch_step_tensor_actions(
         self,
         action_tensor: torch.Tensor,
         step_id: int,
         *,
         publish_actor_ids: tuple[int, ...] = (),
-    ) -> tuple[torch.Tensor, tuple[Any, ...], dict[int, DistanceMatrix]] | None:
-        runtime = self._require_runtime()
-        if not hasattr(runtime, "batch_step_tensor_actions"):
-            return None
+    ) -> tuple[SdfDagTensorStepBatch, tuple[Any, ...]]:
+        runtime = self._require_tensor_runtime()
         step_batch, results = runtime.batch_step_tensor_actions(
             action_tensor,
             step_id,
             publish_actor_ids=publish_actor_ids,
         )
-        return step_batch.observation_tensor, results, step_batch.published_observations
+        return step_batch, results
 
     def _load_initial_observation_batch(
         self,
     ) -> tuple[torch.Tensor, dict[int, DistanceMatrix]]:
-        runtime = self._require_runtime()
+        runtime = self._require_tensor_runtime()
         observation_tensors: list[torch.Tensor] = []
         obs_dict: dict[int, DistanceMatrix] = {}
         for actor_id in range(self._n_actors):
             materialize = self._should_publish_actor_telemetry(actor_id)
-            if hasattr(runtime, "reset_tensor"):
-                obs_tensor, published = runtime.reset_tensor(
-                    0,
-                    actor_id=actor_id,
-                    materialize=materialize,
-                )
-                observation_tensors.append(obs_tensor.to(self._device))
-                if published is not None:
-                    obs_dict[actor_id] = published
-                continue
-
-            observation = runtime.reset(0, actor_id=actor_id)
-            observation_tensors.append(self._obs_to_tensor(observation).to(self._device))
-            if materialize:
-                obs_dict[actor_id] = observation
+            obs_tensor, published = runtime.reset_tensor(
+                0,
+                actor_id=actor_id,
+                materialize=materialize,
+            )
+            observation_tensors.append(obs_tensor.to(self._device))
+            if published is not None:
+                obs_dict[actor_id] = published
         _LOGGER.info(
             "Canonical trainer seeded %d initial observations from direct sdfdag tensor resets.",
             self._n_actors,
         )
         return torch.stack(observation_tensors), obs_dict
-
-    def _publish_action(self, action: Action) -> None:
-        if self._pub_socket:
-            _safe_pub_send(
-                self._pub_socket,
-                topic=TOPIC_ACTION,
-                payload=serialize(action),
-                label="action",
-            )
 
     def _publish_observation(self, observation: DistanceMatrix) -> None:
         """Publish a low-volume live observation for dashboard rendering."""
@@ -648,13 +597,13 @@ class PpoTrainer:
             raise RuntimeError("Canonical sdfdag runtime is not configured")
         return runtime
 
-    def _obs_to_tensor(self, obs: DistanceMatrix) -> torch.Tensor:
-        d = np.asarray(obs.depth, dtype=np.float32)
-        s = np.asarray(obs.semantic, dtype=np.float32)
-        v = np.asarray(obs.valid_mask, dtype=np.float32)
-        if d.ndim == 3:
-            d, s, v = d[0], s[0], v[0]
-        return torch.from_numpy(np.stack([d, s, v]))
+    def _require_tensor_runtime(self) -> CanonicalRuntime:
+        runtime = self._require_runtime()
+        if not hasattr(runtime, "reset_tensor") or not hasattr(runtime, "batch_step_tensor_actions"):
+            raise RuntimeError(
+                "Canonical PPO training requires tensor-native runtime seams: reset_tensor() and batch_step_tensor_actions().",
+            )
+        return runtime
 
     def _stack_hiddens(self, hiddens: dict[int, torch.Tensor | None], n: int) -> torch.Tensor | None:
         if all(h is None for h in hiddens.values()):
@@ -699,6 +648,32 @@ class PpoTrainer:
             value_tensor=values.detach().clone(),
             intrinsic_reward_tensor=intrinsic_rewards.detach().clone(),
             action_numpy=action_numpy,
+        )
+
+    def _extract_host_rollout_scalars(
+        self,
+        *,
+        shaped_rewards: torch.Tensor,
+        intrinsic_rewards: torch.Tensor,
+        loop_similarities: torch.Tensor,
+        include_telemetry_scalars: bool,
+    ) -> _RolloutHostScalarBatch:
+        """Batch the unavoidable device-to-host scalar transfer for one rollout tick."""
+        if include_telemetry_scalars:
+            packed = torch.stack(
+                (shaped_rewards, intrinsic_rewards, loop_similarities),
+                dim=1,
+            ).detach().to(device="cpu", dtype=torch.float32)
+            return _RolloutHostScalarBatch(
+                shaped_reward_tensor=packed[:, 0],
+                intrinsic_reward_tensor=packed[:, 1],
+                loop_similarity_tensor=packed[:, 2],
+            )
+
+        return _RolloutHostScalarBatch(
+            shaped_reward_tensor=shaped_rewards.detach().to(device="cpu", dtype=torch.float32),
+            intrinsic_reward_tensor=None,
+            loop_similarity_tensor=None,
         )
 
     def train(self, total_steps: int, *, log_every: int = 100, checkpoint_every: int = 0, checkpoint_dir: str = "checkpoints") -> PpoTrainingMetrics:
@@ -768,31 +743,13 @@ class PpoTrainer:
                     )
 
                 t_step_start = time.perf_counter()
-                tensor_action_step = self._request_batch_step_tensor_actions(
+                step_batch, res_results = self._request_batch_step_tensor_actions(
                     a_t.detach(),
                     step_id,
                     publish_actor_ids=publish_actor_ids,
                 )
-                actions: list[Action] | None = None
-                if tensor_action_step is not None:
-                    next_obs_batch, step_results, published_observations = tensor_action_step
-                    res = BatchStepResult(results=step_results, observations=())
-                else:
-                    now = time.time()
-                    actions = [Action(env_ids=np.array([i], dtype=np.int32), linear_velocity=np.array([[a[0], a[1], a[2]]], dtype=np.float32),
-                               angular_velocity=np.array([[0.0, 0.0, a[3]]], dtype=np.float32), policy_id="ppo", step_id=step_id, timestamp=now) for i, a in enumerate(a_t.detach().to(device="cpu").numpy())]
-                    tensor_step = self._request_batch_step_tensor(
-                        tuple(actions),
-                        step_id,
-                        publish_actor_ids=publish_actor_ids,
-                    )
-                    if tensor_step is not None:
-                        next_obs_batch, step_results, published_observations = tensor_step
-                        res = BatchStepResult(results=step_results, observations=())
-                    else:
-                        published_observations = {}
-                        res = self._request_batch_step(tuple(actions), step_id)
-                        next_obs_batch = torch.stack([self._obs_to_tensor(obs) for obs in res.observations]).to(self._device)
+                next_obs_batch = step_batch.observation_tensor
+                published_observations = step_batch.published_observations
                 step_ms = (time.perf_counter() - t_step_start) * 1000
 
                 t_pack_start = time.perf_counter()
@@ -821,12 +778,8 @@ class PpoTrainer:
 
                 t_shape_start = time.perf_counter()
                 reward_device = host_batch.action_tensor.device
-                raw_rewards = torch.tensor(
-                    [float(result.reward) for result in res.results],
-                    dtype=torch.float32,
-                    device=reward_device,
-                )
-                dones = torch.tensor([bool(result.done) for result in res.results], dtype=torch.bool, device=reward_device)
+                raw_rewards = step_batch.reward_tensor.to(device=reward_device, dtype=torch.float32)
+                dones = step_batch.done_tensor.to(device=reward_device, dtype=torch.bool)
                 intrinsic_rewards = host_batch.intrinsic_reward_tensor.to(device=reward_device, dtype=torch.float32)
                 if self._config.enable_reward_shaping:
                     shaped_rewards = self._reward_shaper.shape_batch(
@@ -843,19 +796,18 @@ class PpoTrainer:
                 shape_ms = (time.perf_counter() - t_shape_start) * 1000
 
                 t_host_start = time.perf_counter()
-                loop_similarities_cpu = loop_similarities.detach().to(device="cpu", dtype=torch.float32)
-                intrinsic_rewards_cpu = host_batch.intrinsic_reward_tensor.detach().to(device="cpu", dtype=torch.float32)
-                shaped_rewards_cpu = shaped_rewards.detach().to(device="cpu", dtype=torch.float32)
+                host_scalar_batch = self._extract_host_rollout_scalars(
+                    shaped_rewards=shaped_rewards,
+                    intrinsic_rewards=host_batch.intrinsic_reward_tensor,
+                    loop_similarities=loop_similarities,
+                    include_telemetry_scalars=publish_step_telemetry,
+                )
                 host_extract_ms = (time.perf_counter() - t_host_start) * 1000
 
                 t_trans_start = time.perf_counter()
                 buffer_ms = 0.0
                 telemetry_ms = 0.0
-                truncateds = torch.tensor(
-                    [bool(result.truncated) for result in res.results],
-                    dtype=torch.bool,
-                    device=reward_device,
-                )
+                truncateds = step_batch.truncated_tensor.to(device=reward_device, dtype=torch.bool)
                 t_buffer_start = time.perf_counter()
                 self._multi_buffers.append_batch(
                     observations=o_batch,
@@ -869,34 +821,38 @@ class PpoTrainer:
                     aux_tensors=host_batch.aux_tensor,
                 )
                 buffer_ms += (time.perf_counter() - t_buffer_start) * 1000
+                r_sum += float(raw_rewards.sum().item())
                 for i in range(n):
-                    r, d, tr = float(res.results[i].reward), bool(res.results[i].done), bool(res.results[i].truncated)
-                    intrinsic_reward = float(intrinsic_rewards_cpu[i])
-                    shaped_total = float(shaped_rewards_cpu[i])
-                    loop_similarity = float(loop_similarities_cpu[i])
+                    d = bool(res_results[i].done)
+                    tr = bool(res_results[i].truncated)
+                    shaped_total = float(host_scalar_batch.shaped_reward_tensor[i])
 
                     # Periodic step telemetry keeps dashboard mode detection alive.
                     if publish_step_telemetry:
                         if host_batch.action_numpy is None:
                             raise RuntimeError("action_numpy is required for telemetry emission")
+                        if host_scalar_batch.intrinsic_reward_tensor is None or host_scalar_batch.loop_similarity_tensor is None:
+                            raise RuntimeError("telemetry scalar extraction is required for step telemetry emission")
+                        r = float(raw_rewards[i].item())
+                        intrinsic_reward = float(host_scalar_batch.intrinsic_reward_tensor[i])
+                        loop_similarity = float(host_scalar_batch.loop_similarity_tensor[i])
                         t_tel_start = time.perf_counter()
-                        self._publish_step_telemetry(step_id=step_id, episode_id=int(res.results[i].episode_id), actor_id=i, raw_reward=r, shaped_reward=shaped_total,
+                        self._publish_step_telemetry(step_id=step_id, episode_id=int(res_results[i].episode_id), actor_id=i, raw_reward=r, shaped_reward=shaped_total,
                                                      intrinsic_reward=intrinsic_reward, loop_similarity=loop_similarity, is_loop=(loop_similarity > self._config.loop_threshold),
                                                      beta=self._reward_shaper.beta, done=d or tr, forward_vel=float(host_batch.action_numpy[i, 0]), yaw_vel=float(host_batch.action_numpy[i, 3]))
                         telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
 
-                    r_sum += r
                     r_ema = 0.01 * shaped_total + 0.99 * r_ema
                     r_acc[i] += shaped_total
                     s_acc[i] += 1
                     aux_state = aux_states[i]
-                    aux_state[0] = shaped_total
-                    aux_state[1] = loop_similarity
-                    aux_state[2] = intrinsic_reward
+                    aux_state[0] = shaped_rewards[i]
+                    aux_state[1] = loop_similarities[i]
+                    aux_state[2] = host_batch.intrinsic_reward_tensor[i]
                     if d or tr:
                         ep_cnt += 1
                         t_tel_start = time.perf_counter()
-                        self._publish_episode_telemetry(step_id=step_id, episode_id=int(res.results[i].episode_id), actor_id=i, episode_return=r_acc[i], episode_length=s_acc[i])
+                        self._publish_episode_telemetry(step_id=step_id, episode_id=int(res_results[i].episode_id), actor_id=i, episode_return=r_acc[i], episode_length=s_acc[i])
                         telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
                         r_acc[i] = 0.0
                         s_acc[i] = 0

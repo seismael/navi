@@ -67,6 +67,6 @@ def test_gradient_flow() -> None:
     _, log_probs, values = heads.sample(features)
     # Use log_probs (touches log_std) + values to ensure all params get gradients
     loss = log_probs.sum() + values.sum()
-    loss.backward()
+    loss.backward()  # type: ignore[no-untyped-call]
     for p in heads.parameters():
         assert p.grad is not None

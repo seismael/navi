@@ -23,7 +23,7 @@ from navi_actor.mamba_core import Mamba2TemporalCore
 __all__: list[str] = ["CognitiveMambaPolicy"]
 
 
-class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
+class CognitiveMambaPolicy(nn.Module):
     """Composes RayViTEncoder -> Mamba2TemporalCore -> ActorCriticHeads.
 
     Five-stage cognitive flow:
@@ -146,7 +146,8 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             z_t: (B, D) spatial embedding.
 
         """
-        return self.encoder(obs_tensor)
+        z_t: Tensor = self.encoder(obs_tensor)
+        return z_t
 
     def evaluate(
         self,
@@ -226,7 +227,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         entropy = self.heads.entropy()
         return log_probs, values, entropy, new_hidden, z_flat
 
-    @torch.no_grad()  # type: ignore[misc]
+    @torch.no_grad()
     def act(
         self,
         obs: Any,
@@ -250,7 +251,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         self.eval()
         obs_tensor = self._obs_to_tensor(obs)
         actions, _, _, new_hidden, _ = self.forward(obs_tensor, hidden, aux_tensor=aux_tensor)
-        action_list: list[float] = actions.squeeze(0).cpu().tolist()
+        action_list = [float(value) for value in actions.squeeze(0).cpu().tolist()]
         return action_list, new_hidden
 
     def save_checkpoint(self, path: str | Path) -> None:

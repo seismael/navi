@@ -13,7 +13,7 @@ __all__: list[str] = ["ActorCriticHeads"]
 _SQRT2: float = math.sqrt(2.0)
 
 
-class ActorCriticHeads(nn.Module):  # type: ignore[misc]
+class ActorCriticHeads(nn.Module):
     """Separate actor (Gaussian policy) and critic (value) heads.
 
     Actor outputs a 4-dim mean and uses a learnable log_std parameter.
@@ -141,7 +141,8 @@ class ActorCriticHeads(nn.Module):  # type: ignore[misc]
             - self.log_std
             - 0.5 * math.log(2.0 * math.pi)
         )
-        return log_p.sum(dim=-1)
+        log_prob: Tensor = log_p.sum(dim=-1)
+        return log_prob
 
     def entropy(self) -> Tensor:
         """Compute policy entropy (independent Gaussian).

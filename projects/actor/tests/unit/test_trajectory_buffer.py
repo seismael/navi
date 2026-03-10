@@ -261,9 +261,17 @@ def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
     assert batches
     first = batches[0]
     assert first.observations.shape[0] == 4
-    assert len(first.hidden_states) == 2
+    assert first.sequence_observations is not None
+    assert first.sequence_observations.shape == (2, 2, 3, 16, 8)
+    assert first.sequence_actions is not None
+    assert first.sequence_actions.shape == (2, 2, 4)
+    assert first.hidden_batch is not None
+    assert first.hidden_batch.shape == (1, 2, 8)
+    assert first.hidden_states == []
     assert first.dones is not None
     assert first.dones.shape == (2, 2)
+    assert first.sequence_aux_tensors is not None
+    assert first.sequence_aux_tensors.shape == (2, 2, 3)
 
 
 def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None:
@@ -293,3 +301,38 @@ def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None
     batches = list(buffer.sample_minibatches(batch_size=4, seq_len=8))
 
     assert batches == []
+
+
+def test_trajectory_buffer_sequence_sampling_exposes_tensor_native_sequence_views() -> None:
+    buffer = TrajectoryBuffer(gamma=0.99, gae_lambda=0.95)
+
+    for step in range(4):
+        buffer.append(
+            PPOTransition(
+                observation=torch.randn(3, 16, 8),
+                action=torch.randn(4),
+                log_prob=-0.25 * (step + 1),
+                value=0.5 * (step + 1),
+                reward=float(step + 1),
+                done=(step == 3),
+                hidden_state=torch.randn(1, 1, 8),
+                aux_tensor=torch.randn(3),
+            )
+        )
+
+    buffer.compute_returns_and_advantages(last_value=0.0)
+    batches = list(buffer.sample_minibatches(batch_size=4, seq_len=2))
+
+    assert batches
+    first = batches[0]
+    assert first.sequence_observations is not None
+    assert first.sequence_observations.shape == (2, 2, 3, 16, 8)
+    assert first.sequence_actions is not None
+    assert first.sequence_actions.shape == (2, 2, 4)
+    assert first.hidden_batch is not None
+    assert first.hidden_batch.shape == (1, 2, 8)
+    assert first.hidden_states
+    assert first.dones is not None
+    assert first.dones.shape == (2, 2)
+    assert first.sequence_aux_tensors is not None
+    assert first.sequence_aux_tensors.shape == (2, 2, 3)

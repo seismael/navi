@@ -91,7 +91,7 @@ def test_gradient_flow() -> None:
     obs = torch.randn(2, 3, 128, 24)
     _, log_probs, values, _, _ = policy.forward(obs)
     loss = log_probs.sum() + values.sum()
-    loss.backward()
+    loss.backward()  # type: ignore[no-untyped-call]
     # Check at least some parameters have gradients
     grads = [p.grad for p in policy.parameters() if p.grad is not None]
     assert len(grads) > 0
@@ -106,7 +106,7 @@ def test_evaluate_value_stop_gradient() -> None:
 
     # Backward through values only (simulating critic loss)
     policy.zero_grad()
-    values.sum().backward()
+    values.sum().backward()  # type: ignore[no-untyped-call]
 
     # Encoder and temporal core should have NO gradients
     for name, p in policy.encoder.named_parameters():
@@ -134,7 +134,7 @@ def test_evaluate_sequence_value_stop_gradient() -> None:
     _, values, _, _, _ = policy.evaluate_sequence(obs_seq, acts_seq)
 
     policy.zero_grad()
-    values.sum().backward()
+    values.sum().backward()  # type: ignore[no-untyped-call]
 
     for name, p in policy.encoder.named_parameters():
         assert p.grad is None or torch.all(p.grad == 0), (
@@ -160,7 +160,7 @@ def test_evaluate_actor_gradient_flows_to_backbone() -> None:
     log_probs, _, _, _, _ = policy.evaluate(obs, acts)
 
     policy.zero_grad()
-    (-log_probs.sum()).backward()
+    (-log_probs.sum()).backward()  # type: ignore[no-untyped-call]
 
     # Encoder and temporal core SHOULD have gradients from policy loss
     encoder_grads = [

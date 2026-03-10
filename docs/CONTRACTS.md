@@ -1,28 +1,44 @@
-## Spherical Observation Convention
+# CONTRACTS.md - Canonical Wire And Tensor Contract Specification
 
-- Canonical `DistanceMatrix` layout is `(azimuth, elevation)`.
-- Environment azimuth bin `0` is the forward ray along local `-Z`.
-- Dashboard and replay tools must roll the azimuth axis before center-cropping a forward FOV; otherwise the forward seam is split across the panorama edges and front-view panels appear distorted.
-- Canonical training/runtime datasets come only from the downloaded corpus compiled into `artifacts/gmdag/corpus`; no generated or procedural scene source is allowed in the canonical path.
+**Package:** `navi-contracts`
+**Status:** Active canonical specification
+**Policy:** See `AGENTS.md` for implementation rules and non-negotiables
 
-# CONTRACTS.md — Canonical Wire Format Specification
+## 1. Purpose
 
-**Package:** `navi-contracts`  
-**Status:** Active canonical specification  
-**Policy:** See [AGENTS.md](../AGENTS.md) for implementation rules and non-negotiables
+This document defines the stable data contracts that connect Navi domains.
+It distinguishes between:
 
----
+- public wire contracts that remain stable across services
+- internal tensor seams used to keep the canonical training hot path on CUDA
 
-## 1. Canonical Models
+That distinction matters because the repository now optimizes aggressively below
+the wire boundary without reopening service compatibility.
 
-The following canonical dataclasses are the **only** models permitted on the
-inter-process wire. No additional models may be added without explicit approval.
-Visualization types (RGB frames, camera images) are never part of these
-contracts.
+## 2. Contract Philosophy
 
-### 1.1. RobotPose
+Navi keeps a narrow contract surface by design.
 
-6-DOF robot pose with timestamp.
+The public contract must be:
+
+- stable enough for service mode, replay, and diagnostics
+- expressive enough for training and inference
+- small enough that new runtime optimizations do not require new wire models
+
+The internal tensor seams must be:
+
+- explicit
+- performance-oriented
+- non-public
+- incapable of silently widening the wire protocol
+
+## 3. Canonical Public Models
+
+The following dataclasses are the only models permitted on the inter-process
+wire. Visualization payloads such as camera images or rendered RGB panels are
+not public contracts.
+
+### 3.1 RobotPose
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -36,67 +52,71 @@ class RobotPose:
     timestamp: float
 ```
 
-### 1.2. DistanceMatrix
+Purpose:
 
-Canonical observation contract for training and inference.
+- carry full 6-DOF pose metadata with each observation
+- support diagnostics, replay, and auditor overlays
+
+### 3.2 DistanceMatrix
 
 ```python
 @dataclass(frozen=True, slots=True)
 class DistanceMatrix:
     episode_id: int
-    env_ids: NDArray[int32]            # (batch,)
-    matrix_shape: tuple[int, int]      # (azimuth_bins, elevation_bins)
-    depth: NDArray[float32]            # (n_envs, Az, El), normalized [0, 1]
-    delta_depth: NDArray[float32]      # (n_envs, Az, El), frame difference
-    semantic: NDArray[int32]           # (n_envs, Az, El), class IDs [0, 10]
-    valid_mask: NDArray[bool_]         # (n_envs, Az, El), ray hit validity
-    overhead: NDArray[float32]         # (H, W, 3), BGR minimap
+    env_ids: NDArray[int32]
+    matrix_shape: tuple[int, int]
+    depth: NDArray[float32]
+    delta_depth: NDArray[float32]
+    semantic: NDArray[int32]
+    valid_mask: NDArray[bool_]
+    overhead: NDArray[float32]
     robot_pose: RobotPose
     step_id: int
     timestamp: float
 ```
 
-**Shape convention:**
+Purpose:
 
-- `matrix_shape[0]` = azimuth bins (rows), `matrix_shape[1]` = elevation bins
-  (columns).
-- Default resolution: `(256, 48)`.
-- Single-env backends produce `n_envs = 1` → array shapes `(1, Az, El)`.
-- `depth` is normalized to `[0, 1]` by dividing by `max_distance`.
-- `delta_depth` is the per-bin change since the previous step (temporal
-  velocity awareness).
-- `semantic` uses integer IDs in `[0, 10]` (see
-  [SIMULATION.md §3.3](SIMULATION.md) for the full semantic table).
-- `valid_mask` is `True` for bins that received at least one ray hit.
-- `overhead` is a 256×256 BGR minimap centered on the robot. This field is
-  consumed only by the Gallery Layer — it never enters the training engine.
-  It is the sole visualization-adjacent field permitted in the wire contract,
-  included for diagnostic convenience. It carries no semantic training data.
+- canonical observation contract for training, service mode, replay, and passive tooling
+- preserve actor-side observation semantics across runtime changes below the boundary
 
-### 1.3. Action
+Shape and meaning:
 
-Movement command produced by the Brain policy.
+- `matrix_shape == (azimuth_bins, elevation_bins)`
+- default resolution is `(256, 48)`
+- single-environment backends emit arrays shaped `(1, Az, El)`
+- `depth` is normalized into `[0, 1]` by the configured environment horizon
+- `delta_depth` is the per-bin temporal difference
+- `semantic` uses canonical integer ids
+- `valid_mask` is `True` only for rays considered valid hits under the current runtime contract
+- `overhead` is a passive-gallery field only and is not part of the training signal
+
+### 3.3 Action
 
 ```python
 @dataclass(frozen=True, slots=True)
 class Action:
-    env_ids: NDArray[int32]            # (batch,)
-    linear_velocity: NDArray[float32]  # (batch, 3) — [forward, vertical, lateral]
-    angular_velocity: NDArray[float32] # (batch, 3) — [roll_rate, pitch_rate, yaw_rate]
-    policy_id: str                     # identifies which policy produced this action
+    env_ids: NDArray[int32]
+    linear_velocity: NDArray[float32]
+    angular_velocity: NDArray[float32]
+    policy_id: str
     step_id: int
     timestamp: float
 ```
 
-**4-DOF mapping:** The actor internally produces `[fwd, vert, lat, yaw]`.
-On the wire this is packed as:
+Purpose:
 
-- `linear_velocity[:, 0]` = forward, `[:, 1]` = vertical, `[:, 2]` = lateral.
-- `angular_velocity[:, 2]` = yaw rate (roll and pitch rates are typically zero).
+- carry the actor's motion command across service boundaries
+- preserve a stable public mapping even though the actor internally works in 4-DOF form
 
-### 1.4. StepRequest
+Current public mapping from internal 4-DOF action:
 
-Discrete step request from Brain to Simulation Layer (REQ/REP).
+- `linear_velocity[:, 0]` = forward
+- `linear_velocity[:, 1]` = vertical
+- `linear_velocity[:, 2]` = lateral
+- `angular_velocity[:, 2]` = yaw
+
+### 3.4 StepRequest
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -106,9 +126,7 @@ class StepRequest:
     timestamp: float
 ```
 
-### 1.5. StepResult
-
-Step acknowledgement from Simulation Layer to Brain (REQ/REP).
+### 3.5 StepResult
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -123,24 +141,25 @@ class StepResult:
     timestamp: float
 ```
 
-### 1.6. TelemetryEvent
-
-Asynchronous telemetry event for logging, dashboarding, and replay.
+### 3.6 TelemetryEvent
 
 ```python
 @dataclass(frozen=True, slots=True)
 class TelemetryEvent:
-    event_type: str                    # e.g., "ppo.update", "environment.step"
+    event_type: str
     episode_id: int
     env_id: int
     step_id: int
-    payload: NDArray[float32]          # generic numeric payload
+    payload: NDArray[float32]
     timestamp: float
 ```
 
-### 1.7. BatchStepRequest
+Purpose:
 
-Batched step request from Brain to Simulation Layer (REQ/REP).
+- carry coarse numeric telemetry for dashboards, logs, and replay
+- keep observability decoupled from the main wire contracts used for stepping
+
+### 3.7 BatchStepRequest
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -150,9 +169,7 @@ class BatchStepRequest:
     timestamp: float
 ```
 
-### 1.8. BatchStepResult
-
-Batched step reply from Simulation Layer to Brain (REQ/REP).
+### 3.8 BatchStepResult
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -161,84 +178,166 @@ class BatchStepResult:
     observations: tuple[DistanceMatrix, ...]
 ```
 
----
+## 4. Shape And Convention Rules
 
-## 2. Type Aliases
+### 4.1 Spherical Convention
+
+Canonical spherical rules:
+
+- `DistanceMatrix` layout is `(azimuth, elevation)`
+- azimuth bin `0` is forward along local `-Z`
+- dashboard forward-FOV extraction must center the azimuth seam before cropping
+- canonical training datasets come from compiled corpus assets under `artifacts/gmdag/corpus`
+
+### 4.2 Public Array Expectations
+
+| Field | Shape | Meaning |
+| --- | --- | --- |
+| `depth` | `(B, Az, El)` | normalized distances in `[0, 1]` |
+| `delta_depth` | `(B, Az, El)` | temporal per-bin depth change |
+| `semantic` | `(B, Az, El)` | semantic ids |
+| `valid_mask` | `(B, Az, El)` | validity under current runtime horizon rules |
+| `linear_velocity` | `(B, 3)` | forward, vertical, lateral |
+| `angular_velocity` | `(B, 3)` | roll, pitch, yaw rates |
+
+## 5. Type Aliases
 
 Defined in `navi_contracts.types` for static analysis and documentation:
 
 | Alias | Underlying Type | Shape | Description |
-|-------|----------------|-------|-------------|
-| `MatrixShape` | `tuple[int, int]` | — | `(azimuth_bins, elevation_bins)` |
-| `DepthMatrix` | `NDArray[float32]` | `(B, Az, El)` | Normalized distance values `[0, 1]` |
-| `DeltaDepthMatrix` | `NDArray[float32]` | `(B, Az, El)` | Temporal depth deltas |
-| `SemanticMatrix` | `NDArray[int32]` | `(B, Az, El)` | Semantic identifiers per cell |
-| `ValidMask` | `NDArray[bool_]` | `(B, Az, El)` | True where a ray hit is valid |
-| `EnvIdVector` | `NDArray[int32]` | `(B,)` | Active environment IDs |
-| `VelocityMatrix` | `NDArray[float32]` | `(B, 3)` | Linear or angular velocity commands |
-| `TelemetryPayload` | `NDArray[float32]` | `(N, M)` | Generic numeric telemetry payload |
+| --- | --- | --- | --- |
+| `MatrixShape` | `tuple[int, int]` | - | `(azimuth_bins, elevation_bins)` |
+| `DepthMatrix` | `NDArray[float32]` | `(B, Az, El)` | normalized depth |
+| `DeltaDepthMatrix` | `NDArray[float32]` | `(B, Az, El)` | temporal depth delta |
+| `SemanticMatrix` | `NDArray[int32]` | `(B, Az, El)` | semantic ids |
+| `ValidMask` | `NDArray[bool_]` | `(B, Az, El)` | valid-hit mask |
+| `EnvIdVector` | `NDArray[int32]` | `(B,)` | environment ids |
+| `VelocityMatrix` | `NDArray[float32]` | `(B, 3)` | linear or angular commands |
+| `TelemetryPayload` | `NDArray[float32]` | `(N, M)` | generic numeric telemetry payload |
 
----
+## 6. ZMQ Topics
 
-## 3. ZMQ Topics
-
-All inter-service communication uses versioned topic strings for PUB/SUB
-routing and REQ/REP message discrimination.
+All inter-service communication uses versioned topic strings.
 
 | Constant | Value | Transport | Direction |
-|----------|-------|-----------|-----------|
-| `TOPIC_DISTANCE_MATRIX` | `distance_matrix_v2` | PUB/SUB | Simulation → Brain, Gallery |
-| `TOPIC_ACTION` | `action_v2` | PUB/SUB | Brain → Simulation, Gallery |
-| `TOPIC_STEP_REQUEST` | `step_request_v2` | REQ/REP | Brain → Simulation |
-| `TOPIC_STEP_RESULT` | `step_result_v2` | REQ/REP | Simulation → Brain |
-| `TOPIC_TELEMETRY_EVENT` | `telemetry_event_v2` | PUB/SUB | Any → Gallery |
+| --- | --- | --- | --- |
+| `TOPIC_DISTANCE_MATRIX` | `distance_matrix_v2` | PUB/SUB | Simulation -> Brain, Gallery |
+| `TOPIC_ACTION` | `action_v2` | PUB/SUB | Brain -> Simulation, Gallery |
+| `TOPIC_STEP_REQUEST` | `step_request_v2` | REQ/REP | Brain -> Simulation |
+| `TOPIC_STEP_RESULT` | `step_result_v2` | REQ/REP | Simulation -> Brain |
+| `TOPIC_TELEMETRY_EVENT` | `telemetry_event_v2` | PUB/SUB | Any -> Gallery |
 
-No other topics may be added without explicit approval.
+No other public topics may be added without explicit approval.
 
----
+## 7. Internal Tensor Seams
 
-## 4. Serialization
+The imported documentation was strongest when it documented low-level tensor
+boundaries explicitly. Navi now does the same while keeping these seams clearly
+separate from the public wire surface.
 
-### 4.1. Wire Encoding
+### 7.1 `torch_sdf.cast_rays()` Boundary
 
-All messages are serialized via **msgpack** with custom extension types for
-numpy arrays. The encoding pipeline:
+Canonical runtime tensors:
 
-1. Dataclass fields are converted to a msgpack-compatible dict.
-2. numpy arrays are packed as msgpack ext types preserving dtype and shape.
-3. `RobotPose` is serialized as a nested dict via `dataclasses.asdict()`.
+| Tensor | Shape | Dtype | Device | Requirement |
+| --- | --- | --- | --- | --- |
+| `origins` | `[B, R, 3]` | `float32` | CUDA | contiguous |
+| `dirs` | `[B, R, 3]` | `float32` | CUDA | contiguous |
+| `out_distances` | `[B, R]` | `float32` | CUDA | preallocated |
+| `out_semantics` | `[B, R]` | `int32` | CUDA | preallocated |
 
-### 4.2. ZMQ Frame Layout
+Rules:
 
-Messages are sent as **multipart ZMQ frames**:
+- device placement, rank, and contiguity are validated before kernel launch
+- canonical runtime is CUDA-only at this boundary
+- long kernel execution should release the Python GIL
+
+### 7.2 Environment-To-Trainer Observation Seam
+
+The canonical trainer may consume tensor-native observations directly when the
+runtime provides them.
+
+Current observation tensor:
+
+- shape `(B, 3, Az, El)`
+- channel `0`: normalized depth
+- channel `1`: semantic ids cast to `float32`
+- channel `2`: valid mask cast to `float32`
+
+This seam exists to keep the hot path on CUDA.
+It does not replace the public `DistanceMatrix` contract.
+
+### 7.3 Action Tensor Seam
+
+The canonical trainer may also step the environment from batched action tensors
+before any public `Action` materialization is needed.
+
+That seam is valid only inside the canonical training runtime.
+It does not authorize a new wire contract.
+
+### 7.4 Materialization Rule
+
+`DistanceMatrix` and `Action` remain the canonical public and diagnostic models.
+On the production training hot path they may be materialized only when needed
+for:
+
+- passive dashboard publication
+- coarse telemetry
+- service mode
+- replay and recorder compatibility
+- tests and explicit diagnostics
+
+Unconditional rebuilding of these objects inside the rollout loop is a
+performance bug.
+
+## 8. Serialization
+
+### 8.1 Wire Encoding
+
+All public messages are serialized via `msgpack` with custom extension support
+for numpy arrays.
+
+Encoding steps:
+
+1. convert dataclass fields into a msgpack-compatible mapping
+2. pack numpy arrays while preserving dtype and shape
+3. serialize nested pose metadata as structured fields
+
+### 8.2 ZMQ Frame Layout
+
+Messages are sent as multipart frames:
 
 ```text
-Frame 0: topic_bytes    (UTF-8 encoded topic string)
-Frame 1: payload_bytes  (msgpack-serialized message)
+Frame 0: topic bytes
+Frame 1: payload bytes
 ```
 
-### 4.3. API
+### 8.3 API
 
 ```python
 from navi_contracts import serialize, deserialize
 
-# Encode
-payload: bytes = serialize(distance_matrix)
-
-# Decode (auto-detects type)
+payload = serialize(distance_matrix)
 msg = deserialize(payload)
 assert isinstance(msg, DistanceMatrix)
 ```
 
----
+## 9. Contract Evolution Policy
 
-## 5. Non-Negotiables
+Public contracts are strict and narrow.
 
-1. **v2 only.** Legacy wire contracts and topics are not permitted in new code.
-2. **No new models** may be added to this package without explicit approval.
-3. **No visualization types.** RGB frames, camera images, and rendered outputs
-   are never canonical contracts. They belong exclusively to the Gallery Layer.
-4. **Immutable dataclasses.** All models use `frozen=True, slots=True` for
-   safety and performance.
-5. **Service sovereignty.** No service may import another service's package.
-   All integration is via serialized messages over ZMQ.
+Evolution rules:
+
+- update producers, consumers, tests, and docs in one pass
+- do not keep dual-path wire compatibility once migration is complete
+- do not add convenience models that duplicate canonical payloads
+- keep tensor-native performance seams internal whenever possible
+
+## 10. Non-Negotiables
+
+1. v2-only public wire surface
+2. no new public wire models without explicit approval
+3. no visualization payloads in canonical public contracts
+4. immutable dataclasses for safety and performance
+5. service sovereignty across package boundaries
+6. internal tensor seams do not widen the public wire

@@ -106,6 +106,13 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Any TSDF-derived runtime changes MUST be benchmark-gated. The first accepted canonical step is aligning the CUDA sphere-tracing horizon with the configured environment horizon before any `.gmdag` format or storage-layout redesign work.
 - **Benchmark Gate:** The SDF/DAG path is accepted only if it meets or exceeds current fleet rollout throughput and materially advances the repository toward the `>= 60 SPS` 4-actor floor.
 
+### 3.1.1 Low-Level Tensor Contract Standard
+- Python-to-CUDA boundaries MUST validate device, dtype, rank, shape, and contiguity before launching raw kernels.
+- Canonical `torch-sdf` ray inputs use contiguous CUDA `float32` tensors shaped `[batch, rays, 3]`; canonical outputs use preallocated CUDA tensors shaped `[batch, rays]`.
+- Long-running CUDA extension calls MUST release the Python GIL while the kernel is executing.
+- Canonical environment and actor runtimes MUST keep tensor-native observation and action seams available so Python `DistanceMatrix` and `Action` materialization is optional for diagnostics, telemetry, and passive viewers only.
+- Low-level DAG layout, leaf payload packing, cache assumptions, and related storage changes MAY be documented, but they do not become stable architectural guarantees until end-to-end benchmark wins are proven on the canonical trainer.
+
 ### 3.2 Vision Transformer Optimization
 - `RayViTEncoder` MUST cache fixed spherical positional encodings.
 - Avoid redundant sin/cos recomputation on every forward pass.

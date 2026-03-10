@@ -49,10 +49,15 @@ class MultiTrajectoryBuffer:
         self._all_returns: Tensor | None = None
         self._all_dones: Tensor | None = None
         self._all_aux: Tensor | None = None
+        self._all_hidden: Tensor | None = None
+        self._sequence_view_seq_len: int | None = None
+        self._sequence_views: dict[str, Tensor] = {}
 
     def append(self, actor_id: int, transition: PPOTransition) -> None:
         self._buffers[actor_id].append(transition)
         self._cache_valid = False
+        self._sequence_view_seq_len = None
+        self._sequence_views = {}
 
     def append_batch(
         self,
@@ -85,12 +90,16 @@ class MultiTrajectoryBuffer:
                 aux_tensor=aux_tensor,
             )
             self._cache_valid = False
+            self._sequence_view_seq_len = None
+            self._sequence_views = {}
 
     def compute_returns_and_advantages(self, last_values: Tensor) -> None:
         """Compute GAE for all buffers using per-actor bootstrap values."""
         for i in range(self._n_actors):
             self._buffers[i].compute_returns_and_advantages(last_value=last_values[i].detach())
         self._cache_valid = False
+        self._sequence_view_seq_len = None
+        self._sequence_views = {}
 
     def clear(self) -> None:
         for buf in self._buffers.values():
@@ -104,6 +113,9 @@ class MultiTrajectoryBuffer:
         self._all_returns = None
         self._all_dones = None
         self._all_aux = None
+        self._all_hidden = None
+        self._sequence_view_seq_len = None
+        self._sequence_views = {}
 
     def _ensure_batch_cache(self) -> None:
         """Build stacked actor tensors once per PPO update and reuse them across epochs."""
@@ -124,13 +136,76 @@ class MultiTrajectoryBuffer:
         first_aux = next((b._t_aux for b in self._buffers.values() if b._t_aux is not None), None)
         if first_aux is not None:
             self._all_aux = torch.stack([
-                cast("Tensor", b._t_aux) if b._t_aux is not None else torch.zeros_like(first_aux)
+                b._t_aux if b._t_aux is not None else torch.zeros_like(first_aux)
                 for b in self._buffers.values()
             ])
         else:
             self._all_aux = None
 
+        first_hidden = next(
+            (
+                hidden
+                for buffer in self._buffers.values()
+                for hidden in buffer._hidden_states
+                if hidden is not None
+            ),
+            None,
+        )
+        if first_hidden is not None:
+            self._all_hidden = torch.stack([
+                torch.stack([
+                    hidden if hidden is not None else torch.zeros_like(first_hidden)
+                    for hidden in buffer._hidden_states
+                ])
+                for buffer in self._buffers.values()
+            ])
+        else:
+            self._all_hidden = None
+
         self._cache_valid = True
+
+    def _get_sequence_views(self, seq_len: int) -> dict[str, Tensor]:
+        """Cache reshaped sequence views once per PPO update for the active BPTT length."""
+        if self._sequence_view_seq_len == seq_len and self._sequence_views:
+            return self._sequence_views
+
+        assert self._all_obs is not None
+        assert self._all_actions is not None
+        assert self._all_log_probs is not None
+        assert self._all_values is not None
+        assert self._all_advantages is not None
+        assert self._all_returns is not None
+        assert self._all_dones is not None
+
+        n_actors, rollout_len = self._all_obs.shape[:2]
+        n_seqs_per_actor = rollout_len // seq_len
+        usable_steps = n_seqs_per_actor * seq_len
+        total_seqs = n_actors * n_seqs_per_actor
+
+        if n_seqs_per_actor == 0:
+            self._sequence_view_seq_len = seq_len
+            self._sequence_views = {}
+            return self._sequence_views
+
+        sequence_views: dict[str, Tensor] = {
+            "obs": self._all_obs[:, :usable_steps].reshape(total_seqs, seq_len, *self._all_obs.shape[2:]),
+            "acts": self._all_actions[:, :usable_steps].reshape(total_seqs, seq_len, -1),
+            "lps": self._all_log_probs[:, :usable_steps].reshape(total_seqs, seq_len),
+            "vals": self._all_values[:, :usable_steps].reshape(total_seqs, seq_len),
+            "advs": self._all_advantages[:, :usable_steps].reshape(total_seqs, seq_len),
+            "rets": self._all_returns[:, :usable_steps].reshape(total_seqs, seq_len),
+            "dones": self._all_dones[:, :usable_steps].reshape(total_seqs, seq_len),
+            "meta": torch.tensor((n_seqs_per_actor, total_seqs), device=self._all_obs.device, dtype=torch.int64),
+        }
+
+        if self._all_aux is not None:
+            sequence_views["aux"] = self._all_aux[:, :usable_steps].reshape(total_seqs, seq_len, -1)
+        if self._all_hidden is not None:
+            sequence_views["hidden_start"] = self._all_hidden[:, :usable_steps:seq_len].reshape(total_seqs, *self._all_hidden.shape[2:])
+
+        self._sequence_view_seq_len = seq_len
+        self._sequence_views = sequence_views
+        return sequence_views
 
     def sample_minibatches(
         self, batch_size: int = 64, seq_len: int = 32
@@ -151,7 +226,6 @@ class MultiTrajectoryBuffer:
         all_vals = self._all_values
         all_advs = self._all_advantages
         all_rets = self._all_returns
-        all_dones = self._all_dones
         all_aux = self._all_aux
 
         n_actors, rollout_len = all_obs.shape[:2]
@@ -162,15 +236,17 @@ class MultiTrajectoryBuffer:
             n_seqs_per_actor = rollout_len // seq_len
             if n_seqs_per_actor == 0:
                 return
-            total_seqs = n_actors * n_seqs_per_actor
-
-            obs_seqs = all_obs[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len, *all_obs.shape[2:])
-            acts_seqs = all_acts[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len, -1)
-            lps_seqs = all_lps[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
-            vals_seqs = all_vals[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
-            advs_seqs = all_advs[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
-            rets_seqs = all_rets[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
-            dones_seqs = all_dones[:, :n_seqs_per_actor * seq_len].reshape(total_seqs, seq_len)
+            seq_views = self._get_sequence_views(seq_len)
+            total_seqs = int(seq_views["meta"][1].item())
+            obs_seqs = seq_views["obs"]
+            acts_seqs = seq_views["acts"]
+            lps_seqs = seq_views["lps"]
+            vals_seqs = seq_views["vals"]
+            advs_seqs = seq_views["advs"]
+            rets_seqs = seq_views["rets"]
+            dones_seqs = seq_views["dones"]
+            aux_seqs = seq_views.get("aux")
+            hidden_start_seqs = seq_views.get("hidden_start")
 
             # Shuffle sequences
             perm = torch.randperm(total_seqs, device=index_device)
@@ -178,14 +254,10 @@ class MultiTrajectoryBuffer:
             seqs_per_minibatch = max(1, batch_size // seq_len)
             for i in range(0, total_seqs, seqs_per_minibatch):
                 idx = perm[i : i + seqs_per_minibatch]
-
-                # Hidden states at start of sequences
-                # We need to map linear index back to (actor, time)
-                h0 = []
-                for j in idx:
-                    actor_idx = j // n_seqs_per_actor
-                    seq_idx = j % n_seqs_per_actor
-                    h0.append(self._buffers[int(actor_idx)].hidden_state_at(int(seq_idx * seq_len)))
+                hidden_batch = None
+                if hidden_start_seqs is not None:
+                    selected_hidden = hidden_start_seqs[idx]
+                    hidden_batch = selected_hidden.squeeze(-2).permute(1, 0, 2).contiguous()
 
                 yield TrajectoryBuffer.MiniBatch(
                     observations=obs_seqs[idx].reshape(-1, *obs_seqs.shape[2:]),
@@ -194,15 +266,17 @@ class MultiTrajectoryBuffer:
                     old_values=vals_seqs[idx].flatten(),
                     advantages=advs_seqs[idx].flatten(),
                     returns=rets_seqs[idx].flatten(),
-                    hidden_states=h0,
+                    hidden_batch=hidden_batch,
                     dones=dones_seqs[idx], # (n_seqs, seq_len)
                     aux_tensors=(
-                        all_aux[:, :n_seqs_per_actor * seq_len]
-                        .reshape(total_seqs, seq_len, -1)[idx]
+                        aux_seqs[idx]
                         .reshape(-1, all_aux.shape[-1])
-                        if all_aux is not None
+                        if aux_seqs is not None and all_aux is not None
                         else None
                     ),
+                    sequence_observations=obs_seqs[idx],
+                    sequence_actions=acts_seqs[idx],
+                    sequence_aux_tensors=aux_seqs[idx] if aux_seqs is not None else None,
                 )
         else:
             # Flat random shuffle
@@ -667,9 +741,13 @@ class TrajectoryBuffer:
         old_values: Tensor  # (B,)
         advantages: Tensor  # (B,)
         returns: Tensor  # (B,)
+        sequence_observations: Tensor | None = None  # (n_seqs, seq_len, 3, Az, El)
+        sequence_actions: Tensor | None = None  # (n_seqs, seq_len, 4)
         hidden_states: list[Tensor | None] = field(default_factory=list)
+        hidden_batch: Tensor | None = None  # (layers, n_seqs, hidden_dim) for BPTT
         dones: Tensor | None = None  # (n_seqs, seq_len) for BPTT
         aux_tensors: Tensor | None = None  # (B, 3) or (n_seqs, seq_len, 3)
+        sequence_aux_tensors: Tensor | None = None  # (n_seqs, seq_len, 3) for BPTT
 
     def sample_minibatches(
         self,
@@ -726,29 +804,38 @@ class TrajectoryBuffer:
                 selected: list[int] = perm[
                     i : i + max(1, batch_size // seq_len)
                 ]
-                chunk_indices_list: list[int] = []
+                start_indices = torch.tensor([starts[j] for j in selected], device=obs.device, dtype=torch.long)
+                offsets = torch.arange(seq_len, device=obs.device, dtype=torch.long)
+                chunk_indices = start_indices.unsqueeze(1) + offsets.unsqueeze(0)
+                flat_idx = chunk_indices.reshape(-1)
                 chunk_hidden: list[Tensor | None] = []
-                chunk_dones: list[Tensor] = []
                 for j in selected:
                     s = starts[j]
-                    chunk_indices_list.extend(range(s, s + seq_len))
                     # Hidden state at the START of this chunk
                     chunk_hidden.append(
                         self.hidden_state_at(s)
                     )
-                    # Done flags for each step in this chunk
-                    chunk_dones.append(dones_flat[s : s + seq_len])
-                idx = torch.tensor(chunk_indices_list, dtype=torch.long)
+
+                hidden_batch = None
+                first_h = next((h for h in chunk_hidden if h is not None), None)
+                if first_h is not None:
+                    selected_hidden = [h if h is not None else torch.zeros_like(first_h) for h in chunk_hidden]
+                    hidden_batch = torch.cat(selected_hidden, dim=1).contiguous()
+
                 yield TrajectoryBuffer.MiniBatch(
-                    observations=obs[idx],
-                    actions=acts[idx],
-                    old_log_probs=old_lp[idx],
-                    old_values=old_v[idx],
-                    advantages=advs[idx],
-                    returns=rets[idx],
+                    observations=obs[flat_idx],
+                    actions=acts[flat_idx],
+                    old_log_probs=old_lp[flat_idx],
+                    old_values=old_v[flat_idx],
+                    advantages=advs[flat_idx],
+                    returns=rets[flat_idx],
                     hidden_states=chunk_hidden,
-                    dones=torch.stack(chunk_dones),  # (n_seqs, seq_len)
-                    aux_tensors=aux_flat[idx] if aux_flat is not None else None,
+                    hidden_batch=hidden_batch,
+                    dones=dones_flat[chunk_indices],  # (n_seqs, seq_len)
+                    aux_tensors=aux_flat[flat_idx] if aux_flat is not None else None,
+                    sequence_observations=obs[chunk_indices],
+                    sequence_actions=acts[chunk_indices],
+                    sequence_aux_tensors=aux_flat[chunk_indices] if aux_flat is not None else None,
                 )
         else:
             # Random shuffle
