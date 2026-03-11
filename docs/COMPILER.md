@@ -61,6 +61,19 @@ The compiled representation is compressed into a compact DAG-friendly payload.
 The native code currently documents a `compressToDAG()` stage and uses hash-based
 structural folding in the compiler pipeline.
 
+Canonical correctness rule:
+
+- hashing is used only to group merge candidates efficiently
+- structural equality is the correctness authority for deduplication
+- a hash match is never sufficient on its own to justify node merging
+
+Current canonical documentation target:
+
+- deterministic MurmurHash3 with fixed seed `0` for candidate grouping
+- mandatory structural equality fallback before redirecting pointers
+- deterministic child ordering and child-mask interpretation recorded as part of
+  the file-format contract
+
 ### 3.5 Binary Serialization
 
 The final stage writes the `.gmdag` binary with:
@@ -129,6 +142,14 @@ Compiler and corpus validation currently includes:
 - `check-sdfdag` for runtime and artifact readiness
 - live asset loading through environment integration helpers
 - runtime stepping against promoted compiled assets
+
+Additional canonical validation targets for this refactor include:
+
+- hash-collision defense tests with forced collisions
+- structural-equality fallback tests
+- corrupted header and payload rejection tests
+- deterministic output checks for golden fixtures
+- child-mask and node-ordering invariant tests
 
 ## 9. Related Docs
 

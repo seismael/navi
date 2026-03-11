@@ -1,24 +1,22 @@
-# SIMULATION.md - Canonical Environment Runtime
+# SIMULATION.md — Canonical Environment Runtime
 
-## 1. Executive Summary
+## 1. Overview
 
-The environment layer is the spatial truth layer of Navi. In the current repo it
-has one active production runtime:
+The environment layer now exposes one active production runtime:
 
-- compiled `.gmdag` assets under `artifacts/gmdag/corpus/`
+- compiled `.gmdag` assets
 - CUDA sphere tracing through `projects/torch-sdf`
-- one batched `SdfDagBackend`
-- contract-preserving `DistanceMatrix` publication for service and diagnostics
-- optional tensor-native seams for the canonical trainer
+- `DistanceMatrix v2` preserved for external service and diagnostic boundaries
+- coarse `environment.sdfdag.perf` telemetry
+- staged corpus refresh that removes transient raw downloads after promotion
 
-The environment does not own the sacred actor. It owns the world query,
-kinematic update, reward seam, and contract-preserving adaptation layer.
+The environment remains the sole spatial truth layer for Navi.
 
 ## 2. Canonical Commands
 
 ```bash
 # Environment service
-uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag
+uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file ./artifacts/gmdag/corpus/apartment_1.gmdag
 
 # Shortcut
 uv run environment
@@ -27,232 +25,155 @@ uv run environment
 uv run navi-environment prepare-corpus --force-recompile
 
 # Compile one explicit source scene
-uv run navi-environment compile-gmdag --source ./data/scenes/replicacad/frl_apartment_stage.glb --output ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag --resolution 512
+uv run navi-environment compile-gmdag --source ./data/scenes/hssd/102343992.glb --output ./artifacts/gmdag/corpus/hssd/102343992.gmdag --resolution 512
 
 # Runtime preflight and throughput validation
-uv run navi-environment check-sdfdag --gmdag-file ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag
-uv run navi-environment bench-sdfdag --gmdag-file ./artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag --actors 4 --steps 200
+uv run navi-environment check-sdfdag
+uv run navi-environment check-sdfdag --json
+uv run navi-environment check-sdfdag --gmdag-file ./artifacts/gmdag/corpus/apartment_1.gmdag
+uv run navi-environment bench-sdfdag --gmdag-file ./artifacts/gmdag/corpus/apartment_1.gmdag --actors 4 --steps 200
+uv run navi-environment bench-sdfdag --gmdag-file ./artifacts/gmdag/corpus/apartment_1.gmdag --actors 4 --steps 200 --json
+uv run navi-environment bench-sdfdag --gmdag-file ./artifacts/gmdag/corpus/apartment_1.gmdag --actors 4 --steps 200 --repeats 5 --json
 ```
 
 ## 3. Runtime Architecture
 
-`SimulatorBackend` remains the abstract environment boundary, but only one
-production implementation is active:
+`SimulatorBackend` remains the environment abstraction boundary, but only one
+production implementation remains active:
 
 ```text
 SimulatorBackend
   -> SdfDagBackend
-     -> loaded DAG asset metadata
-     -> contiguous DAG tensor on CUDA
-     -> reusable ray origin and direction buffers
-     -> reusable distance and semantic output buffers
-     -> optional materialization for publish surfaces
+     -> preloaded DAG tensor on CUDA
+     -> reusable ray origin/direction buffers
+     -> reusable output tensors
+     -> optional publish-time materialization
 ```
 
 Key runtime properties:
 
 - one canonical compiled-scene execution path
-- CUDA-only execution on the production path
+- no CPU fallback in the compiled runtime
 - batched actor stepping is mandatory
 - the CUDA ray tracer stops at the configured environment horizon
-- the actor may consume equivalent CUDA tensors directly on the canonical path
-- service mode and diagnostics may still materialize `DistanceMatrix` objects
+- `DistanceMatrix` materialization is preserved for service mode and passive tooling
+- the canonical trainer may consume equivalent CUDA tensors directly
 
-## 4. Corpus Preparation And Promotion
+## 4. Corpus Preparation
 
-### 4.1 Source Discovery
+`prepare-corpus` discovers source scenes, compiles missing or stale `.gmdag`
+assets, and writes live manifests for the compiled corpus.
 
-`prepare-corpus` discovers scenes from:
+Canonical refresh policy:
 
-- an explicit `--scene` override
-- an explicit manifest
-- or canonical source discovery roots
-
-When the user does not narrow the corpus, full discovered corpus coverage is the
-default production training dataset.
-
-### 4.2 Compilation Policy
-
-Canonical compile policy is:
-
-- default resolution `512`
-- overwrite-first refresh when explicitly requested
-- automatic replacement of compiled assets with mismatched stored resolution
-- promotion only after a successful staged rebuild
-
-### 4.3 Live Artifact Policy
-
-The persistent runtime depends on compiled assets, not retained raw downloads.
-
-After a successful corpus refresh:
-
-- transient source downloads may be removed
-- live manifests must point at promoted `.gmdag` assets
-- scratch download paths must not remain in promoted metadata
+- default compile resolution is `512`
+- compiled assets with mismatched stored resolution are rebuilt automatically
+- `scripts/refresh-scene-corpus.ps1` stages downloads and promotes only after a successful rebuild
+- transient source downloads are removed after successful promotion
+- live `gmdag_manifest.json` entries must point at promoted compiled assets, not scratch paths
+- promoted manifest metadata must stay in sync with the live corpus: `scene_count`, `gmdag_root`, `requested_resolution`, and `compiled_resolutions` are validated against the promoted assets
 
 Canonical roots:
 
 - transient source staging: `artifacts/tmp/corpus-refresh/downloads/`
 - compiled corpus: `artifacts/gmdag/corpus/`
 
-## 5. Step Lifecycle
+## 5. Observation And Reward Semantics
 
-A single batched environment step on the canonical runtime does the following:
+### 5.1 Observation Contract
 
-1. receive actions or action-equivalent tensors for `B` actors
-2. integrate body-frame motion through `MjxEnvironment`
-3. update actor origins and world-frame directions
-4. invoke `torch_sdf.cast_rays()` on preallocated CUDA buffers
-5. reshape batched outputs into `(Az, El)` depth, semantic, and validity grids
-6. compute environment-side reward terms
-7. either:
-   - return tensor-native observation batches to the trainer, or
-   - materialize `DistanceMatrix` objects for publication or service replies
-
-The important architectural point is that steps 4 through 6 already have the
-information needed for most production training logic. Rebuilding Python objects
-is therefore optional on the fast path, not required.
-
-## 6. Observation Contract And Geometry Conventions
-
-### 6.1 Public Observation Contract
-
-The environment publishes the actor's required fields unchanged:
+The environment publishes the actor's required contract unchanged:
 
 - `depth`
 - `delta_depth`
 - `semantic`
 - `valid_mask`
 
-Wire arrays remain shaped `(1, Az, El)` per environment.
+Wire arrays remain shaped `(1, Az, El)`.
+The tensor-native trainer seam may use the equivalent CUDA observation tensor
+`[depth, semantic, valid]` with shape `(3, Az, El)` per actor.
 
-### 6.2 Tensor-Native Trainer Seam
-
-The canonical trainer may consume the equivalent CUDA tensor with channels:
-
-- channel `0`: normalized depth
-- channel `1`: semantic ids cast to `float32`
-- channel `2`: validity mask cast to `float32`
-
-Per-actor shape is `(3, Az, El)`. Batched trainer shape is `(B, 3, Az, El)`.
-
-### 6.3 Spherical Convention
-
-The canonical spherical convention is:
-
-- `matrix_shape == (azimuth_bins, elevation_bins)`
-- forward ray is azimuth bin `0`
-- forward direction is local `-Z`
-- dashboard forward-FOV extraction must roll the azimuth seam before cropping
-
-## 7. Fixed-Horizon Policy
+### 5.2 Fixed-Horizon Policy
 
 The canonical environment horizon is `EnvironmentConfig.max_distance`.
-That same value controls:
+
+That same value now controls:
 
 - CUDA ray termination
 - depth normalization
-- horizon-saturation semantics
-- invalidity of rays that exceed the configured horizon
+- horizon saturation behavior
+- validity semantics for rays that exceed the configured horizon
 
 Dynamic per-step trace radius is not part of the canonical runtime.
 
-## 8. Reward And Episode Semantics
+### 5.3 Training Persistence Policy
 
-### 8.1 Persistence-First Collision Handling
+Canonical training keeps actors in-scene and learning:
 
-Canonical training is persistence-first:
-
-- collision is non-terminal
-- invalid motion is reverted
-- a penalty is applied
-- the episode continues
-
-### 8.2 Scene Residency
-
-Canonical scene rotation is throughput-aware:
-
+- collision remains non-terminal
+- invalid motion is reverted and penalized
 - hard truncation defaults to `2000` steps
-- scene-pool rotation defaults to `16` completed episodes per scene across the fleet
-- actors stay on a scene long enough to recover, explore, and exploit local
-  geometry rather than rotating after trivial failure events
+- scene rotation defaults to `16` completed episodes per scene across the fleet
 
-### 8.3 Environment-Side Shaping Terms
+### 5.4 Shaping Policy
 
-The environment reward seam includes:
+The environment reward seam now includes:
 
-- obstacle-clearance reward for increasing free space while near geometry
+- positive clearance-delta reward when an actor increases free space near geometry
 - starvation penalty when horizon-saturated observations dominate the sphere
 - proximity penalty when very near valid hits dominate the sphere
 
-These terms are derived from already-produced depth and validity tensors.
-No second observation pipeline is required.
+These terms are derived from already-produced batched depth and validity data.
+They do not require a second sensing pipeline.
 
-## 9. External Data And Sim-to-Real Boundary
+## 6. External Data Boundary
 
-The imported OmniSense material is adopted in a narrow, production-safe form.
+The imported OmniSense documents were strongest on one point: external data
+mess belongs outside the training hot loop.
 
-`DatasetAdapter` remains the only valid place for:
+Navi expresses that through the adapter boundary.
+
+`DatasetAdapter` is the only valid place for:
 
 - axis transpose
 - coordinate normalization
 - semantic remapping
 - external sensor projection into the spherical contract
 
-This is a boundary rule, not a license to reopen multiple production runtime
-paths.
+The first canonical raw-adapter surface is an explicit equirectangular fixture:
 
-### 9.1 Domain Randomization Direction
+- raw `equirect_depth` and `equirect_semantic` grids arrive as `(El, Az)`
+- adapters convert them to canonical `(1, Az, El)` arrays
+- adapted arrays materialize through one shared `DistanceMatrix` bridge so dataset and runtime publication paths preserve the same public contract
+- fixture QA may materialize single frames or ordered frame sequences through `navi_environment.integration.adapt_fixture_frame(...)` and `navi_environment.integration.adapt_fixture_sequence(...)` without introducing a second runtime backend
+- Habitat camera fixtures currently use the explicit `habitat_camera_transform_spec()` preset: right-handed, `+Y` up, forward `-Z`, which matches Navi's current canonical local frame and therefore materializes as an identity transform instead of an implied one
+- per-dataset rigid transforms must be carried as explicit `4x4` matrices, not prose
 
-Noise injection and hardware-robustness transformations remain valid design
-ideas, but they belong after mathematical world query and before training or
-inference consumption. They should be treated as optional environment-side
-post-processing, not as new compiler or actor responsibilities.
+This remains a boundary concern, not a reason to reopen alternate canonical
+runtime paths.
 
-### 9.2 Sensor Bridge Direction
+## 7. Service And Auditor Surfaces
 
-Real-world hardware compatibility remains conceptually simple:
-
-- point clouds or stitched depth sensors must be projected into the canonical
-  spherical contract
-- the actor should not need to know whether those inputs came from simulation or
-  real hardware
-
-That remains a design direction, not a second canonical runtime.
-
-## 10. Service Surfaces
-
-### 10.1 Runtime Ports
+### 7.1 Runtime Ports
 
 - `5559` PUB: `distance_matrix_v2`
 - `5560` REP: `step_request_v2` and `step_result_v2`
 
-### 10.2 Service-Mode Validity
+### 7.2 Passive Observer Rules
 
-Service mode remains valid for:
+- training-time dashboard usage must remain actor-stream-first and passive
+- environment control sockets are for service mode and explicit diagnostics, not canonical training dependency
+- frame dropping is acceptable if it preserves rollout throughput
 
-- integration testing
-- manual stepping
-- dashboard teleoperation
-- recorder and rewinder workflows
+### 7.3 Dataset QA Direction
 
-Service mode is not the canonical throughput path, but it remains an important
-operational and validation surface.
+The imported dashboard proposal for a pinhole dataset auditor is useful as a
+diagnostic idea: validate compiled scenes through the same mathematical runtime
+used for training instead of re-exporting geometry for browser rendering.
 
-## 11. Dataset QA Direction
+This is a passive validation surface, not a new runtime dependency.
 
-The imported dashboard proposal for a dataset-auditor pinhole camera is kept as
-an important diagnostic direction:
-
-- render compiled scenes through the same mathematical runtime used for training
-- avoid geometry export or browser-only surrogate visualizations
-- prefer proof through the real runtime over convenience rendering
-
-This is a passive validation surface and should remain optional.
-
-## 12. Validation
-
-Core validation commands:
+## 8. Validation
 
 ```bash
 uv run ruff check .
@@ -265,5 +186,10 @@ Important current checks include:
 - fixed-horizon clamp and validity contract tests
 - live compiled-corpus validation
 - live `SdfDagBackend` step validation against real `.gmdag` assets
-- runtime readiness checks via `check-sdfdag`
-- environment throughput attribution via `bench-sdfdag`
+- `check-sdfdag --json` machine-readable runtime and corpus validation summaries for promoted-corpus preflight capture
+- `check-sdfdag` corpus validation against the promoted manifest, live promoted assets, and canonical compile resolution when run without `--gmdag-file`
+- `bench-sdfdag --json` structured summaries for repeatable environment benchmark capture and live promoted-corpus benchmark smoke proof
+| `max_distance` | `float` | 30.0 | Maximum observation distance (metres) |
+| `habitat_scene` | `str` | `""` | Path to Habitat `.glb` scene (Habitat only) |
+| `habitat_dataset_config` | `str` | `""` | Path to PointNav episode JSON (Habitat only) |
+| `seed` | `int` | 42 | Random seed for deterministic reset selection |

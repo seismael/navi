@@ -4,12 +4,232 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
 namespace voxeldag {
+
+namespace {
+
+constexpr uint64_t kMurmurC1 = 0x87C37B91114253D5ULL;
+constexpr uint64_t kMurmurC2 = 0x4CF5AD432745937FULL;
+constexpr uint64_t kUint64Mask = std::numeric_limits<uint64_t>::max();
+
+uint64_t rotl64(uint64_t value, int shift) {
+    return ((value << shift) | (value >> (64 - shift))) & kUint64Mask;
+}
+
+uint64_t fmix64(uint64_t value) {
+    value ^= value >> 33;
+    value *= 0xFF51AFD7ED558CCDULL;
+    value ^= value >> 33;
+    value *= 0xC4CEB9FE1A85EC53ULL;
+    value ^= value >> 33;
+    return value;
+}
+
+uint64_t canonical_hash_bytes(const void* data, std::size_t size, uint64_t seed) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    const std::size_t block_count = size / 16;
+    uint64_t h1 = seed;
+    uint64_t h2 = seed;
+
+    for (std::size_t block_idx = 0; block_idx < block_count; ++block_idx) {
+        const std::size_t offset = block_idx * 16;
+        uint64_t k1 = 0;
+        uint64_t k2 = 0;
+        std::memcpy(&k1, bytes + offset, sizeof(uint64_t));
+        std::memcpy(&k2, bytes + offset + sizeof(uint64_t), sizeof(uint64_t));
+
+        k1 *= kMurmurC1;
+        k1 = rotl64(k1, 31);
+        k1 *= kMurmurC2;
+        h1 ^= k1;
+
+        h1 = rotl64(h1, 27);
+        h1 += h2;
+        h1 = h1 * 5 + 0x52DCE729ULL;
+
+        k2 *= kMurmurC2;
+        k2 = rotl64(k2, 33);
+        k2 *= kMurmurC1;
+        h2 ^= k2;
+
+        h2 = rotl64(h2, 31);
+        h2 += h1;
+        h2 = h2 * 5 + 0x38495AB5ULL;
+    }
+
+    const uint8_t* tail = bytes + (block_count * 16);
+    const std::size_t tail_size = size & 15U;
+    uint64_t k1 = 0;
+    uint64_t k2 = 0;
+
+    switch (tail_size) {
+    case 15: k2 ^= static_cast<uint64_t>(tail[14]) << 48; [[fallthrough]];
+    case 14: k2 ^= static_cast<uint64_t>(tail[13]) << 40; [[fallthrough]];
+    case 13: k2 ^= static_cast<uint64_t>(tail[12]) << 32; [[fallthrough]];
+    case 12: k2 ^= static_cast<uint64_t>(tail[11]) << 24; [[fallthrough]];
+    case 11: k2 ^= static_cast<uint64_t>(tail[10]) << 16; [[fallthrough]];
+    case 10: k2 ^= static_cast<uint64_t>(tail[9]) << 8; [[fallthrough]];
+    case 9:
+        k2 ^= static_cast<uint64_t>(tail[8]);
+        k2 *= kMurmurC2;
+        k2 = rotl64(k2, 33);
+        k2 *= kMurmurC1;
+        h2 ^= k2;
+        [[fallthrough]];
+    case 8: k1 ^= static_cast<uint64_t>(tail[7]) << 56; [[fallthrough]];
+    case 7: k1 ^= static_cast<uint64_t>(tail[6]) << 48; [[fallthrough]];
+    case 6: k1 ^= static_cast<uint64_t>(tail[5]) << 40; [[fallthrough]];
+    case 5: k1 ^= static_cast<uint64_t>(tail[4]) << 32; [[fallthrough]];
+    case 4: k1 ^= static_cast<uint64_t>(tail[3]) << 24; [[fallthrough]];
+    case 3: k1 ^= static_cast<uint64_t>(tail[2]) << 16; [[fallthrough]];
+    case 2: k1 ^= static_cast<uint64_t>(tail[1]) << 8; [[fallthrough]];
+    case 1:
+        k1 ^= static_cast<uint64_t>(tail[0]);
+        k1 *= kMurmurC1;
+        k1 = rotl64(k1, 31);
+        k1 *= kMurmurC2;
+        h1 ^= k1;
+        [[fallthrough]];
+    default:
+        break;
+    }
+
+    h1 ^= static_cast<uint64_t>(size);
+    h2 ^= static_cast<uint64_t>(size);
+
+    h1 += h2;
+    h2 += h1;
+
+    h1 = fmix64(h1);
+    h2 = fmix64(h2);
+
+    h1 += h2;
+    return h1;
+}
+
+bool internal_node_matches(
+    const std::vector<uint64_t>& dag_pool,
+    uint32_t node_ptr,
+    uint8_t child_mask,
+    const std::vector<uint32_t>& children)
+{
+    const uint64_t node = dag_pool[node_ptr];
+    const uint8_t candidate_mask = static_cast<uint8_t>((node >> 55) & 0xFFULL);
+    if (candidate_mask != child_mask) {
+        return false;
+    }
+
+    const uint32_t start_ptr = static_cast<uint32_t>(node & 0xFFFFFFFFULL);
+    int child_count = 0;
+    for (int bit = 0; bit < 8; ++bit) {
+        if ((child_mask & static_cast<uint8_t>(1U << bit)) != 0U) {
+            ++child_count;
+        }
+    }
+    for (int idx = 0; idx < child_count; ++idx) {
+        if (dag_pool[start_ptr + static_cast<uint32_t>(idx)] != children[static_cast<std::size_t>(idx)]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint32_t deduplicate_leaf_node(
+    uint64_t node,
+    std::vector<uint64_t>& dag_pool,
+    std::unordered_map<uint64_t, std::vector<uint32_t>>& unique_nodes)
+{
+    const uint64_t hash_value = canonical_hash_bytes(&node, sizeof(node), 0);
+    auto& bucket = unique_nodes[hash_value];
+    for (uint32_t candidate_ptr : bucket) {
+        if (dag_pool[candidate_ptr] == node) {
+            return candidate_ptr;
+        }
+    }
+
+    const uint32_t new_ptr = static_cast<uint32_t>(dag_pool.size());
+    dag_pool.push_back(node);
+    bucket.push_back(new_ptr);
+    return new_ptr;
+}
+
+uint32_t deduplicate_internal_node(
+    uint8_t child_mask,
+    const std::vector<uint32_t>& children,
+    std::vector<uint64_t>& dag_pool,
+    std::unordered_map<uint64_t, std::vector<uint32_t>>& unique_nodes)
+{
+    const uint64_t hash_value = canonical_node_hash(children, 0);
+    auto& bucket = unique_nodes[hash_value];
+    for (uint32_t candidate_ptr : bucket) {
+        if (internal_node_matches(dag_pool, candidate_ptr, child_mask, children)) {
+            return candidate_ptr;
+        }
+    }
+
+    const uint32_t node_ptr = static_cast<uint32_t>(dag_pool.size());
+    dag_pool.push_back(0);
+
+    const uint32_t start_ptr = static_cast<uint32_t>(dag_pool.size());
+    for (uint32_t child_ptr : children) {
+        dag_pool.push_back(static_cast<uint64_t>(child_ptr));
+    }
+
+    uint64_t internal_node = 0;
+    internal_node |= (static_cast<uint64_t>(child_mask) << 55);
+    internal_node |= static_cast<uint64_t>(start_ptr);
+    dag_pool[node_ptr] = internal_node;
+    bucket.push_back(node_ptr);
+    return node_ptr;
+}
+
+} // namespace
+
+uint64_t canonical_node_hash(const std::vector<uint32_t>& child_indices, uint64_t seed) {
+    const void* data = child_indices.empty() ? nullptr : child_indices.data();
+    return canonical_hash_bytes(data, child_indices.size() * sizeof(uint32_t), seed);
+}
+
+std::pair<std::vector<std::vector<uint32_t>>, std::vector<uint32_t>> deduplicate_child_layouts(
+    const std::vector<std::vector<uint32_t>>& layouts,
+    uint64_t seed,
+    const NodeHashFn& hash_fn)
+{
+    std::vector<std::vector<uint32_t>> unique_layouts;
+    std::vector<uint32_t> remap;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> buckets;
+    const NodeHashFn active_hash = hash_fn ? hash_fn : canonical_node_hash;
+
+    unique_layouts.reserve(layouts.size());
+    remap.reserve(layouts.size());
+
+    for (const auto& layout : layouts) {
+        const uint64_t hash_value = active_hash(layout, seed);
+        auto& bucket = buckets[hash_value];
+        uint32_t matched_index = std::numeric_limits<uint32_t>::max();
+        for (uint32_t candidate_index : bucket) {
+            if (unique_layouts[candidate_index] == layout) {
+                matched_index = candidate_index;
+                break;
+            }
+        }
+
+        if (matched_index == std::numeric_limits<uint32_t>::max()) {
+            matched_index = static_cast<uint32_t>(unique_layouts.size());
+            unique_layouts.push_back(layout);
+            bucket.push_back(matched_index);
+        }
+        remap.push_back(matched_index);
+    }
+
+    return {unique_layouts, remap};
+}
 
 Compiler::Compiler(uint32_t resolution) : m_resolution(resolution), m_voxel_size(0.0f) {
     m_bmin[0] = m_bmin[1] = m_bmin[2] = 0.0f;
@@ -312,16 +532,11 @@ std::vector<float> Compiler::computeSDF() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  Stage 3: DAG Compression (SVO + Hash-based Deduplication)
+//  Stage 3: DAG Compression (SVO + Canonical Hash / Structural Deduplication)
 // ═══════════════════════════════════════════════════════════════════
 
 uint64_t Compiler::hash_node(const std::vector<uint32_t>& child_indices) {
-    uint64_t h = 0xCBF29CE484222325ULL; // FNV offset basis
-    for (uint32_t idx : child_indices) {
-        h ^= static_cast<uint64_t>(idx);
-        h *= 0x100000001B3ULL; // FNV prime
-    }
-    return h;
+    return canonical_node_hash(child_indices, 0);
 }
 
 uint16_t Compiler::float_to_half(float f) {
@@ -348,7 +563,7 @@ uint32_t Compiler::build_recursive(
     const std::vector<float>& dense_grid,
     int N, int x, int y, int z, int size,
     std::vector<uint64_t>& dag_pool,
-    std::unordered_map<uint64_t, uint32_t>& unique_nodes)
+    std::unordered_map<uint64_t, std::vector<uint32_t>>& unique_nodes)
 {
     if (size == 1) {
         // LEAF NODE (Type 1)
@@ -360,14 +575,7 @@ uint32_t Compiler::build_recursive(
         node |= (static_cast<uint64_t>(semantic_id) << 16);
         node |= static_cast<uint64_t>(dist_f16);
 
-        if (unique_nodes.find(node) != unique_nodes.end()) {
-            return unique_nodes[node];
-        }
-
-        uint32_t new_ptr = static_cast<uint32_t>(dag_pool.size());
-        dag_pool.push_back(node);
-        unique_nodes[node] = new_ptr;
-        return new_ptr;
+        return deduplicate_leaf_node(node, dag_pool, unique_nodes);
     }
 
     int half = size / 2;
@@ -384,34 +592,14 @@ uint32_t Compiler::build_recursive(
         child_mask |= (1 << i);
     }
 
-    // INTERNAL NODE (Type 0)
-    uint64_t h = hash_node(children);
-    if (unique_nodes.find(h) != unique_nodes.end()) {
-        return unique_nodes[h];
-    }
-
-    uint32_t node_ptr = static_cast<uint32_t>(dag_pool.size());
-    dag_pool.push_back(0); // Placeholder for the node
-
-    uint32_t start_ptr = static_cast<uint32_t>(dag_pool.size());
-    for (uint32_t c : children) {
-        dag_pool.push_back(static_cast<uint64_t>(c));
-    }
-
-    uint64_t internal_node = 0;
-    internal_node |= (static_cast<uint64_t>(child_mask) << 55);
-    internal_node |= static_cast<uint64_t>(start_ptr);
-
-    dag_pool[node_ptr] = internal_node;
-    unique_nodes[h] = node_ptr;
-    return node_ptr;
+    return deduplicate_internal_node(child_mask, children, dag_pool, unique_nodes);
 }
 
 std::vector<uint64_t> Compiler::compressToDAG(const std::vector<float>& dense_sdf) {
     std::vector<uint64_t> dag_pool;
     dag_pool.push_back(0); // Reserve index 0 for the root node copy
 
-    std::unordered_map<uint64_t, uint32_t> unique_nodes;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> unique_nodes;
 
     uint32_t root_ptr = build_recursive(dense_sdf, static_cast<int>(m_resolution), 0, 0, 0,
                     static_cast<int>(m_resolution), dag_pool, unique_nodes);

@@ -10,7 +10,7 @@ The compiler transforms 3D environments into **Signed Distance Fields (SDF)** us
 
 This component strictly adheres to the following agnostic design principles:
 
-*   **Mathematical Cubicity:** The compiler dynamically centers the mesh and pads the world into a perfect cube. This ensures a uniform voxel size ($h$) across all axes, eliminating spatial distortion in downstream $O(1)$ sphere-tracing kernels.
+*   **Mathematical Cubicity:** The compiler dynamically centers the mesh and pads the world into a perfect cube. This ensures a uniform voxel size ($h$) across all axes, eliminating spatial distortion in downstream bounded sphere-tracing kernels.
 *   **Power-of-2 Alignment:** Input resolutions are automatically adjusted to the next power of 2 ($2^n$). This is a hardware-optimization mandate, ensuring spatial subdivisions align perfectly with GPU bit-shifting logic.
 *   **Zero-Copy Memory Specification:** The output `.gmdag` binary follows the 64-bit node architecture defined in `docs/MEMORY_LAYOUT_AND_DAG_SPEC.md`, optimized for GPU L1/L2 cache residency.
 
@@ -20,8 +20,8 @@ This component strictly adheres to the following agnostic design principles:
 
 *   **High-Performance FSM Solver:** Multi-threaded (via `numba` or C++) Eikonal solver reaching throughputs of **~0.16 MVoxels/s**.
 *   **Intelligent Initialization:** Robust triangle-to-voxel seeding that guarantees mathematical convergence even for non-manifold or zero-thickness geometry.
-*   **Aggressive Deduplication:** MurmurHash3-based DAG folding achieving **>5,000x compression** for uniform spatial regions and **>7x** for highly complex, non-convex environments.
-*   **Dual-Language Strategy:** Provides a high-performance Python compiler for rapid development and a full C++17 source tree for native deployment.
+*   **Canonical Dedup Contract:** Candidate grouping uses deterministic MurmurHash3 with fixed seed `0`, and structural equality remains the correctness authority before any merge in both the Python verification surface and the native C++ compiler.
+*   **Dual-Language Strategy:** Provides a lightweight Python verification compiler for monorepo tests and a full C++17 source tree for native deployment, both aligned to the same `.gmdag` node contract.
 *   **Repository Test Surface:** Exposes a `voxel_dag.compiler` Python package so monorepo tests can validate compiler/runtime integration without shelling out to the native CLI.
 
 ---

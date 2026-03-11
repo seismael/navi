@@ -2,9 +2,19 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
+#include <utility>
 #include <unordered_map>
 
 namespace voxeldag {
+
+using NodeHashFn = std::function<uint64_t(const std::vector<uint32_t>&, uint64_t)>;
+
+uint64_t canonical_node_hash(const std::vector<uint32_t>& child_indices, uint64_t seed = 0);
+std::pair<std::vector<std::vector<uint32_t>>, std::vector<uint32_t>> deduplicate_child_layouts(
+    const std::vector<std::vector<uint32_t>>& layouts,
+    uint64_t seed = 0,
+    const NodeHashFn& hash_fn = NodeHashFn());
 
 // Strictly matches the Python struct.unpack('<4sIIffffI', ...)
 #pragma pack(push, 1)
@@ -57,7 +67,7 @@ private:
         const std::vector<float>& dense_grid,
         int N, int x, int y, int z, int size,
         std::vector<uint64_t>& dag_pool,
-        std::unordered_map<uint64_t, uint32_t>& unique_nodes);
+        std::unordered_map<uint64_t, std::vector<uint32_t>>& unique_nodes);
 };
 
 } // namespace voxeldag

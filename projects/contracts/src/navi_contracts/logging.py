@@ -37,7 +37,8 @@ def setup_logging(project_name: str, log_dir: str | Path = "logs", level: int = 
     file_handler.setLevel(level)
 
     # 2. Console Handler
-    console_handler = logging.StreamHandler(sys.stdout)
+    # Keep machine-readable command output on stdout by sending logs to stderr.
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setFormatter(formatter)
     console_handler.setLevel(level)
 

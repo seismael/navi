@@ -32,6 +32,7 @@ class AuditorConfig(_SettingsBase):
         env_file=find_root_env(),
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Robust Fallback: Defaults match the NAVI standard
@@ -58,4 +59,8 @@ class AuditorConfig(_SettingsBase):
 
     @property
     def sub_addresses(self) -> tuple[str, ...]:
-        return (self.matrix_sub_address, self.actor_sub_address)
+        addresses: list[str] = []
+        for addr in (self.matrix_sub_address, self.actor_sub_address):
+            if addr and addr not in addresses:
+                addresses.append(addr)
+        return tuple(addresses)

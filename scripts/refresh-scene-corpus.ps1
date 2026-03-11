@@ -15,7 +15,7 @@
 #>
 param(
     [string]$DataDir = "",
-    [string]$Datasets = "all",
+    [string]$Datasets = "test_scenes,replicacad",
     [string]$Manifest = "",
     [string]$Scene = "",
     [string]$CorpusRoot = "",
@@ -142,8 +142,19 @@ try {
     if ([string]::IsNullOrWhiteSpace($ScratchRoot)) {
         $ScratchRoot = Join-Path $repoRoot "artifacts\tmp\corpus-refresh"
     }
+    $defaultSourceRoot = Join-Path $repoRoot "data\scenes"
+    $defaultSourceManifest = Join-Path $defaultSourceRoot "scene_manifest_all.json"
+    $hasLocalSourceCorpus = (Test-Path $defaultSourceRoot) -and (
+        (Get-ChildItem -Path $defaultSourceRoot -Recurse -File -Include *.glb,*.obj,*.ply,*.stl -ErrorAction SilentlyContinue | Select-Object -First 1) -ne $null
+    )
+
     if ([string]::IsNullOrWhiteSpace($DataDir)) {
-        $DataDir = Join-Path $ScratchRoot "downloads"
+        if ($hasLocalSourceCorpus) {
+            $DataDir = $defaultSourceRoot
+        }
+        else {
+            $DataDir = Join-Path $ScratchRoot "downloads"
+        }
     }
     if ([string]::IsNullOrWhiteSpace($CorpusRoot)) {
         $CorpusRoot = $DataDir
@@ -164,7 +175,9 @@ try {
         Remove-PathIfExists -PathToRemove $stageCompiledRoot
     }
 
-    if (-not $SkipDownload) {
+    $useDownloadRefresh = (-not $SkipDownload) -and (-not $hasLocalSourceCorpus -or ($DataDir -ne $defaultSourceRoot))
+
+    if ($useDownloadRefresh) {
         $downloadArgs = @(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
@@ -181,6 +194,9 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "Dataset download refresh failed with exit code $LASTEXITCODE"
         }
+    }
+    elseif ($hasLocalSourceCorpus) {
+        Write-Host "Using existing real dataset source corpus under $defaultSourceRoot"
     }
 
     $resolvedSourceRoot = if (-not [string]::IsNullOrWhiteSpace($CorpusRoot)) {

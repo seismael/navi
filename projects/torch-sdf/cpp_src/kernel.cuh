@@ -4,6 +4,10 @@
 namespace toponav {
 namespace cuda {
 
+constexpr float kHitEpsilon = 0.01f;
+constexpr float kOutsideDomainDistance = 1000.0f;
+constexpr float kDirectionNormEpsilon = 1e-4f;
+
 /**
  * @brief Launches the CUDA grid for batched SDF sphere-tracing.
  * @param dag_memory    Read-only pointer to the 64-bit DAG array.

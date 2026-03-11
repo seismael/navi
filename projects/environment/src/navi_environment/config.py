@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from pydantic import Field
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__: list[str] = ["EnvironmentConfig"]
@@ -64,6 +65,7 @@ class EnvironmentConfig(BaseSettings):
         env_file=find_root_env(),
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Robust Fallback
@@ -81,27 +83,28 @@ class EnvironmentConfig(BaseSettings):
     )
 
     mode: str = "step"
-    max_steps_per_episode: int = Field(default=2_000, validation_alias="NAVI_MAX_STEPS_PER_EPISODE")
-    azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")
-    elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS")
-    max_distance: float = 30.0
-    physics_dt: float = 0.02
-    steps_per_decision: int = 1
-    drone_max_speed: float = 10.0
-    drone_climb_rate: float = 2.0
-    drone_strafe_speed: float = 3.0
-    drone_yaw_rate: float = 3.0
-    n_actors: int = 1
+    max_steps_per_episode: int = Field(default=2_000, validation_alias="NAVI_MAX_STEPS_PER_EPISODE", gt=0)
+    azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS", gt=0)
+    elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS", gt=0)
+    max_distance: float = Field(default=30.0, gt=0.0)
+    physics_dt: float = Field(default=0.02, gt=0.0)
+    steps_per_decision: int = Field(default=1, gt=0)
+    drone_max_speed: float = Field(default=10.0, gt=0.0)
+    drone_climb_rate: float = Field(default=2.0, gt=0.0)
+    drone_strafe_speed: float = Field(default=3.0, gt=0.0)
+    drone_yaw_rate: float = Field(default=3.0, gt=0.0)
+    n_actors: int = Field(default=1, gt=0)
     training_mode: bool = False
     compute_overhead: bool = False
     backend: str = "sdfdag"
     gmdag_file: str = str(find_default_gmdag())
-    sdf_max_steps: int = 256
+    sdf_max_steps: int = Field(default=256, gt=0)
     gmdag_resolution: int = Field(
         default=derive_default_gmdag_resolution(),
         validation_alias="NAVI_GMDAG_RESOLUTION",
+        gt=0,
     )
-    scene_episodes_per_scene: int = Field(default=16, validation_alias="NAVI_SCENE_EPISODES_PER_SCENE")
+    scene_episodes_per_scene: int = Field(default=16, validation_alias="NAVI_SCENE_EPISODES_PER_SCENE", gt=0)
     obstacle_clearance_reward_scale: float = Field(
         default=0.6,
         validation_alias="NAVI_OBSTACLE_CLEARANCE_REWARD_SCALE",
@@ -109,6 +112,7 @@ class EnvironmentConfig(BaseSettings):
     obstacle_clearance_window: float = Field(
         default=1.5,
         validation_alias="NAVI_OBSTACLE_CLEARANCE_WINDOW",
+        gt=0.0,
     )
     starvation_ratio_threshold: float = Field(
         default=0.8,
@@ -121,6 +125,7 @@ class EnvironmentConfig(BaseSettings):
     proximity_distance_threshold: float = Field(
         default=1.0,
         validation_alias="NAVI_PROXIMITY_DISTANCE_THRESHOLD",
+        gt=0.0,
     )
     proximity_penalty_scale: float = Field(
         default=0.8,

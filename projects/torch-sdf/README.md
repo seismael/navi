@@ -1,31 +1,60 @@
 # torch-sdf: Domain I
 
-The CUDA Sphere-Tracing Extension (Compute Engine). This module exposes $O(1)$ stackless sphere-tracing directly to PyTorch via zero-copy memory bindings using PyBind11 and LibTorch.
+The CUDA sphere-tracing extension for Navi's canonical `.gmdag` runtime. This
+module exposes bounded batched sphere tracing directly to PyTorch through
+zero-copy bindings implemented with PyBind11 and LibTorch.
 
 ---
 
 ## 1. Executive Summary
 
-`torch-sdf` is the high-performance runtime core of the TopoNav ecosystem. It bypasses standard graphics pipelines by executing purely mathematical sphere-tracing against a **Ghost-Matrix Directed Acyclic Graph (.gmdag)**. 
+`torch-sdf` is the low-level compute core for Navi's canonical compiled-scene
+path. It bypasses graphics pipelines by executing mathematical sphere tracing
+against `.gmdag` assets and writing results directly into preallocated PyTorch
+CUDA tensors.
 
-By mutating PyTorch VRAM pointers in-place, it achieves theoretical maximum simulation throughput, specifically designed for large-scale multi-agent reinforcement learning.
+The important production guarantee is bounded batched execution with explicit
+runtime limits, not a claim of literal constant-time cost per ray.
 
 ---
 
 ## 2. Key Features
 
-*   **O(1) Stackless Traversal**: Iterative descent through Sparse Voxel Octrees (SVO) without recursive overhead or thread divergence.
-*   **Zero-Copy Execution**: Directly reads/writes from PyTorch tensors using raw pointers, eliminating PCIe overhead.
-*   **Strict CUDA Backend**: Optimized kernels for NVIDIA GPUs with fail-fast validation when CUDA/backend requirements are not met.
-*   **Agnostic Spatial Logic**: Automatically handles arbitrary bounding boxes and resolutions.
+*   **Bounded Stackless Traversal**: Iterative DAG descent with explicit
+	`max_steps`, horizon, and hit-epsilon semantics.
+*   **Zero-Copy Execution**: Directly reads/writes PyTorch CUDA tensors using
+	raw pointers, avoiding avoidable CPU staging.
+*   **Strict CUDA Backend**: Fail-fast validation for CUDA placement, dtype,
+	shape, contiguity, and runtime parameters.
+*   **Explicit Spatial Bounds**: Bounding boxes and resolution are validated at
+	the binding boundary before kernel launch.
 
 ---
 
-## 3. Performance Benchmarks (Verified)
+## 3. Runtime Contract
 
-| Backend | Rays Per Step | Steps-Per-Second (SPS) | Latency |
-| :--- | :--- | :--- | :--- |
-| **Native CUDA** | 196,608 | **>10,000** (Target) | <1.0 ms |
+Canonical inputs and outputs:
+
+* `origins`: contiguous CUDA `float32`, shape `[batch, rays, 3]`
+* `dirs`: contiguous CUDA `float32`, shape `[batch, rays, 3]`
+* `out_distances`: contiguous CUDA `float32`, shape `[batch, rays]`
+* `out_semantics`: contiguous CUDA `int32`, shape `[batch, rays]`
+
+Explicit runtime rules:
+
+* `max_steps` must be a positive integer
+* `max_distance` must be finite and positive
+* `resolution` must be a positive integer
+* `bbox_min` and `bbox_max` must each contain three finite floats
+* every `bbox_min[i]` must be strictly less than `bbox_max[i]`
+
+Current kernel semantics:
+
+* a hit is accepted when local clearance falls below the internal hit epsilon
+* rays that leave the compiled domain or exceed the configured horizon return a
+	miss semantic (`0`)
+* misses are bounded by the configured iteration limit and horizon rather than a
+	promise of globally correct analytic continuation outside the compiled asset
 
 ---
 
@@ -74,12 +103,17 @@ The integrity of the kernel is validated via `tests/test_full_pipeline.py`.
 *   **Throughput Benchmark**: Stress-tests the engine to verify SPS performance.
 
 ```bash
-# Run the full pipeline test
+# Run the focused wrapper and full-pipeline tests
 python tests/test_full_pipeline.py
 ```
+
+Focused wrapper validation lives in `tests/test_sphere_tracing.py`.
 
 ---
 
 ## 7. Architectural Compliance
 
-This component strictly follows the schemas and memory layouts defined in the TopoNav [**Docs**](../docs/). Any modifications to the bit-packing logic must be mirrored in the `voxel-dag` compiler.
+This component follows the repository-level contracts in `docs/`. Any changes to
+bit packing, hit semantics, or tensor-boundary validation must be mirrored in
+the `voxel-dag` compiler, the environment integration layer, and their tests in
+the same change.

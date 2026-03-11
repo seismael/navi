@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import cast
 
+import pytest
 import torch
 
 from navi_actor.cognitive_policy import CognitiveMambaPolicy
-from navi_actor.learner_ppo import PpoLearner, PpoMetrics
+from navi_actor.learner_ppo import PpoLearner, PpoMetrics, _materialize_metric_means
 from navi_actor.rollout_buffer import MultiTrajectoryBuffer, PPOTransition, TrajectoryBuffer
 
 
@@ -39,6 +40,33 @@ def test_ppo_epoch_returns_metrics() -> None:
     )
     assert isinstance(metrics, PpoMetrics)
     assert metrics.policy_loss != 0.0 or metrics.value_loss != 0.0
+    assert metrics.minibatch_prep_ms >= 0.0
+    assert metrics.policy_eval_ms >= 0.0
+    assert metrics.backward_ms >= 0.0
+    assert metrics.grad_clip_ms >= 0.0
+    assert metrics.optimizer_step_ms >= 0.0
+    assert metrics.rnd_step_ms >= 0.0
+
+
+def test_materialize_metric_means_packs_epoch_metrics_once() -> None:
+    """Learner epoch metrics should be materialized through one packed host tensor."""
+    payload = _materialize_metric_means(
+        running_policy_loss=torch.tensor(6.0),
+        running_value_loss=torch.tensor(9.0),
+        running_entropy=torch.tensor(12.0),
+        running_kl=torch.tensor(15.0),
+        running_clip=torch.tensor(18.0),
+        running_total=torch.tensor(21.0),
+        running_rnd_loss=torch.tensor(24.0),
+        n_updates=3,
+    )
+
+    assert payload.device.type == "cpu"
+    assert payload.shape == (7,)
+    assert torch.allclose(
+        payload,
+        torch.tensor([2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=torch.float32),
+    )
 
 
 def test_ppo_epoch_improves_loss() -> None:
@@ -74,6 +102,12 @@ def test_empty_buffer_returns_zeros() -> None:
     buf.compute_returns_and_advantages(last_value=0.0)
     metrics = learner.train_ppo_epoch(policy, buf, ppo_epochs=1, minibatch_size=32, seq_len=0)
     assert metrics.total_loss == 0.0
+    assert metrics.minibatch_prep_ms == 0.0
+    assert metrics.policy_eval_ms == 0.0
+    assert metrics.backward_ms == 0.0
+    assert metrics.grad_clip_ms == 0.0
+    assert metrics.optimizer_step_ms == 0.0
+    assert metrics.rnd_step_ms == 0.0
 
 
 def test_default_value_coeff_is_low() -> None:
@@ -155,15 +189,12 @@ def test_ppo_epoch_invokes_progress_callback() -> None:
     assert callback_calls > 0
 
 
-def test_ppo_epoch_accepts_tensor_native_sequence_hidden_batch() -> None:
+def test_ppo_epoch_accepts_tensor_native_sequence_minibatches() -> None:
     policy = CognitiveMambaPolicy(embedding_dim=128)
     learner = PpoLearner(learning_rate=1e-3)
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 
-    hidden_a = torch.randn(1, 2, 128)
-    hidden_b = torch.randn(1, 2, 128)
-
-    for step, hidden in enumerate((hidden_a, hidden_b), start=1):
+    for step in range(1, 3):
         buffer.append_batch(
             observations=torch.randn(2, 3, 128, 24),
             actions=torch.randn(2, 4),
@@ -172,7 +203,6 @@ def test_ppo_epoch_accepts_tensor_native_sequence_hidden_batch() -> None:
             rewards=torch.full((2,), float(step)),
             dones=torch.zeros(2, dtype=torch.bool),
             truncateds=torch.zeros(2, dtype=torch.bool),
-            hidden_batch=hidden,
             aux_tensors=torch.randn(2, 3),
         )
 
@@ -195,10 +225,7 @@ def test_ppo_epoch_sequence_minibatch_does_not_require_flat_obs_tensors() -> Non
     learner = PpoLearner(learning_rate=1e-3)
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 
-    hidden_a = torch.randn(1, 2, 128)
-    hidden_b = torch.randn(1, 2, 128)
-
-    for hidden in (hidden_a, hidden_b):
+    for _ in range(2):
         buffer.append_batch(
             observations=torch.randn(2, 3, 128, 24),
             actions=torch.randn(2, 4),
@@ -207,7 +234,6 @@ def test_ppo_epoch_sequence_minibatch_does_not_require_flat_obs_tensors() -> Non
             rewards=torch.randn(2),
             dones=torch.zeros(2, dtype=torch.bool),
             truncateds=torch.zeros(2, dtype=torch.bool),
-            hidden_batch=hidden,
             aux_tensors=torch.randn(2, 3),
         )
 
@@ -236,6 +262,85 @@ def test_ppo_epoch_sequence_minibatch_does_not_require_flat_obs_tensors() -> Non
     metrics = learner.train_ppo_epoch(
         policy,
         cast("TrajectoryBuffer | MultiTrajectoryBuffer", _SingleBatchBuffer()),
+        ppo_epochs=1,
+        minibatch_size=4,
+        seq_len=2,
+    )
+
+    assert isinstance(metrics, PpoMetrics)
+
+
+def test_ppo_epoch_sequence_minibatch_requires_sequence_native_views() -> None:
+    policy = CognitiveMambaPolicy(embedding_dim=128)
+    learner = PpoLearner(learning_rate=1e-3)
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+
+    for _ in range(2):
+        buffer.append_batch(
+            observations=torch.randn(2, 3, 128, 24),
+            actions=torch.randn(2, 4),
+            log_probs=torch.randn(2),
+            values=torch.randn(2),
+            rewards=torch.randn(2),
+            dones=torch.zeros(2, dtype=torch.bool),
+            truncateds=torch.zeros(2, dtype=torch.bool),
+            aux_tensors=torch.randn(2, 3),
+        )
+
+    buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
+
+    first_minibatch = next(buffer.sample_minibatches(batch_size=4, seq_len=2))
+    poisoned_minibatch = replace(
+        first_minibatch,
+        sequence_observations=None,
+        sequence_actions=None,
+        sequence_aux_tensors=None,
+    )
+
+    class _SingleBatchBuffer:
+        def __len__(self) -> int:
+            return 4
+
+        def sample_minibatches(
+            self,
+            batch_size: int,
+            seq_len: int,
+        ) -> object:
+            del batch_size, seq_len
+            yield poisoned_minibatch
+
+    with pytest.raises(RuntimeError, match="requires sequence-native minibatches"):
+        learner.train_ppo_epoch(
+            policy,
+            cast("TrajectoryBuffer | MultiTrajectoryBuffer", _SingleBatchBuffer()),
+            ppo_epochs=1,
+            minibatch_size=4,
+            seq_len=2,
+        )
+
+
+def test_ppo_epoch_sequence_minibatch_works_without_hidden_fields() -> None:
+    policy = CognitiveMambaPolicy(embedding_dim=128)
+    learner = PpoLearner(learning_rate=1e-3)
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+
+    for _ in range(2):
+        buffer.append_batch(
+            observations=torch.randn(2, 3, 128, 24),
+            actions=torch.randn(2, 4),
+            log_probs=torch.randn(2),
+            values=torch.randn(2),
+            rewards=torch.randn(2),
+            dones=torch.zeros(2, dtype=torch.bool),
+            truncateds=torch.zeros(2, dtype=torch.bool),
+            aux_tensors=torch.randn(2, 3),
+        )
+
+    buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
+
+    metrics = learner.train_ppo_epoch(
+        policy,
+        buffer,
         ppo_epochs=1,
         minibatch_size=4,
         seq_len=2,

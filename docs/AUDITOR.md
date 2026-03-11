@@ -73,6 +73,14 @@ The auditor layer must obey strict throughput rules:
 Dashboard heartbeat republishing from the trainer is allowed only as a coarse,
 diagnostic convenience during optimizer windows.
 
+Current canonical default:
+
+- actor `0` receives a passive live observation stream at a low but visibly live
+  cadence of about `10 Hz`
+- optimizer-window heartbeats reuse that same cadence so the dashboard does not
+  appear frozen between rollout and update phases
+- the stream remains droppable and must never backpressure the trainer
+
 ## 7. Recorder And Replay Surfaces
 
 The recorder and rewinder remain architecturally important because they decouple
@@ -99,14 +107,42 @@ current implementation but are worth preserving as explicit design direction.
 
 ### 8.1 Dataset Auditor Through The Real Runtime
 
-Strong adopted direction:
+The first runtime-backed dataset-auditor surface is now a passive CLI
+orchestrator:
 
-- validate compiled scenes through the same mathematical runtime used for
-  training
-- avoid geometry-export surrogates where possible
-- prefer a virtual pinhole or similar runtime-native render for QA
+- `uv run navi-auditor dataset-audit --json`
+- shells out at the CLI boundary to `navi-environment check-sdfdag --json`
+  and `bench-sdfdag --json`
+- validates promoted compiled assets through the same canonical runtime used by
+  training without importing the environment service package into auditor code
+- emits one merged parseable summary suitable for qualification artifacts
 
-### 8.2 Richer Spatial Diagnostics
+This is intentionally a first QA seam, not the full end-state visual dataset
+auditor. Runtime-native pinhole or richer render-based QA can build on top of
+this surface later without reopening geometry-export surrogates as the primary
+proof path.
+
+Current proof status:
+
+- unit proof covers merged JSON success, preflight-failure short-circuit, and
+  explicit asset override behavior
+- integration smoke proof covers live `dataset-audit --json` execution against
+  the promoted corpus when the compiled runtime is available
+
+### 8.2 Passive Attach Proof
+
+The first headless dashboard-attach proof surface is now:
+
+- `uv run navi-auditor dashboard-attach-check --actor-sub tcp://localhost:5557 --json`
+- subscribes passively to the same actor-visible topics the dashboard consumes
+- proves observer-side attach readiness without opening a GUI or environment
+  control socket
+- works both against live training telemetry and replay PUB streams
+
+This keeps Phase 5 qualification observer-only while still proving that the
+dashboard surface can see canonical traffic when it exists.
+
+### 8.3 Richer Spatial Diagnostics
 
 Reasonable roadmap surfaces include:
 
@@ -118,7 +154,20 @@ Reasonable roadmap surfaces include:
 
 These should remain passive and optional.
 
-## 9. Non-Goals
+## 9. Optional Web Surfaces
+
+Browser-facing dashboards or dataset-QA pages are allowed only as observer-side
+proxy layers.
+
+Rules:
+
+- the canonical observer ingestion surface remains ZMQ-based
+- any WebSocket or HTTP streaming layer sits behind an observer-side proxy
+- no browser transport may be treated as part of the training hot path
+- web-facing surfaces must not widen the canonical wire contract or become a
+  required dependency for production training
+
+## 10. Non-Goals
 
 The auditor layer should not:
 
@@ -127,7 +176,7 @@ The auditor layer should not:
 - define training-time synchronization barriers
 - replace benchmark and verification surfaces with visual inspection alone
 
-## 10. Related Docs
+## 11. Related Docs
 
 - `docs/ARCHITECTURE.md`
 - `docs/DATAFLOW.md`

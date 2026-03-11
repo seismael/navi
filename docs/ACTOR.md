@@ -64,6 +64,7 @@ By default, canonical training:
 
 - discovers the full available corpus
 - prepares or reuses compiled `.gmdag` assets
+- uses the canonical `256x48` observation contract
 - runs continuously until explicitly stopped or bounded by user override
 
 ## 4. Canonical Training Surface
@@ -74,6 +75,8 @@ It means:
 - direct in-process stepping of `SdfDagBackend`
 - batched observation and action flow
 - tensor-native preference when runtime seams are available
+- preallocated batched rollout storage on the active device when the canonical trainer has a fixed rollout horizon
+- masked batched hidden-state, auxiliary-state, and episode bookkeeping instead of per-actor Python state in the rollout hot path
 - one production rollout/update loop
 
 Alternate training architectures are intentionally not preserved as equal modes.
@@ -100,6 +103,10 @@ shape `(B, 3, Az, El)`:
 - channel `2`: valid mask
 
 This is the actor's true runtime input for the hot path.
+
+Canonical default resolution for production training, benchmarks, wrappers, and
+diagnostic entrypoints is `Az=256`, `El=48`. Lower-resolution defaults are not
+part of the active production surface.
 
 ### 5.3 Action Boundary
 
@@ -178,9 +185,38 @@ Architecturally important rules:
 - capacity enforcement must stay amortized
 - full rebuilds on every post-capacity insert are not acceptable on the
   canonical training path
+- when the same rollout embedding batch is both queried and inserted in one
+  trainer tick, normalization must be computed once and reused across both
+  memory operations
+- when sparse step telemetry is enabled, action and done mirrors should be
+  batch-copied once for the selected telemetry tick rather than extracted via
+  per-actor device synchronization
 
 This subsystem is now part of the performance conversation, not just the
 behavior conversation.
+
+## 9.1 Rollout Storage Direction
+
+The current production direction for trainer-side throughput is:
+
+- keep rollout observations, actions, values, rewards, dones, and auxiliary tensors in reusable batched device storage
+- batch hidden-state carry and reset with done masks
+- reserve host extraction for sparse telemetry, checkpoints, and passive observation publication only
+- when completed episodes must be published, actor id, return, and length should be batch-copied once for the done set rather than mirrored through fragmented per-field host transfers
+- keep aggregate reward accounting on-device across rollout ticks and materialize it on the host only when producing final training metrics
+- when PPO update summaries are needed, learner loss metrics should be materialized through one packed epoch-end host copy rather than repeated scalar extraction calls
+- keep PPO update attribution on the canonical learner path with explicit sub-stage means for minibatch prep, policy evaluation, backward, gradient clip, optimizer step, and RND step
+- when `seq_len > 0`, canonical PPO minibatches must already carry sequence-native observation, action, and auxiliary views rather than asking the learner to rebuild them from flat tensors
+- canonical rollout buffers must normalize advantages once per finalized rollout and reuse that cached tensor across PPO epochs rather than re-normalizing during each sampling pass or leaving the batched path raw
+- the active `Mamba2TemporalCore` ignores hidden state, so canonical PPO learner minibatch prep must not rebuild or copy hidden-state batches on the update path
+- the active `Mamba2TemporalCore` also ignores rollout hidden state, so the canonical trainer must not carry, reset, store, or bootstrap `hidden_batch` tensors on the rollout/update hot path
+- because the canonical temporal core does not consume hidden starts, batched rollout buffers and minibatches must not allocate hidden-state slabs or emit hidden-state minibatch fields on the canonical PPO path
+- when `MultiTrajectoryBuffer` is running in its canonical batched mode (`capacity` set), it must not also allocate per-actor fallback `TrajectoryBuffer` wrappers; the production rollout store is the batched slab itself
+- completed-episode host extraction must happen only for actors whose sparse episode telemetry will actually be published; canonical reset bookkeeping for done actors stays on-device
+- initial tensor resets and live runtime steps must materialize `DistanceMatrix` observations only for actors whose dashboard observation stream will actually publish; when observation streaming is disabled, canonical training must request no published observations at all
+
+This preserves the sacred actor topology while removing avoidable Python
+orchestration above the already-batched CUDA environment step.
 
 ## 10. Temporal Core
 
@@ -242,6 +278,8 @@ Current production traits:
 - selective publication only for actors that need passive observation
 - inline PPO updates at rollout boundaries
 - coarse dashboard heartbeat publication during optimizer windows
+- configurable passive dashboard observation cadence with a canonical default of
+  about `10 Hz` for the selected actor
 
 The previous async optimizer-worker design is no longer the production runtime.
 
@@ -281,6 +319,12 @@ The actor publishes coarse telemetry for:
 - reward summaries
 - throughput and timing summaries
 - dashboard heartbeats when optimizer windows would otherwise starve the UI
+
+Canonical observer rule:
+
+- passive matrix publication stays low-volume and actor-filtered
+- the default cadence is intentionally much lower than UI render cadence but
+  high enough to feel live during training inspection
 
 Important rule:
 

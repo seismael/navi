@@ -79,7 +79,12 @@ class EpisodicMemory:
 
     def add_batch_tensor(self, embeddings: Tensor) -> None:
         """Add normalized embeddings on the caller's device."""
-        vecs = self._normalize_tensor(embeddings)
+        vecs = self.normalize_batch_tensor(embeddings)
+        self.add_normalized_batch_tensor(vecs)
+
+    def add_normalized_batch_tensor(self, normalized_embeddings: Tensor) -> None:
+        """Add a pre-normalized embedding batch without recomputing norms."""
+        vecs = self._coerce_prepared_tensor(normalized_embeddings)
         if vecs.numel() == 0:
             return
 
@@ -109,13 +114,29 @@ class EpisodicMemory:
             similarities: best cosine similarity per query.
             is_loops: thresholded loop-detection flags.
         """
-        similarities, indices = self._query_batch_indices(embeddings)
+        vecs = self.normalize_batch_tensor(embeddings)
+        similarities, indices = self._query_prepared_batch_indices(vecs)
         valid = indices >= 0
         loops = valid & (similarities >= self.similarity_threshold)
         return similarities, loops
 
+    def query_normalized_batch_tensor(self, normalized_embeddings: Tensor) -> tuple[Tensor, Tensor]:
+        """Query a pre-normalized embedding batch without recomputing norms."""
+        similarities, indices = self._query_prepared_batch_indices(normalized_embeddings)
+        valid = indices >= 0
+        loops = valid & (similarities >= self.similarity_threshold)
+        return similarities, loops
+
+    def normalize_batch_tensor(self, embeddings: Tensor) -> Tensor:
+        """Normalize one embedding batch for reuse across query and add."""
+        return self._normalize_tensor(embeddings)
+
     def _query_batch_indices(self, embeddings: Tensor) -> tuple[Tensor, Tensor]:
-        vecs = self._normalize_tensor(embeddings)
+        vecs = self.normalize_batch_tensor(embeddings)
+        return self._query_prepared_batch_indices(vecs)
+
+    def _query_prepared_batch_indices(self, normalized_embeddings: Tensor) -> tuple[Tensor, Tensor]:
+        vecs = self._coerce_prepared_tensor(normalized_embeddings)
         if vecs.numel() == 0:
             empty = torch.zeros((0,), dtype=torch.float32, device=vecs.device)
             return empty, empty.to(dtype=torch.long)
@@ -156,6 +177,16 @@ class EpisodicMemory:
             )
         norms = torch.linalg.norm(vecs, dim=1, keepdim=True)
         return vecs / torch.clamp(norms, min=1e-8)
+
+    def _coerce_prepared_tensor(self, normalized_embeddings: Tensor) -> Tensor:
+        vecs = normalized_embeddings.detach().to(dtype=torch.float32)
+        if vecs.ndim == 1:
+            vecs = vecs.unsqueeze(0)
+        if vecs.shape[-1] != self.embedding_dim:
+            raise ValueError(
+                f"Expected embedding dim {self.embedding_dim}, got {vecs.shape[-1]}"
+            )
+        return vecs
 
     def _ensure_storage(self, device: torch.device) -> Tensor:
         if self._storage is None:

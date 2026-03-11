@@ -199,8 +199,8 @@ def train(
     gmdag_file: str = typer.Option("", help="Single compiled .gmdag cache for canonical sdfdag training"),
     compile_resolution: int = typer.Option(512, help="Compiler voxel resolution for source-scene corpus preparation"),
     force_corpus_refresh: bool = typer.Option(False, help="Force overwrite/recompile of the prepared training corpus"),
-    azimuth_bins: int = typer.Option(128, help="Expected azimuth resolution"),
-    elevation_bins: int = typer.Option(24, help="Expected elevation resolution"),
+    azimuth_bins: int = typer.Option(256, help="Expected azimuth resolution"),
+    elevation_bins: int = typer.Option(48, help="Expected elevation resolution"),
     embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
     learning_rate: float = typer.Option(3e-4, help="Adam learning rate"),
     learning_rate_final: float = typer.Option(3e-5, help="Final annealed learning rate"),
@@ -248,6 +248,11 @@ def train(
     emit_observation_stream: bool = typer.Option(
         True,
         help="Emit low-volume DistanceMatrix frames for the dashboard.",
+    ),
+    dashboard_observation_hz: float = typer.Option(
+        10.0,
+        min=1.0,
+        help="Target passive dashboard observation cadence in Hz for the selected actor.",
     ),
     emit_training_telemetry: bool = typer.Option(
         True,
@@ -300,6 +305,7 @@ def train(
         telemetry_actor_id=telemetry_actor_id,
         telemetry_all_actors=telemetry_all_actors,
         emit_observation_stream=emit_observation_stream,
+        dashboard_observation_hz=dashboard_observation_hz,
         emit_training_telemetry=emit_training_telemetry,
         emit_perf_telemetry=emit_perf_telemetry,
     )

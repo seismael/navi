@@ -1,8 +1,9 @@
-"""Typer CLI for the Environment service."""
+﻿"""Typer CLI for the Environment service."""
 
 from __future__ import annotations
 
 import json
+import statistics
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,7 +13,7 @@ import typer
 
 from navi_contracts import Action, setup_logging
 from navi_environment.config import EnvironmentConfig
-from navi_environment.integration.corpus import prepare_training_scene_corpus
+from navi_environment.integration.corpus import prepare_training_scene_corpus, validate_compiled_scene_corpus
 from navi_environment.integration.voxel_dag import compile_gmdag_world, probe_sdfdag_runtime
 from navi_environment.server import EnvironmentServer
 
@@ -25,6 +26,7 @@ app = typer.Typer(
     name="navi-environment",
     help="Layer 1: The Environment",
 )
+
 
 def _default_gmdag_option() -> str:
     """Expose the first discovered compiled corpus asset when available."""
@@ -74,6 +76,103 @@ def _benchmark_actions(*, actor_count: int, step_id: int) -> tuple[Action, ...]:
     return tuple(actions)
 
 
+def _run_bench_iteration(
+    *,
+    config: EnvironmentConfig,
+    actors: int,
+    steps: int,
+    warmup_steps: int,
+) -> dict[str, float | int]:
+    backend = _build_backend(config)
+    try:
+        for actor_id in range(actors):
+            backend.reset(episode_id=0, actor_id=actor_id)
+
+        for step_id in range(warmup_steps):
+            backend.batch_step(_benchmark_actions(actor_count=actors, step_id=step_id), step_id)
+
+        started_at = time.perf_counter()
+        for step_id in range(warmup_steps, warmup_steps + steps):
+            backend.batch_step(_benchmark_actions(actor_count=actors, step_id=step_id), step_id)
+        elapsed = time.perf_counter() - started_at
+        snapshot = backend.perf_snapshot()
+    finally:
+        backend.close()
+
+    if snapshot is None:
+        typer.echo("Error: selected backend does not expose perf snapshots", err=True)
+        raise typer.Exit(code=1)
+
+    expected_total_batches = warmup_steps + steps
+    expected_total_actor_steps = expected_total_batches * actors
+    if snapshot.total_batches < expected_total_batches or snapshot.total_actor_steps < expected_total_actor_steps:
+        typer.echo(
+            "Error: backend perf snapshot is inconsistent with the requested benchmark profile. "
+            f"Expected at least batches={expected_total_batches}, actor_steps={expected_total_actor_steps}; "
+            f"got batches={snapshot.total_batches}, actor_steps={snapshot.total_actor_steps}.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    total_actor_steps = steps * actors
+    measured_sps = total_actor_steps / elapsed if elapsed > 0.0 else 0.0
+    return {
+        "measured_sps": measured_sps,
+        "rolling_sps": snapshot.sps,
+        "last_batch_ms": snapshot.last_batch_step_ms,
+        "ema_batch_ms": snapshot.ema_batch_step_ms,
+        "avg_batch_ms": snapshot.avg_batch_step_ms,
+        "avg_actor_ms": snapshot.avg_actor_step_ms,
+        "total_batches": snapshot.total_batches,
+        "total_actor_steps": snapshot.total_actor_steps,
+        "expected_total_batches": expected_total_batches,
+        "expected_total_actor_steps": expected_total_actor_steps,
+    }
+
+
+def _aggregate_bench_runs(runs: list[dict[str, float | int]]) -> dict[str, float | int | str | list[dict[str, float | int]]]:
+    if not runs:
+        raise RuntimeError("bench-sdfdag requires at least one run")
+
+    if len(runs) == 1:
+        return {
+            **runs[0],
+            "aggregation": "single",
+            "repeats": 1,
+            "per_run": [dict(runs[0], run_index=1)],
+        }
+
+    measured_sps_values = [float(run["measured_sps"]) for run in runs]
+    rolling_sps_values = [float(run["rolling_sps"]) for run in runs]
+    last_batch_ms_values = [float(run["last_batch_ms"]) for run in runs]
+    ema_batch_ms_values = [float(run["ema_batch_ms"]) for run in runs]
+    avg_batch_ms_values = [float(run["avg_batch_ms"]) for run in runs]
+    avg_actor_ms_values = [float(run["avg_actor_ms"]) for run in runs]
+    total_batches_values = [int(run["total_batches"]) for run in runs]
+    total_actor_steps_values = [int(run["total_actor_steps"]) for run in runs]
+    expected_total_batches_values = [int(run["expected_total_batches"]) for run in runs]
+    expected_total_actor_steps_values = [int(run["expected_total_actor_steps"]) for run in runs]
+
+    return {
+        "aggregation": "median",
+        "repeats": len(runs),
+        "measured_sps": statistics.median(measured_sps_values),
+        "measured_sps_mean": statistics.fmean(measured_sps_values),
+        "measured_sps_min": min(measured_sps_values),
+        "measured_sps_max": max(measured_sps_values),
+        "rolling_sps": statistics.median(rolling_sps_values),
+        "last_batch_ms": statistics.median(last_batch_ms_values),
+        "ema_batch_ms": statistics.median(ema_batch_ms_values),
+        "avg_batch_ms": statistics.median(avg_batch_ms_values),
+        "avg_actor_ms": statistics.median(avg_actor_ms_values),
+        "total_batches": int(statistics.median(total_batches_values)),
+        "total_actor_steps": int(statistics.median(total_actor_steps_values)),
+        "expected_total_batches": int(statistics.median(expected_total_batches_values)),
+        "expected_total_actor_steps": int(statistics.median(expected_total_actor_steps_values)),
+        "per_run": [dict(run, run_index=index + 1) for index, run in enumerate(runs)],
+    }
+
+
 @app.command()
 def serve(
     pub: str = typer.Option(None, help="ZMQ PUB bind address (DistanceMatrix v2)"),
@@ -116,7 +215,7 @@ def serve(
     server = EnvironmentServer(config=config, backend=sim_backend)
 
     typer.echo(
-        f"Environment starting — backend={config.backend}, mode={config.mode}, "
+        f"Environment starting - backend={config.backend}, mode={config.mode}, "
         f"actors={config.n_actors}, "
         f"pub={config.pub_address}, rep={config.rep_address}, "
         f"gmdag={config.gmdag_file}",
@@ -143,7 +242,7 @@ def compile_gmdag(
         resolution=resolution,
     )
     typer.echo(
-        "Compiled gmdag — "
+        "Compiled gmdag - "
         f"source={result.source_path}, "
         f"output={result.output_path}, "
         f"resolution={result.resolution}, "
@@ -208,9 +307,7 @@ def prepare_corpus(
     typer.echo(f"source_manifest={prepared.source_manifest_path}")
     typer.echo(f"compiled_manifest={prepared.compiled_manifest_path}")
     for entry in prepared.scene_entries[:10]:
-        typer.echo(
-            f"scene={entry.scene_name} dataset={entry.dataset} gmdag={entry.compiled_path}"
-        )
+        typer.echo(f"scene={entry.scene_name} dataset={entry.dataset} gmdag={entry.compiled_path}")
     if len(prepared.scene_entries) > 10:
         typer.echo(f"... and {len(prepared.scene_entries) - 10} more")
 
@@ -218,10 +315,59 @@ def prepare_corpus(
 @app.command("check-sdfdag")
 def check_sdfdag(
     gmdag_file: str = typer.Option("", help=".gmdag asset to validate alongside runtime readiness"),
+    gmdag_root: str = typer.Option("", help="Compiled corpus root to validate when checking the promoted corpus"),
+    manifest: str = typer.Option("", help="Compiled corpus manifest to validate against live promoted assets"),
+    expected_resolution: int = typer.Option(512, help="Expected canonical compiled resolution for corpus validation"),
+    json_output: bool = typer.Option(False, "--json", help="Emit a JSON validation summary instead of text"),
 ) -> None:
     """Validate the canonical SDF/DAG compiler/runtime path and asset metadata."""
     setup_logging("navi_environment_sdfdag_check")
     status = probe_sdfdag_runtime(Path(gmdag_file) if gmdag_file else None)
+
+    corpus_validation = None
+    if not gmdag_file:
+        corpus_validation = validate_compiled_scene_corpus(
+            Path(gmdag_root) if gmdag_root else None,
+            manifest_path=Path(manifest) if manifest else None,
+            expected_resolution=expected_resolution,
+        )
+
+    issues = list(status.issues)
+    if corpus_validation is not None:
+        issues.extend(corpus_validation.issues)
+
+    if json_output:
+        summary = {
+            "profile": "check-sdfdag",
+            "gmdag_file": str(Path(gmdag_file).expanduser()) if gmdag_file else "",
+            "expected_resolution": expected_resolution,
+            "runtime": {
+                "compiler_ready": status.compiler_ready,
+                "torch_ready": status.torch_ready,
+                "cuda_ready": status.cuda_ready,
+                "torch_sdf_ready": status.torch_sdf_ready,
+                "asset_loaded": status.asset_loaded,
+                "compiler_path": str(status.compiler_path) if status.compiler_path is not None else None,
+                "gmdag_path": str(status.gmdag_path) if status.gmdag_path is not None else None,
+                "resolution": status.resolution,
+                "node_count": status.node_count,
+                "bbox_min": list(status.bbox_min) if status.bbox_min is not None else None,
+                "bbox_max": list(status.bbox_max) if status.bbox_max is not None else None,
+            },
+            "corpus": None if corpus_validation is None else {
+                "root": str(corpus_validation.gmdag_root),
+                "manifest": str(corpus_validation.manifest_path),
+                "manifest_present": corpus_validation.manifest_present,
+                "scene_count": corpus_validation.scene_count,
+                "compiled_resolutions": list(corpus_validation.compiled_resolutions),
+            },
+            "issues": issues,
+            "ok": not issues,
+        }
+        typer.echo(json.dumps(summary, indent=2))
+        if issues:
+            raise typer.Exit(code=1)
+        return
 
     typer.echo(
         "SDF/DAG runtime - "
@@ -243,8 +389,17 @@ def check_sdfdag(
             f"bbox_min={status.bbox_min}, "
             f"bbox_max={status.bbox_max}",
         )
-    if status.issues:
-        for issue in status.issues:
+    if corpus_validation is not None:
+        typer.echo(
+            "corpus - "
+            f"root={corpus_validation.gmdag_root}, "
+            f"manifest={corpus_validation.manifest_path}, "
+            f"manifest_present={corpus_validation.manifest_present}, "
+            f"scenes={corpus_validation.scene_count}, "
+            f"compiled_resolutions={list(corpus_validation.compiled_resolutions)}",
+        )
+    if issues:
+        for issue in issues:
             typer.echo(f"issue={issue}", err=True)
         raise typer.Exit(code=1)
 
@@ -255,10 +410,12 @@ def bench_sdfdag(
     actors: int = typer.Option(4, min=1, help="Number of actors to benchmark in one batch"),
     steps: int = typer.Option(200, min=1, help="Measured batch steps after warmup"),
     warmup_steps: int = typer.Option(25, min=0, help="Unmeasured warmup batch steps"),
+    repeats: int = typer.Option(1, min=1, help="Number of independent benchmark runs to aggregate by median"),
     azimuth_bins: int = typer.Option(256, help="Distance-matrix azimuth bins"),
     elevation_bins: int = typer.Option(48, help="Distance-matrix elevation bins"),
     max_distance: float = typer.Option(30.0, help="Distance normalization range"),
     sdf_max_steps: int = typer.Option(256, help="Maximum sphere-tracing iterations per ray"),
+    json_output: bool = typer.Option(False, "--json", help="Emit a JSON benchmark summary instead of text"),
 ) -> None:
     """Benchmark the canonical batched SDF/DAG environment path."""
     setup_logging("navi_environment_sdfdag_bench")
@@ -277,42 +434,56 @@ def bench_sdfdag(
         max_distance=max_distance,
         n_actors=actors,
     )
-    backend = _build_backend(config)
-    try:
-        for actor_id in range(actors):
-            backend.reset(episode_id=0, actor_id=actor_id)
+    runs = [
+        _run_bench_iteration(
+            config=config,
+            actors=actors,
+            steps=steps,
+            warmup_steps=warmup_steps,
+        )
+        for _ in range(repeats)
+    ]
+    aggregated = _aggregate_bench_runs(runs)
+    summary = {
+        "profile": "bench-sdfdag",
+        "gmdag_file": str(Path(gmdag_file).expanduser()),
+        "actors": actors,
+        "steps": steps,
+        "warmup_steps": warmup_steps,
+        "repeats": repeats,
+        "azimuth_bins": azimuth_bins,
+        "elevation_bins": elevation_bins,
+        "max_distance": max_distance,
+        "sdf_max_steps": sdf_max_steps,
+        **aggregated,
+    }
+    if json_output:
+        typer.echo(json.dumps(summary, indent=2))
+        return
 
-        for step_id in range(warmup_steps):
-            backend.batch_step(_benchmark_actions(actor_count=actors, step_id=step_id), step_id)
-
-        started_at = time.perf_counter()
-        for step_id in range(warmup_steps, warmup_steps + steps):
-            backend.batch_step(_benchmark_actions(actor_count=actors, step_id=step_id), step_id)
-        elapsed = time.perf_counter() - started_at
-        snapshot = backend.perf_snapshot()
-    finally:
-        backend.close()
-
-    if snapshot is None:
-        typer.echo("Error: selected backend does not expose perf snapshots", err=True)
-        raise typer.Exit(code=1)
-
-    total_actor_steps = steps * actors
-    measured_sps = total_actor_steps / elapsed if elapsed > 0.0 else 0.0
     typer.echo(
         "bench-sdfdag - "
         f"actors={actors}, "
         f"steps={steps}, "
         f"warmup_steps={warmup_steps}, "
-        f"measured_sps={measured_sps:.2f}, "
-        f"rolling_sps={snapshot.sps:.2f}, "
-        f"last_batch_ms={snapshot.last_batch_step_ms:.2f}, "
-        f"ema_batch_ms={snapshot.ema_batch_step_ms:.2f}, "
-        f"avg_batch_ms={snapshot.avg_batch_step_ms:.2f}, "
-        f"avg_actor_ms={snapshot.avg_actor_step_ms:.2f}, "
-        f"total_batches={snapshot.total_batches}, "
-        f"total_actor_steps={snapshot.total_actor_steps}"
+        f"repeats={repeats}, "
+        f"aggregation={summary['aggregation']}, "
+        f"measured_sps={float(summary['measured_sps']):.2f}, "
+        f"rolling_sps={float(summary['rolling_sps']):.2f}, "
+        f"last_batch_ms={float(summary['last_batch_ms']):.2f}, "
+        f"ema_batch_ms={float(summary['ema_batch_ms']):.2f}, "
+        f"avg_batch_ms={float(summary['avg_batch_ms']):.2f}, "
+        f"avg_actor_ms={float(summary['avg_actor_ms']):.2f}, "
+        f"total_batches={int(summary['total_batches'])}, "
+        f"total_actor_steps={int(summary['total_actor_steps'])}"
     )
+    if repeats > 1:
+        typer.echo(
+            "bench-sdfdag-runs - "
+            f"min_sps={float(summary['measured_sps_min']):.2f}, "
+            f"max_sps={float(summary['measured_sps_max']):.2f}, "
+            f"mean_sps={float(summary['measured_sps_mean']):.2f}"
+        )
 
 
 if __name__ == "__main__":

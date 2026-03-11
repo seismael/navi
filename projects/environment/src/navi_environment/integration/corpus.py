@@ -12,6 +12,7 @@ from typing import Any
 from navi_environment.integration.voxel_dag import compile_gmdag_world, load_gmdag_asset
 
 __all__ = [
+    "CompiledCorpusValidation",
     "CompiledSceneEntry",
     "PreparedSceneCorpus",
     "SceneSourceEntry",
@@ -22,6 +23,7 @@ __all__ = [
     "prepare_training_scene_corpus",
     "resolve_compiled_scene_query",
     "resolve_scene_query",
+    "validate_compiled_scene_corpus",
 ]
 
 _SUPPORTED_SOURCE_SUFFIXES = {".glb", ".obj", ".ply", ".stl"}
@@ -57,6 +59,18 @@ class PreparedSceneCorpus:
     source_manifest_path: Path
     compiled_manifest_path: Path
     scene_entries: tuple[CompiledSceneEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledCorpusValidation:
+    """Validation status for the promoted compiled corpus and manifest."""
+
+    gmdag_root: Path
+    manifest_path: Path
+    manifest_present: bool
+    scene_count: int
+    compiled_resolutions: tuple[int, ...]
+    issues: tuple[str, ...]
 
 
 def _repo_root() -> Path:
@@ -586,4 +600,144 @@ def prepare_training_scene_corpus(
         source_manifest_path=resolved_source_manifest,
         compiled_manifest_path=resolved_compiled_manifest,
         scene_entries=tuple(compiled_entries),
+    )
+
+
+def validate_compiled_scene_corpus(
+    gmdag_root: Path | None = None,
+    *,
+    manifest_path: Path | None = None,
+    expected_resolution: int | None = 512,
+) -> CompiledCorpusValidation:
+    """Validate the promoted compiled corpus manifest against live `.gmdag` assets."""
+    resolved_root = (gmdag_root or find_default_gmdag_corpus_root()).resolve()
+    resolved_manifest = (manifest_path.resolve() if manifest_path is not None else _default_compiled_manifest_path(resolved_root))
+
+    issues: list[str] = []
+    live_entries = _scan_compiled_scene_entries(resolved_root)
+    live_paths = {entry.compiled_path.resolve() for entry in live_entries}
+    compiled_resolutions: set[int] = set()
+
+    if not live_entries:
+        issues.append(f"No compiled .gmdag assets found under {resolved_root}")
+
+    manifest_present = resolved_manifest.exists()
+    if not manifest_present:
+        issues.append(f"Compiled manifest is missing: {resolved_manifest}")
+        return CompiledCorpusValidation(
+            gmdag_root=resolved_root,
+            manifest_path=resolved_manifest,
+            manifest_present=False,
+            scene_count=len(live_entries),
+            compiled_resolutions=(),
+            issues=tuple(issues),
+        )
+
+    try:
+        manifest_payload = json.loads(resolved_manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        issues.append(f"Invalid compiled manifest JSON in {resolved_manifest}: {exc}")
+        return CompiledCorpusValidation(
+            gmdag_root=resolved_root,
+            manifest_path=resolved_manifest,
+            manifest_present=True,
+            scene_count=len(live_entries),
+            compiled_resolutions=(),
+            issues=tuple(issues),
+        )
+
+    try:
+        manifest_entries = _load_compiled_manifest_entries(resolved_manifest)
+    except RuntimeError as exc:
+        issues.append(str(exc))
+        return CompiledCorpusValidation(
+            gmdag_root=resolved_root,
+            manifest_path=resolved_manifest,
+            manifest_present=True,
+            scene_count=len(live_entries),
+            compiled_resolutions=(),
+            issues=tuple(issues),
+        )
+
+    manifest_scene_count = manifest_payload.get("scene_count")
+    if manifest_scene_count is not None and int(manifest_scene_count) != len(manifest_entries):
+        issues.append(
+            "Compiled manifest scene_count mismatch: "
+            f"declares {manifest_scene_count}, enumerates {len(manifest_entries)} scene entries"
+        )
+
+    manifest_root = manifest_payload.get("gmdag_root")
+    if isinstance(manifest_root, str) and manifest_root:
+        resolved_manifest_root = Path(manifest_root).expanduser().resolve()
+        if resolved_manifest_root != resolved_root:
+            issues.append(
+                "Compiled manifest gmdag_root mismatch: "
+                f"declares {resolved_manifest_root}, expected {resolved_root}"
+            )
+
+    requested_resolution = manifest_payload.get("requested_resolution")
+    if expected_resolution is not None and requested_resolution is not None:
+        if int(requested_resolution) != int(expected_resolution):
+            issues.append(
+                "Compiled manifest requested_resolution mismatch: "
+                f"declares {requested_resolution}, expected {expected_resolution}"
+            )
+
+    manifest_paths: set[Path] = set()
+    for entry in manifest_entries:
+        compiled_path = entry.compiled_path.resolve()
+        if compiled_path in manifest_paths:
+            issues.append(f"Compiled manifest contains duplicate asset entry: {compiled_path}")
+            continue
+        manifest_paths.add(compiled_path)
+
+        if compiled_path.suffix.lower() != ".gmdag":
+            issues.append(f"Compiled manifest entry is not a .gmdag asset: {compiled_path}")
+            continue
+        if not compiled_path.exists():
+            issues.append(f"Compiled manifest points at a missing asset: {compiled_path}")
+            continue
+        if resolved_root != compiled_path and resolved_root not in compiled_path.parents:
+            issues.append(
+                f"Compiled manifest points outside the promoted corpus root {resolved_root}: {compiled_path}"
+            )
+            continue
+
+        try:
+            asset = load_gmdag_asset(compiled_path)
+        except (FileNotFoundError, RuntimeError) as exc:
+            issues.append(str(exc))
+            continue
+
+        compiled_resolutions.add(int(asset.resolution))
+        if expected_resolution is not None and int(asset.resolution) != int(expected_resolution):
+            issues.append(
+                f"Compiled asset resolution mismatch for {compiled_path}: expected {expected_resolution}, got {asset.resolution}"
+            )
+
+    missing_from_manifest = sorted(live_paths - manifest_paths)
+    for path in missing_from_manifest:
+        issues.append(f"Promoted compiled asset is missing from manifest: {path}")
+
+    stale_manifest_paths = sorted(manifest_paths - live_paths)
+    for path in stale_manifest_paths:
+        issues.append(f"Compiled manifest references a non-promoted asset: {path}")
+
+    manifest_compiled_resolutions = manifest_payload.get("compiled_resolutions")
+    if manifest_compiled_resolutions is not None:
+        manifest_resolution_tuple = tuple(sorted(int(value) for value in manifest_compiled_resolutions))
+        live_resolution_tuple = tuple(sorted(compiled_resolutions))
+        if manifest_resolution_tuple != live_resolution_tuple:
+            issues.append(
+                "Compiled manifest compiled_resolutions mismatch: "
+                f"declares {list(manifest_resolution_tuple)}, live corpus uses {list(live_resolution_tuple)}"
+            )
+
+    return CompiledCorpusValidation(
+        gmdag_root=resolved_root,
+        manifest_path=resolved_manifest,
+        manifest_present=True,
+        scene_count=len(live_entries),
+        compiled_resolutions=tuple(sorted(compiled_resolutions)),
+        issues=tuple(issues),
     )

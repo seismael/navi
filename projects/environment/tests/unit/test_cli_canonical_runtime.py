@@ -7,6 +7,7 @@ from typing import cast
 
 import pytest
 import typer
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from navi_environment.cli import _build_backend, app
@@ -31,6 +32,19 @@ def test_build_backend_rejects_unknown_backend() -> None:
     assert exc_info.value.exit_code == 1
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("max_distance", 0.0),
+        ("sdf_max_steps", 0),
+        ("gmdag_resolution", 0),
+    ],
+)
+def test_environment_config_rejects_nonpositive_runtime_parameters(field_name: str, value: float | int) -> None:
+    with pytest.raises(ValidationError):
+        EnvironmentConfig.model_validate({field_name: value})
+
+
 def test_serve_defaults_to_canonical_sdfdag(monkeypatch: pytest.MonkeyPatch) -> None:
     """The serve command should launch on sdfdag without extra flags."""
     captured: dict[str, object] = {}
@@ -43,13 +57,14 @@ def test_serve_defaults_to_canonical_sdfdag(monkeypatch: pytest.MonkeyPatch) -> 
         def run(self) -> None:
             captured["ran"] = True
 
+    monkeypatch.setattr("navi_environment.cli.setup_logging", lambda *_args: None)
     monkeypatch.setattr("navi_environment.cli._build_backend", lambda config: object())
     monkeypatch.setattr("navi_environment.cli.EnvironmentServer", FakeServer)
 
     result = _RUNNER.invoke(app, ["serve"])
 
     assert result.exit_code == 0
-    config = cast(EnvironmentConfig, captured["config"])
+    config = cast("EnvironmentConfig", captured["config"])
     assert config.backend == "sdfdag"
     assert isinstance(Path(config.gmdag_file).name, str)
     assert captured["ran"] is True

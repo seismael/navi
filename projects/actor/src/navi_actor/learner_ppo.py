@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -27,6 +28,17 @@ def _prepare_minibatch_tensor(tensor: Tensor, device: torch.device) -> Tensor:
     return tensor.to(device=device, non_blocking=True)
 
 
+def _uses_sequence_minibatch_surface(*, seq_len: int, sequence_observations: Tensor | None, sequence_actions: Tensor | None) -> bool:
+    """Canonical PPO BPTT path requires sequence-native minibatch views."""
+    if seq_len <= 0:
+        return False
+    if sequence_observations is None or sequence_actions is None:
+        raise RuntimeError(
+            "Canonical PPO sequence training requires sequence-native minibatches when seq_len > 0.",
+        )
+    return True
+
+
 @dataclass(frozen=True)
 class PpoMetrics:
     """Metrics from a single PPO training epoch."""
@@ -40,6 +52,41 @@ class PpoMetrics:
     rnd_loss: float
     learning_rate: float
     rnd_learning_rate: float
+    minibatch_prep_ms: float = 0.0
+    policy_eval_ms: float = 0.0
+    backward_ms: float = 0.0
+    grad_clip_ms: float = 0.0
+    optimizer_step_ms: float = 0.0
+    rnd_step_ms: float = 0.0
+
+
+def _materialize_metric_means(
+    *,
+    running_policy_loss: Tensor,
+    running_value_loss: Tensor,
+    running_entropy: Tensor,
+    running_kl: Tensor,
+    running_clip: Tensor,
+    running_total: Tensor,
+    running_rnd_loss: Tensor,
+    n_updates: int,
+) -> Tensor:
+    """Pack PPO epoch mean metrics into one host transfer for logging and return values."""
+    if n_updates <= 0:
+        return torch.zeros((7,), dtype=torch.float32, device="cpu")
+    metric_tensor = torch.stack(
+        (
+            running_policy_loss,
+            running_value_loss,
+            running_entropy,
+            running_kl,
+            running_clip,
+            running_total,
+            running_rnd_loss,
+        ),
+        dim=0,
+    ) / float(n_updates)
+    return metric_tensor.detach().to(device="cpu", dtype=torch.float32)
 
 
 class PpoLearner:
@@ -144,42 +191,42 @@ class PpoLearner:
         running_rnd_loss = torch.zeros((), device=metric_device)
         zero_metric = torch.zeros((), device=metric_device)
         n_updates = 0
+        prep_ms_acc = 0.0
+        eval_ms_acc = 0.0
+        backward_ms_acc = 0.0
+        grad_clip_ms_acc = 0.0
+        optimizer_step_ms_acc = 0.0
+        rnd_step_ms_acc = 0.0
 
         for _epoch in range(ppo_epochs):
             for mb in buffer.sample_minibatches(minibatch_size, seq_len):
+                t_prep_start = time.perf_counter()
                 old_lp = _prepare_minibatch_tensor(mb.old_log_probs, device)
                 adv = _prepare_minibatch_tensor(mb.advantages, device)
                 ret = _prepare_minibatch_tensor(mb.returns, device)
                 old_vals = _prepare_minibatch_tensor(mb.old_values, device)
-                obs_seq_tensor = (
-                    _prepare_minibatch_tensor(mb.sequence_observations, device)
-                    if mb.sequence_observations is not None
-                    else None
+                use_sequence_path = _uses_sequence_minibatch_surface(
+                    seq_len=seq_len,
+                    sequence_observations=mb.sequence_observations,
+                    sequence_actions=mb.sequence_actions,
                 )
-                acts_seq_tensor = (
-                    _prepare_minibatch_tensor(mb.sequence_actions, device)
-                    if mb.sequence_actions is not None
-                    else None
-                )
-                aux_seq_tensor = (
-                    _prepare_minibatch_tensor(mb.sequence_aux_tensors, device)
-                    if mb.sequence_aux_tensors is not None
-                    else None
-                )
+                obs_seq_tensor = None
+                acts_seq_tensor = None
+                aux_seq_tensor = None
+                if use_sequence_path:
+                    obs_seq_tensor = _prepare_minibatch_tensor(mb.sequence_observations, device)
+                    acts_seq_tensor = _prepare_minibatch_tensor(mb.sequence_actions, device)
+                    if mb.sequence_aux_tensors is not None:
+                        aux_seq_tensor = _prepare_minibatch_tensor(mb.sequence_aux_tensors, device)
                 h0: Tensor | None = None
                 dones_mask: Tensor | None = None
-                if mb.hidden_batch is not None:
-                    h0 = _prepare_minibatch_tensor(mb.hidden_batch, device)
-                elif mb.hidden_states:
-                    first_h = next((h for h in mb.hidden_states if h is not None), None)
-                    if first_h is not None:
-                        stacked = [h if h is not None else torch.zeros_like(first_h) for h in mb.hidden_states]
-                        h0 = _prepare_minibatch_tensor(torch.cat(stacked, dim=1), device)
                 if mb.dones is not None:
                     dones_mask = _prepare_minibatch_tensor(mb.dones, device)
+                prep_ms_acc += (time.perf_counter() - t_prep_start) * 1000
 
                 # Forward pass
-                if obs_seq_tensor is not None and acts_seq_tensor is not None:
+                t_eval_start = time.perf_counter()
+                if use_sequence_path:
                     new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
                         obs_seq_tensor, acts_seq_tensor, hidden=h0, dones=dones_mask, aux_seq=aux_seq_tensor,
                     )
@@ -191,28 +238,8 @@ class PpoLearner:
                         if mb.aux_tensors is not None
                         else None
                     )
-
-                    if seq_len > 0 and obs.shape[0] >= seq_len:
-                        total = obs.shape[0]
-                        n_seqs = total // seq_len
-                        usable = n_seqs * seq_len
-                        obs_seq = obs[:usable].reshape(n_seqs, seq_len, *obs.shape[1:])
-                        acts_seq = acts[:usable].reshape(n_seqs, seq_len, -1)
-                        aux_seq = aux_tensor[:usable].reshape(n_seqs, seq_len, -1) if aux_tensor is not None else None
-
-                        new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
-                            obs_seq, acts_seq, hidden=h0, dones=dones_mask, aux_seq=aux_seq,
-                        )
-                        if usable < total:
-                            rem_lp, rem_v, rem_e, _, rem_z = policy.evaluate(
-                                obs[usable:], acts[usable:], aux_tensor=aux_tensor[usable:] if aux_tensor is not None else None
-                            )
-                            new_lp = torch.cat([new_lp, rem_lp])
-                            new_vals = torch.cat([new_vals, rem_v])
-                            ent = (ent * usable + rem_e * (total - usable)) / total
-                            z_mb = torch.cat([z_mb, rem_z])
-                    else:
-                        new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
+                    new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
+                eval_ms_acc += (time.perf_counter() - t_eval_start) * 1000
 
                 # Squeeze outputs from policy to ensure they are 1D (B,)
                 new_vals = new_vals.squeeze(-1)
@@ -231,19 +258,29 @@ class PpoLearner:
 
                 # Optimization step
                 optimizer.zero_grad(set_to_none=True)
+                t_backward_start = time.perf_counter()
                 total_loss.backward()
+                backward_ms_acc += (time.perf_counter() - t_backward_start) * 1000
+
+                t_clip_start = time.perf_counter()
                 torch.nn.utils.clip_grad_norm_(params, self._max_grad_norm, foreach=(device.type == "cuda"))
+                grad_clip_ms_acc += (time.perf_counter() - t_clip_start) * 1000
+
+                t_opt_step_start = time.perf_counter()
                 optimizer.step()
+                optimizer_step_ms_acc += (time.perf_counter() - t_opt_step_start) * 1000
 
                 # RND distillation
                 rnd_loss_metric = zero_metric
                 if rnd is not None and rnd_optimizer is not None:
+                    t_rnd_start = time.perf_counter()
                     z_rnd = z_mb.detach()
                     rnd_loss = rnd.distillation_loss(z_rnd)
                     rnd_optimizer.zero_grad(set_to_none=True)
                     rnd_loss.backward()  # type: ignore[no-untyped-call]
                     rnd_optimizer.step()
                     rnd_loss_metric = rnd_loss.detach()
+                    rnd_step_ms_acc += (time.perf_counter() - t_rnd_start) * 1000
 
                 with torch.no_grad():
                     approx_kl = (ratio - 1.0 - log_ratio).mean()
@@ -268,17 +305,38 @@ class PpoLearner:
                 learning_rate=self._learning_rate, rnd_learning_rate=self._rnd_learning_rate,
             )
 
-        _LOGGER.debug("PPO epoch completed: loss=%0.4f, kl=%0.4f, entropy=%0.4f",
-                      (running_total / n_updates).item(), (running_kl / n_updates).item(), (running_entropy / n_updates).item())
+        mean_metrics = _materialize_metric_means(
+            running_policy_loss=running_policy_loss,
+            running_value_loss=running_value_loss,
+            running_entropy=running_entropy,
+            running_kl=running_kl,
+            running_clip=running_clip,
+            running_total=running_total,
+            running_rnd_loss=running_rnd_loss,
+            n_updates=n_updates,
+        )
+
+        _LOGGER.debug(
+            "PPO epoch completed: loss=%0.4f, kl=%0.4f, entropy=%0.4f",
+            float(mean_metrics[5]),
+            float(mean_metrics[3]),
+            float(mean_metrics[2]),
+        )
 
         return PpoMetrics(
-            policy_loss=(running_policy_loss / n_updates).item(),
-            value_loss=(running_value_loss / n_updates).item(),
-            entropy=(running_entropy / n_updates).item(),
-            approx_kl=(running_kl / n_updates).item(),
-            clip_fraction=(running_clip / n_updates).item(),
-            total_loss=(running_total / n_updates).item(),
-            rnd_loss=(running_rnd_loss / n_updates).item(),
+            policy_loss=float(mean_metrics[0]),
+            value_loss=float(mean_metrics[1]),
+            entropy=float(mean_metrics[2]),
+            approx_kl=float(mean_metrics[3]),
+            clip_fraction=float(mean_metrics[4]),
+            total_loss=float(mean_metrics[5]),
+            rnd_loss=float(mean_metrics[6]),
             learning_rate=self._learning_rate,
             rnd_learning_rate=self._rnd_learning_rate,
+            minibatch_prep_ms=(prep_ms_acc / max(1, n_updates)),
+            policy_eval_ms=(eval_ms_acc / max(1, n_updates)),
+            backward_ms=(backward_ms_acc / max(1, n_updates)),
+            grad_clip_ms=(grad_clip_ms_acc / max(1, n_updates)),
+            optimizer_step_ms=(optimizer_step_ms_acc / max(1, n_updates)),
+            rnd_step_ms=(rnd_step_ms_acc / max(1, n_updates)),
         )

@@ -21,6 +21,7 @@ def test_actor_config_allows_field_name_overrides_with_aliases() -> None:
     assert config.azimuth_bins == 128
     assert config.elevation_bins == 24
     assert config.emit_observation_stream is True
+    assert config.dashboard_observation_hz == 10.0
     assert config.emit_training_telemetry is True
     assert config.emit_perf_telemetry is True
     assert config.enable_episodic_memory is True

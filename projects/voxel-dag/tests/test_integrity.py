@@ -1,13 +1,19 @@
-import numpy as np
-import time
+from __future__ import annotations
+
+from pathlib import Path
+
 import os
-import pytest
+import time
+
+import numpy as np
+
 from voxel_dag.compiler import MeshIngestor, compute_dense_sdf, compress_to_dag
 
-def generate_swiss_cheese_mesh(filename, num_holes=10):
+
+def generate_swiss_cheese_mesh(filename: str | Path, num_holes: int = 10) -> None:
     """Generates a complex mesh with multiple holes and thin walls to test edge cases."""
-    vertices = []
-    indices = []
+    vertices: list[list[float]] = []
+    indices: list[list[int]] = []
     
     # Base Box
     v_base = np.array([
@@ -33,13 +39,14 @@ def generate_swiss_cheese_mesh(filename, num_holes=10):
         ])
         indices.extend([[offset, offset+1, offset+2], [offset, offset+2, offset+3]])
 
-    with open(filename, 'w') as f:
+    with open(filename, "w", encoding="utf-8") as f:
         for v in vertices:
             f.write("v {} {} {}\n".format(v[0], v[1], v[2]))
         for idx in indices:
             f.write("f {} {} {}\n".format(idx[0]+1, idx[1]+1, idx[2]+1))
 
-def test_stress_integrity():
+
+def test_stress_integrity() -> None:
     print("\n[STRESS TEST] Complex Geometry & Native Performance...")
     mesh_file = "swiss_cheese.obj"
     generate_swiss_cheese_mesh(mesh_file, num_holes=50)
@@ -51,7 +58,7 @@ def test_stress_integrity():
     print("  Target Resolution: {}^3 ({:,} voxels)".format(res, res**3))
     
     start_time = time.time()
-    grid, h, cmin = compute_dense_sdf(v, i, bmin, bmax, res)
+    grid, _h, _cmin = compute_dense_sdf(v, i, bmin, bmax, res)
     fsm_time = time.time() - start_time
     
     print("  FSM Compute Time: {:.3f}s".format(fsm_time))

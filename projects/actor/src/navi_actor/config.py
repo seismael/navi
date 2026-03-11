@@ -87,6 +87,7 @@ class ActorConfig(BaseSettings):
     telemetry_actor_id: int = 0
     telemetry_all_actors: bool = False
     emit_observation_stream: bool = True
+    dashboard_observation_hz: float = 10.0
     emit_training_telemetry: bool = True
     emit_perf_telemetry: bool = True
 

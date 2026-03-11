@@ -18,23 +18,23 @@ uv sync
 uv run environment
 
 # Explicit service launch
-uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file ../../artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag
+uv run navi-environment serve --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file ../../artifacts/gmdag/corpus/apartment_1.gmdag
 
 # Prepare the full discovered corpus
 uv run navi-environment prepare-corpus --force-recompile
 
 # Compile one explicit asset
-uv run navi-environment compile-gmdag --source ../../data/scenes/replicacad/frl_apartment_stage.glb --output ../../artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag --resolution 512
+uv run navi-environment compile-gmdag --source ../../data/scenes/hssd/102343992.glb --output ../../artifacts/gmdag/corpus/hssd/102343992.gmdag --resolution 512
 
 # Runtime checks
-uv run navi-environment check-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag
-uv run navi-environment bench-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/replicacad/frl_apartment_stage.gmdag --actors 4 --steps 200
+uv run navi-environment check-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/apartment_1.gmdag
+uv run navi-environment bench-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/apartment_1.gmdag --actors 4 --steps 200
 ```
 
 ## Windows Wrapper
 
 ```powershell
-./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag
+./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
 ```
 
 ## Runtime Ports

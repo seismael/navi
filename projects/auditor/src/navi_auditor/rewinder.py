@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 __all__: list[str] = ["Rewinder"]
 
+_PUB_SUB_READY_DELAY_SECONDS = 0.25
+
 
 class Rewinder:
     """Reads recorded sessions and republishes them via ZMQ PUB.
@@ -31,6 +33,8 @@ class Rewinder:
         self._backend.open(self._config.output_path, mode="r")
         self._pub_socket = self._context.socket(zmq.PUB)
         self._pub_socket.bind(self._config.pub_address)
+        # Give passive subscribers a brief window to complete the ZMQ slow-joiner handshake.
+        time.sleep(_PUB_SUB_READY_DELAY_SECONDS)
 
     def replay(self, speed: float = 1.0) -> int:
         """Replay all recorded messages at the given speed multiplier.

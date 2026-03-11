@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 
 from navi_actor.rollout_buffer import MultiTrajectoryBuffer, PPOTransition, TrajectoryBuffer
@@ -113,6 +115,74 @@ def test_advantage_normalization() -> None:
     # After normalization, mean should be near 0
     all_advs = torch.cat([mb.advantages for mb in batches])
     assert abs(all_advs.mean().item()) < 0.5
+
+
+def test_preallocated_buffer_caches_normalized_advantages_once() -> None:
+    buffer = TrajectoryBuffer(gamma=0.99, gae_lambda=0.95, capacity=4)
+    for reward in (1.0, 2.0, 3.0, 4.0):
+        transition = _make_transition(reward=reward, value=0.25)
+        buffer.append_fields(
+            observation=transition.observation,
+            action=transition.action,
+            log_prob=torch.tensor(transition.log_prob, dtype=torch.float32),
+            value=torch.tensor(transition.value, dtype=torch.float32),
+            reward=torch.tensor(transition.reward, dtype=torch.float32),
+            done=torch.tensor(transition.done, dtype=torch.bool),
+            truncated=torch.tensor(transition.truncated, dtype=torch.bool),
+            hidden_state=transition.hidden_state,
+            aux_tensor=transition.aux_tensor,
+        )
+
+    buffer.compute_returns_and_advantages(last_value=torch.tensor(0.0))
+    first_batches = list(buffer.sample_minibatches(batch_size=2, seq_len=0))
+    second_batches = list(buffer.sample_minibatches(batch_size=2, seq_len=0))
+
+    first_advs = torch.cat([mb.advantages for mb in first_batches]).sort().values
+    second_advs = torch.cat([mb.advantages for mb in second_batches]).sort().values
+    expected = buffer._normalized_advantages.sort().values
+
+    assert torch.allclose(first_advs, expected)
+    assert torch.allclose(second_advs, expected)
+
+
+def test_multi_trajectory_sampling_normalizes_advantages_once() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+
+    assert buffer._buffers is None
+
+    buffer.append_batch(
+        observations=torch.randn(2, 3, 16, 8),
+        actions=torch.randn(2, 4),
+        log_probs=torch.randn(2),
+        values=torch.tensor([0.1, 0.2]),
+        rewards=torch.tensor([1.0, 2.0]),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+    )
+    buffer.append_batch(
+        observations=torch.randn(2, 3, 16, 8),
+        actions=torch.randn(2, 4),
+        log_probs=torch.randn(2),
+        values=torch.tensor([0.3, 0.4]),
+        rewards=torch.tensor([3.0, 4.0]),
+        dones=torch.tensor([False, True], dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+    )
+
+    buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
+
+    flat_batches = list(buffer.sample_minibatches(batch_size=4, seq_len=0))
+    seq_batches = list(buffer.sample_minibatches(batch_size=4, seq_len=2))
+
+    normalized = cast(torch.Tensor, buffer._all_advantages_normalized)
+    flat_advs = torch.cat([mb.advantages for mb in flat_batches]).sort().values
+    seq_advs = torch.cat([mb.advantages for mb in seq_batches]).sort().values
+    expected = normalized.flatten().sort().values
+
+    assert torch.allclose(flat_advs, expected)
+    assert torch.allclose(seq_advs, expected)
 
 
 def test_truncation_bootstrap() -> None:
@@ -231,10 +301,8 @@ def test_preallocated_tensor_storage_matches_standard_path() -> None:
 
 def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
-    hidden_a = torch.randn(1, 2, 8)
-    hidden_b = torch.randn(1, 2, 8)
 
-    for step, hidden in enumerate((hidden_a, hidden_b), start=1):
+    for step in range(1, 3):
         obs = torch.randn(2, 3, 16, 8)
         actions = torch.randn(2, 4)
         log_probs = torch.randn(2)
@@ -251,7 +319,6 @@ def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
             rewards=rewards,
             dones=dones,
             truncateds=truncateds,
-            hidden_batch=hidden,
             aux_tensors=aux,
         )
 
@@ -265,9 +332,6 @@ def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
     assert first.sequence_observations.shape == (2, 2, 3, 16, 8)
     assert first.sequence_actions is not None
     assert first.sequence_actions.shape == (2, 2, 4)
-    assert first.hidden_batch is not None
-    assert first.hidden_batch.shape == (1, 2, 8)
-    assert first.hidden_states == []
     assert first.dones is not None
     assert first.dones.shape == (2, 2)
     assert first.sequence_aux_tensors is not None
@@ -283,7 +347,6 @@ def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None
     rewards = torch.ones(2)
     dones = torch.zeros(2, dtype=torch.bool)
     truncateds = torch.zeros(2, dtype=torch.bool)
-    hidden = torch.randn(1, 2, 8)
 
     buffer.append_batch(
         observations=obs,
@@ -293,7 +356,6 @@ def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None
         rewards=rewards,
         dones=dones,
         truncateds=truncateds,
-        hidden_batch=hidden,
         aux_tensors=None,
     )
     buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
@@ -301,6 +363,54 @@ def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None
     batches = list(buffer.sample_minibatches(batch_size=4, seq_len=8))
 
     assert batches == []
+
+
+def test_multi_trajectory_batched_storage_reuses_allocations_across_clear() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+
+    assert buffer._buffers is None
+
+    buffer.append_batch(
+        observations=torch.randn(2, 3, 16, 8),
+        actions=torch.randn(2, 4),
+        log_probs=torch.randn(2),
+        values=torch.randn(2),
+        rewards=torch.randn(2),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=torch.randn(2, 3),
+    )
+
+    obs_storage = buffer._batch_obs
+    action_storage = buffer._batch_actions
+    aux_storage = buffer._batch_aux
+
+    buffer.clear()
+
+    buffer.append_batch(
+        observations=torch.randn(2, 3, 16, 8),
+        actions=torch.randn(2, 4),
+        log_probs=torch.randn(2),
+        values=torch.randn(2),
+        rewards=torch.randn(2),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+    )
+    buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
+    buffer._ensure_batch_cache()
+
+    assert buffer._batch_obs is obs_storage
+    assert buffer._batch_actions is action_storage
+    assert buffer._batch_aux is aux_storage
+    assert buffer._all_aux is None
+
+
+def test_multi_trajectory_fallback_buffers_exist_only_without_capacity() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95)
+
+    assert buffer._buffers is not None
+    assert len(buffer._buffers) == 2
 
 
 def test_trajectory_buffer_sequence_sampling_exposes_tensor_native_sequence_views() -> None:
@@ -329,9 +439,6 @@ def test_trajectory_buffer_sequence_sampling_exposes_tensor_native_sequence_view
     assert first.sequence_observations.shape == (2, 2, 3, 16, 8)
     assert first.sequence_actions is not None
     assert first.sequence_actions.shape == (2, 2, 4)
-    assert first.hidden_batch is not None
-    assert first.hidden_batch.shape == (1, 2, 8)
-    assert first.hidden_states
     assert first.dones is not None
     assert first.dones.shape == (2, 2)
     assert first.sequence_aux_tensors is not None

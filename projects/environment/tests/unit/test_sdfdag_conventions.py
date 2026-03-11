@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
+import pytest
 import torch
 
 from navi_environment.backends.sdfdag_backend import (
@@ -14,6 +15,7 @@ from navi_environment.backends.sdfdag_backend import (
     _obstacle_clearance_reward,
     _proximity_penalty,
     _starvation_penalty,
+    _validate_unit_direction_tensor,
     build_spherical_ray_directions,
 )
 
@@ -85,6 +87,13 @@ def test_proximity_penalty_scales_with_near_field_ratio() -> None:
     assert _proximity_penalty(0.5, penalty_scale=0.8) == -0.4
 
 
+def test_validate_unit_direction_tensor_rejects_unnormalized_vectors() -> None:
+    ray_dirs = torch.tensor([[1.2, 0.0, 0.0]], dtype=torch.float32)
+
+    with pytest.raises(RuntimeError, match="normalized within tolerance"):
+        _validate_unit_direction_tensor(torch, ray_dirs, name="ray_dirs")
+
+
 def test_scene_rotation_waits_for_configured_episode_budget() -> None:
     backend = object.__new__(SdfDagBackend)
     backend._scene_pool = ["scene_a.gmdag", "scene_b.gmdag"]
@@ -100,7 +109,7 @@ def test_scene_rotation_waits_for_configured_episode_budget() -> None:
     def _load_scene(_scene_path: str) -> list[tuple[float, float, float]]:
         return [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
 
-    backend._load_scene = _load_scene  # type: ignore[method-assign]
+    backend._load_scene = _load_scene  # type: ignore[assignment]
 
     backend._maybe_rotate_scene(is_natural=True)
 
@@ -119,8 +128,8 @@ def test_cast_actor_batch_tensors_passes_environment_horizon() -> None:
 
         def cast_rays(self, *args: object) -> None:
             self.args = args
-            out_distances = cast(torch.Tensor, args[3])
-            out_semantics = cast(torch.Tensor, args[4])
+            out_distances = cast("torch.Tensor", args[3])
+            out_semantics = cast("torch.Tensor", args[4])
             out_distances.zero_()
             out_semantics.zero_()
 
@@ -141,8 +150,8 @@ def test_cast_actor_batch_tensors_passes_environment_horizon() -> None:
     backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
     backend._out_semantics = torch.empty((1, 1), dtype=torch.int32)
     backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
-    backend._require_dag_tensor = lambda: "dag"  # type: ignore[assignment]
-    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[assignment]
+    backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
     backend._cast_actor_batch_tensors((0,))
 
@@ -155,8 +164,8 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
 
     class _FakeSdf:
         def cast_rays(self, *args: object) -> None:
-            out_distances = cast(torch.Tensor, args[3])
-            out_semantics = cast(torch.Tensor, args[4])
+            out_distances = cast("torch.Tensor", args[3])
+            out_semantics = cast("torch.Tensor", args[4])
             out_distances.copy_(torch.tensor([[5.0, 25.0]], dtype=torch.float32))
             out_semantics.copy_(torch.tensor([[1, 2]], dtype=torch.int32))
 
@@ -176,8 +185,8 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
     backend._out_distances = torch.empty((1, 2), dtype=torch.float32)
     backend._out_semantics = torch.empty((1, 2), dtype=torch.int32)
     backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
-    backend._require_dag_tensor = lambda: "dag"  # type: ignore[assignment]
-    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[assignment]
+    backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
     depth_2d, semantic_2d, valid_2d = backend._cast_actor_batch_tensors((0,))
 
@@ -186,3 +195,105 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
     assert valid_2d.shape == (1, 2, 1)
     assert torch.allclose(depth_2d[0, :, 0], torch.tensor([0.5, 1.0], dtype=torch.float32))
     assert torch.equal(valid_2d[0, :, 0], torch.tensor([True, False]))
+
+
+def test_cast_actor_batch_tensors_treats_exact_horizon_as_valid() -> None:
+    backend = object.__new__(SdfDagBackend)
+
+    class _FakeSdf:
+        def cast_rays(self, *args: object) -> None:
+            out_distances = cast("torch.Tensor", args[3])
+            out_semantics = cast("torch.Tensor", args[4])
+            out_distances.copy_(torch.tensor([[10.0]], dtype=torch.float32))
+            out_semantics.copy_(torch.tensor([[3]], dtype=torch.int32))
+
+    backend._torch = torch
+    backend._torch_sdf = _FakeSdf()
+    backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
+    backend._max_distance = 10.0
+    backend._bbox_min = [0.0, 0.0, 0.0]
+    backend._bbox_max = [1.0, 1.0, 1.0]
+    backend._az_bins = 1
+    backend._el_bins = 1
+    backend._n_rays = 1
+    backend._device = torch.device("cpu")
+    backend._ray_dirs_local = torch.zeros((1, 3), dtype=torch.float32)
+    backend._ray_origins = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
+    backend._out_semantics = torch.empty((1, 1), dtype=torch.int32)
+    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
+
+    depth_2d, semantic_2d, valid_2d = backend._cast_actor_batch_tensors((0,))
+
+    assert torch.allclose(depth_2d[0, :, 0], torch.tensor([1.0], dtype=torch.float32))
+    assert torch.equal(semantic_2d[0, :, 0], torch.tensor([3], dtype=torch.int32))
+    assert torch.equal(valid_2d[0, :, 0], torch.tensor([True]))
+
+
+def test_cast_actor_batch_tensors_clamps_negative_inside_solid_distances_to_zero() -> None:
+    backend = object.__new__(SdfDagBackend)
+
+    class _FakeSdf:
+        def cast_rays(self, *args: object) -> None:
+            out_distances = cast("torch.Tensor", args[3])
+            out_semantics = cast("torch.Tensor", args[4])
+            out_distances.copy_(torch.tensor([[-0.25]], dtype=torch.float32))
+            out_semantics.copy_(torch.tensor([[9]], dtype=torch.int32))
+
+    backend._torch = torch
+    backend._torch_sdf = _FakeSdf()
+    backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
+    backend._max_distance = 10.0
+    backend._bbox_min = [0.0, 0.0, 0.0]
+    backend._bbox_max = [1.0, 1.0, 1.0]
+    backend._az_bins = 1
+    backend._el_bins = 1
+    backend._n_rays = 1
+    backend._device = torch.device("cpu")
+    backend._ray_dirs_local = torch.zeros((1, 3), dtype=torch.float32)
+    backend._ray_origins = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
+    backend._out_semantics = torch.empty((1, 1), dtype=torch.int32)
+    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
+
+    depth_2d, semantic_2d, valid_2d = backend._cast_actor_batch_tensors((0,))
+
+    assert torch.allclose(depth_2d[0, :, 0], torch.tensor([0.0], dtype=torch.float32))
+    assert torch.equal(semantic_2d[0, :, 0], torch.tensor([9], dtype=torch.int32))
+    assert torch.equal(valid_2d[0, :, 0], torch.tensor([True]))
+
+
+def test_cast_actor_batch_tensors_rejects_wrong_output_dtype() -> None:
+    backend = object.__new__(SdfDagBackend)
+
+    class _FakeSdf:
+        def cast_rays(self, *args: object) -> None:
+            raise AssertionError("cast_rays should not run when validation fails")
+
+    backend._torch = torch
+    backend._torch_sdf = _FakeSdf()
+    backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
+    backend._max_distance = 17.5
+    backend._bbox_min = [0.0, 0.0, 0.0]
+    backend._bbox_max = [1.0, 1.0, 1.0]
+    backend._az_bins = 1
+    backend._el_bins = 1
+    backend._n_rays = 1
+    backend._device = torch.device("cpu")
+    backend._ray_dirs_local = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32)
+    backend._ray_origins = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
+    backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
+    backend._out_semantics = torch.empty((1, 1), dtype=torch.int64)
+    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="out_semantics must have dtype"):
+        backend._cast_actor_batch_tensors((0,))

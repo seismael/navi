@@ -1,4 +1,4 @@
-# SDFDAG_RUNTIME.md - Low-Level CUDA And DAG Runtime Notes
+# SDFDAG_RUNTIME.md — Low-Level CUDA And DAG Runtime Notes
 
 ## 1. Purpose
 
@@ -13,147 +13,134 @@ It is intentionally narrower than `docs/ARCHITECTURE.md` and more concrete than
 The current production path is:
 
 1. `projects/voxel-dag` produces compiled `.gmdag` assets
-2. `projects/environment` validates and loads asset metadata plus contiguous node payloads
-3. `projects/torch-sdf` receives DAG memory and batched ray tensors on CUDA
+2. `projects/torch-sdf` loads the DAG into CUDA-visible memory
+3. `projects/environment` prepares batched ray origins and directions
 4. `torch_sdf.cast_rays()` fills preallocated distance and semantic outputs
 5. `SdfDagBackend` adapts those outputs into either:
    - tensor-native trainer observations, or
    - materialized `DistanceMatrix` objects for service and diagnostics
 
-## 3. Binary Artifact Contract
+## 3. CUDA Boundary Contract
 
-### 3.1 Current Header Layout
+The current binding enforces the following before launching the kernel:
 
-The environment integration code currently parses a 32-byte header with:
-
-| Offset | Type | Field |
-| --- | --- | --- |
-| `0x00` | `char[4]` | magic `GDAG` |
-| `0x04` | `uint32` | format version |
-| `0x08` | `uint32` | grid resolution |
-| `0x0C` | `float32` | `bbox_min.x` |
-| `0x10` | `float32` | `bbox_min.y` |
-| `0x14` | `float32` | `bbox_min.z` |
-| `0x18` | `float32` | voxel size |
-| `0x1C` | `uint32` | node count |
-
-The payload that follows is a contiguous `uint64` node array.
-
-### 3.2 Current Load Semantics
-
-`load_gmdag_asset()` currently validates:
-
-- header size
-- `GDAG` magic
-- node payload length consistency
-- derived `bbox_max` from `bbox_min + resolution * voxel_size`
-
-Those checks make the file format a real runtime contract rather than a vague
-compiler-side convention.
-
-## 4. Current Node Layout Observations
-
-The current CUDA kernel already assumes a compact `uint64` node layout.
-Observed implementation facts include:
-
-- the high bit acts as a node-type discriminator
-- internal nodes carry an 8-bit child mask and a child-base pointer
-- leaf nodes carry packed distance and semantic payloads
-- DAG memory is traversed as one contiguous `uint64` array
-- `__restrict__` pointers are used for DAG memory and ray buffers
-
-These details matter because they explain the current cache-friendly traversal
-shape and why the runtime is built around contiguous buffers instead of rich
-object graphs.
-
-## 5. CUDA Boundary Contract
-
-### 5.1 Current Input Tensors
-
-| Tensor | Shape | Dtype | Device | Requirement |
-| --- | --- | --- | --- | --- |
-| `origins` | `[B, R, 3]` | `float32` | CUDA | contiguous |
-| `dirs` | `[B, R, 3]` | `float32` | CUDA | contiguous |
-| `out_distances` | `[B, R]` | `float32` | CUDA | preallocated |
-| `out_semantics` | `[B, R]` | `int32` | CUDA | preallocated |
-
-### 5.2 Binding Enforcement
-
-The current binding enforces before kernel launch:
-
-- CUDA placement for input and output tensors
-- contiguity on ray tensors
-- rank-3 input with trailing dimension `3`
+- `origins` must be CUDA and contiguous
+- `dirs` must be CUDA and contiguous
+- output tensors must be CUDA
+- `origins` must have rank `3` with trailing dimension `3`
 
 The binding also releases the Python GIL during kernel execution.
 
-This is one of the most important imported ideas that is now fully documented in
-repo-local terms.
+This matters because the boundary is a systems seam, not a convenience wrapper.
 
-## 6. Kernel Execution Sequence
+## 4. Current Tensor Shapes
 
-At a high level the current kernel path is:
+### 4.1 Ray Tensors
 
-1. flatten batched rays into `num_rays = B * R`
-2. map one thread to one ray
-3. read origin and direction triples
-4. query the stackless DAG for local distance and semantic payload
-5. advance along the ray by sampled distance
-6. terminate on hit or horizon exhaustion
-7. write the resulting distance and semantic id to the output tensors
+| Tensor | Shape | Dtype | Device |
+| --- | --- | --- | --- |
+| `origins` | `[B, R, 3]` | `float32` | CUDA |
+| `dirs` | `[B, R, 3]` | `float32` | CUDA |
+| `out_distances` | `[B, R]` | `float32` | CUDA |
+| `out_semantics` | `[B, R]` | `int32` | CUDA |
 
-The important runtime consequence is that output buffers can be reused across
-steps and only need reshaping and adaptation afterward.
+### 4.2 Trainer Observation Tensor
 
-## 7. Environment Adaptation Boundary
+Current canonical trainer observation shape:
 
-The environment currently reshapes runtime outputs from `[B, R]` into
-`(B, Az, El)` depth, semantic, and validity tensors. It then chooses one of two
-surfaces:
+- `(B, 3, Az, El)` on CUDA
+- channel `0`: normalized depth
+- channel `1`: semantic ids cast to `float32`
+- channel `2`: valid mask cast to `float32`
 
-- tensor-native trainer observation batches
-- materialized `DistanceMatrix` publication surfaces
+The external `DistanceMatrix` contract remains the same; this tensor seam exists
+so the hot path can stay on device.
 
-This is the critical seam where performance work now lives. The kernel can be
-fast and still lose end-to-end throughput if this boundary bounces data to host
-unnecessarily.
+## 5. Current DAG Layout Notes
 
-## 8. Stable Expectations vs. Benchmark-Gated Ideas
+The current CUDA kernel already assumes a compact `uint64` node layout.
+Observed implementation facts in the current code include:
 
-### 8.1 Stable Expectations
+- one contiguous `uint64` DAG memory block
+- a type bit in the high bit position
+- internal nodes carrying an 8-bit child mask and child-base pointer
+- leaf nodes carrying packed distance and semantic payloads
+- `__restrict__` pointers used in the kernel for DAG memory and ray buffers
 
-The following are current architectural truths:
+These low-level choices are useful to document because they explain why the
+runtime is shaped around contiguous buffers and alias-safe traversal code.
+
+Important precision note:
+
+- `__restrict__` is an aliasing promise to the compiler, not a guarantee that
+   data will be routed through a specific cache tier
+- cache residency and read-only behavior depend on the full kernel, the target
+   architecture, and compiler code generation rather than on `__restrict__`
+   alone
+
+## 6. Execution Boundaries
+
+The canonical runtime is bounded, not literally constant-time.
+
+Execution cost depends on:
+
+- DAG traversal depth
+- configured ray horizon
+- hit epsilon
+- maximum march iteration count `MAX_STEPS`
+- scene geometry and ray distribution
+
+The stable architectural guarantee is therefore bounded batched execution, not
+literal constant-time cost per ray.
+
+## 7. Boundary Semantics
+
+The runtime and the environment boundary have distinct responsibilities.
+
+Runtime-level expectations:
+
+- hit, miss, and maximum-iteration termination must be explicit
+- inside-solid behavior must be deterministic and documented
+- the kernel may expose negative or near-zero distances when the underlying
+   field supports that interpretation
+
+Environment-level expectations:
+
+- the published `DistanceMatrix` contract defines how horizon saturation,
+   invalidity, and observation normalization are surfaced to the actor
+- out-of-domain handling for public observations is an environment contract,
+   not a promise of globally correct analytic SDF continuation beyond the
+   compiled asset domain
+
+## 8. What Is Stable vs. What Is Not
+
+Stable architectural expectations:
 
 - CUDA-only canonical runtime
 - batched actor-ray execution
 - one configured environment horizon shared by tracing and normalization
-- reusable buffers preferred over per-step allocation
-- selective publish-time materialization instead of unconditional wire-object rebuilding
+- optional publish-time materialization instead of unconditional wire-object rebuilding
 
-### 8.2 Benchmark-Gated Ideas
+Not yet frozen as public format guarantees:
 
-The following remain candidates, not locked guarantees:
+- exact future leaf payload precision policy
+- alternative storage layouts such as Morton or Z-order variants
+- any truncation-metadata scheme beyond the currently accepted fixed-horizon runtime contract
 
-- exact future leaf-distance precision policy
-- truncation metadata schemes beyond the fixed-horizon runtime contract
-- alternate storage layouts such as Morton or Z-order variants
-- deeper cache-tuned node layouts that change the current on-disk contract
+Those remain benchmark-gated experiments.
 
 ## 9. Hot-Path Rules
 
 Performance work on this stack should assume:
 
 - reusable buffers are preferred over per-step allocation
-- host extraction should be batched and coarse when unavoidable
 - materialization for dashboards and telemetry should be selective
-- any optimization that helps only the kernel but regresses trainer dataflow is
-  incomplete
+- host extraction should be batched and coarse when unavoidable
+- any optimization that helps only the kernel but regresses trainer dataflow is incomplete
 
 ## 10. Related Docs
 
-- `docs/COMPILER.md`
 - `docs/ARCHITECTURE.md`
-- `docs/SIMULATION.md`
-- `docs/DATAFLOW.md`
 - `docs/PERFORMANCE.md`
+- `docs/SIMULATION.md`
 - `docs/VERIFICATION.md`

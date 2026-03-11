@@ -95,7 +95,8 @@ If $\rho \to 1.0$, the agent is blind.
 
 #### 2. The Vectorized PyTorch Implementation
 
-To keep this strictly $O(1)$ on the GPU and maintain your SPS, avoid Python `if/else` loops. Use native PyTorch tensor operations.
+To keep this fully vectorized and bounded-cost on the GPU, avoid Python
+`if/else` loops. Use native PyTorch tensor operations.
 
 ```python
 import torch

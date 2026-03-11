@@ -16,7 +16,7 @@ __device__ inline void query_dag_stackless(
     if (px < bbox_min[0] || px > bbox_max[0] ||
         py < bbox_min[1] || py > bbox_max[1] ||
         pz < bbox_min[2] || pz > bbox_max[2]) {
-        out_dist = 1000.0f;
+        out_dist = kOutsideDomainDistance;
         out_semantic = 0;
         return;
     }
@@ -51,7 +51,7 @@ __device__ inline void query_dag_stackless(
 
         uint8_t mask = static_cast<uint8_t>((node >> 55) & 0xFF);
         if ((mask & (1 << octant_idx)) == 0) {
-            out_dist = 1000.0f; 
+            out_dist = kOutsideDomainDistance;
             out_semantic = 0;
             return;
         }
@@ -101,7 +101,7 @@ __global__ void sphere_trace_kernel(
 
         query_dag_stackless(dag_memory, px, py, pz, float_bmin, float_bmax, resolution, dist, semantic);
 
-        if (dist < 0.01f) {
+        if (dist < kHitEpsilon) {
             out_distances[idx] = current_t;
             out_semantics[idx] = semantic;
             return;

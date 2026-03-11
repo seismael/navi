@@ -90,7 +90,11 @@ class Recorder:
         _LOGGER.info("Starting Recorder, output: %s", self._config.output_path)
         self._backend.open(self._config.output_path, mode="w")
 
+        seen_addresses: set[str] = set()
         for addr in self._config.sub_addresses:
+            if not addr or addr in seen_addresses:
+                continue
+            seen_addresses.add(addr)
             _LOGGER.debug("Connecting to publisher: %s", addr)
             sock = self._context.socket(zmq.SUB)
             sock.connect(addr)

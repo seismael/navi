@@ -1,332 +1,798 @@
-# PLAN.md - Architecture Merge And Implementation Roadmap
+# PLAN.md - Imported Architecture Adoption Program
 
 ## 1. Purpose
 
-This plan now serves two jobs:
+This plan replaces the previous mixed benchmark diary and roadmap with one
+coherent adoption program for the imported architecture ideas.
 
-- preserve the architecture decisions extracted from `imported/`
-- convert those decisions into an implementation roadmap on the current codebase
+The goal is not to copy the imported documents verbatim. The goal is to:
 
-`imported/` stays in the repository for reference, but planning now happens
-against the in-repo documentation set.
+- adopt the strongest architectural ideas from `imported/`
+- correct the mathematical and logical issues found in those documents
+- integrate the adopted design into Navi without violating `AGENTS.md`
+- prove correctness, stability, and performance end to end before promotion
 
-## 2. Current Architecture Decision Summary
+This plan is the canonical implementation roadmap for the large-scale refactor.
 
-### 2.1 Accepted Directions
+## 2. Target Outcome
 
-Accepted into current docs and planning:
+At completion, Navi will have one production architecture with the following
+properties:
 
-- strict CUDA and tensor-boundary contracts
-- explicit separation between wire contracts and tensor-native hot-path seams
-- offline data normalization and corpus preparation outside the PPO hot loop
+Continu
+
+The final system must be mathematically specified, operationally complete,
+performance-tested, and regression-protected.
+
+## 3. Non-Negotiable Constraints
+
+This adoption must remain aligned with `AGENTS.md`.
+
+The plan therefore preserves these repository rules:
+
+1. the actor cognitive pipeline remains sacred and unchanged in topology
+2. canonical production training remains one in-process trainer
+3. no service-to-service hot-loop transport is reintroduced
+4. the actor-facing public contract remains `DistanceMatrix`
+5. canonical training remains CUDA-only on the compiled `sdfdag` path
+6. all runtime evolution stays benchmark-gated on the real trainer
+7. no alternate production trainer or equal-status runtime surface is created
+
+## 4. Imported Architecture Adoption Decisions
+
+### 4.1 Adopted Directly
+
+These imported ideas are accepted as core direction:
+
+- strict tensor boundary validation between Python and CUDA
+- offline dataset normalization and compile-first corpus preparation
+- batched compiled-scene execution over reusable GPU buffers
 - passive dashboard and dataset-auditor direction
-- stronger layered verification language
+- explicit multi-layer verification language
+- stronger documentation of low-level runtime contracts
 
-### 2.2 Rejected As Canonical
+### 4.2 Adopted With Correction
 
-Rejected as production architecture:
+These imported ideas are accepted only after mathematical or logical
+correction:
 
-- distributed ZMQ lock-step training as the main training surface
-- unverified headline `>10,000 SPS` documentation claims
+- sphere tracing claims must use bounded-complexity language, not `O(1)` claims
+- DAG deduplication must use explicit canonical hash rules plus mandatory
+  structural equality fallback
+- leaf payload precision claims must reflect real numeric error bounds
+- tensor normalization contracts must use explicit tolerances, not exact float
+  equality
+- dataset coordinate transforms must be specified as explicit matrices and
+  validated by golden fixtures
+- episodic-memory reward claims must be reduced to explicit equations and
+  thresholds
+- observer transport must clearly distinguish ZMQ ingestion from any browser
+  proxy surface
 
-### 2.3 Benchmark-Gated Only
+### 4.3 Rejected As Production Architecture
 
-Kept as candidates, not settled decisions:
+These imported directions are not adopted into the canonical production path:
 
-- truncation metadata
-- alternate leaf-distance storage policies
-- Morton or other layout redesigns
-- stream-overlap or double-buffering changes that complicate the single canonical trainer
+- distributed hot-loop actor/environment stepping
+- multiple equal-status training topologies
+- swarm cognition as the production default
+- unqualified `>10,000 SPS` headline claims as architecture truth
+- undefined overlap or double-buffering schemes that widen the production
+  architecture without trainer-proof wins
 
-## 3. Imported-To-Navi Mapping
+### 4.4 Benchmark-Gated Research Only
 
-| Imported file | Navi home |
-| --- | --- |
-| `ARCHITECTURE_OVERVIEW.md` | `docs/ARCHITECTURE.md` |
-| `SYSTEM_COMPONENTS.md` | `docs/ARCHITECTURE.md`, `docs/COMPILER.md`, `docs/AUDITOR.md` |
-| `DATA_FLOW_AND_SEQUENCE.md` | `docs/DATAFLOW.md`, `docs/PERFORMANCE.md` |
-| `MEMORY_LAYOUT_AND_DAG_SPEC.md` | `docs/SDFDAG_RUNTIME.md`, `docs/COMPILER.md` |
-| `TENSOR_AND_API_CONTRACTS.md` | `docs/CONTRACTS.md`, `docs/SDFDAG_RUNTIME.md` |
-| `TESTING_AND_VERIFICATION.md` | `docs/VERIFICATION.md` |
-| `VOXEL_COMPILER.md` | `docs/COMPILER.md` |
-| `OMNISENSE_ARCHITECTURE.md` | `docs/ARCHITECTURE.md`, `docs/SIMULATION.md` |
-| `DASHBOARD_DESIGN.md` | `docs/AUDITOR.md`, `docs/DATAFLOW.md` |
+These imported ideas remain candidates for later phases only:
 
-## 4. Current Best-Of-Both-Worlds Direction
+- truncation-aware storage metadata
+- alternate leaf distance payload precision policies
+- Morton or related layout redesigns
+- overlap strategies inside the runtime or trainer
+- shared global episodic memory and coordination research
 
-The strongest merged architecture is:
+## 5. Canonical Design Answers To Imported Open Questions
 
-1. keep the current in-process canonical trainer
-2. document and enforce strict low-level CUDA and tensor contracts
-3. preserve service-mode ZMQ and passive auditing without letting them back into the hot path
-4. keep storage-layout redesign benchmark-gated until actor dataflow and PPO bottlenecks are addressed
-5. prioritize actor-side tensor flow and PPO update cost over more environment micro-optimization
+This section records the best current architectural answers so the refactor can
+proceed without unresolved ambiguity.
 
-## 5. Current Bottleneck Thesis
+### 5.1 Sphere-Tracing Complexity
 
-The current codebase and docs now support the following planning thesis:
+Canonical statement:
 
-- the environment path is already sufficiently accelerated that it is no longer
-	the only dominant problem
-- the main remaining architecture-significant throughput problems are in actor
-	dataflow, selective materialization, host extraction, and PPO update flow
-- planning should therefore start with the trainer hot path, not with a second
-	round of speculative runtime-format redesign
+- sphere tracing is not specified as `O(1)`
+- the runtime is specified as bounded by `MAX_STEPS` and traversal depth
+- the important production property is bounded execution with high practical
+  throughput on batched CUDA workloads
 
-## 6. Roadmap Structure
+Implementation consequence:
 
-This roadmap is organized into four phases so planning can advance without
-losing the imported architecture context.
+- all docs, tests, and benchmarks must use bounded-complexity language
+- all kernels must expose explicit `MAX_STEPS`, hit epsilon, and horizon rules
 
-### Phase 0 - Documentation And Decision Lock
+### 5.2 Canonical Deduplication Rule
 
-Status: complete for this pass
+Canonical statement:
 
-Completed outcomes:
+- structural equality is the correctness authority
+- hashing is an acceleration filter only
+- canonical compiler behavior must use one deterministic hash algorithm with a
+  fixed seed and a mandatory structural equality fallback before deduplication
 
-- imported architecture ideas mapped into in-repo docs
-- canonical-vs-experimental boundaries documented
-- dedicated docs added for compiler, dataflow, and auditor architecture
-- actor, training, and contract docs upgraded to the same style level
+Planned canonical choice:
 
-Exit criterion:
+- deterministic MurmurHash3 with fixed seed `0` for candidate grouping
+- structural equality of node payload and child layout before merge
 
-- implementation work can proceed without needing `imported/` as the sole source of architecture detail
+Implementation consequence:
 
-### Phase 1 - Canonical Hot-Path Cleanup
+- documentation, compiler code, and tests must use one consistent story
+- any old FNV references are removed during migration
 
-Status: active implementation priority
+### 5.3 Canonical Leaf Payload Rule
 
-Objective:
+Canonical statement:
 
-- remove avoidable Python and host-side staging from the canonical training loop
+- leaf payload precision is a design parameter, not a slogan
+- any distance payload choice must be documented with total error budget:
+  discretization error plus quantization error plus runtime decode error
 
-Work packages:
+Planned canonical policy:
 
-1. selective observation materialization only for actors that must be published
-2. reduced action materialization on the direct trainer path
-3. batched host extraction only where unavoidable
-4. tighter perf accounting around `host_extract_ms` and `telemetry_publish_ms`
+- keep current production payload conservative until a lower-precision leaf
+  format wins end-to-end benchmarks and passes correctness thresholds
+- if fp16 leaf storage is explored, the docs must state centimeter-scale error
+  bounds honestly rather than claiming sub-millimeter precision
 
-Success criteria:
+### 5.4 Canonical Tensor Normalization Rule
 
-- fewer unconditional `DistanceMatrix` and `Action` object builds in the rollout loop
-- lower host extraction time without regressions in passive observability
-- no regression in contract-correct dashboard publication
+Canonical statement:
 
-### Phase 2 - PPO Update Optimization
+- direction vectors are valid when `abs(norm - 1.0) <= eps`
+- exact floating-point equality is forbidden as a contract rule
 
-Status: queued immediately after or partially overlapping Phase 1
+Planned canonical policy:
 
-Objective:
+- validate contiguous CUDA `float32` tensors shaped `[batch, rays, 3]`
+- enforce normalization tolerance with explicit epsilon in bindings and tests
 
-- reduce wall-clock PPO update cost on the canonical learner path
+### 5.5 Canonical Domain Boundary Rule
 
-Work packages:
+Canonical statement:
 
-1. verify rollout tensor caching and reuse across PPO epochs
-2. reduce optimizer-side device copies and allocator churn
-3. keep minibatch shuffle and indexing fully on-device where practical
-4. validate perf-only telemetry and ablation combinations remain safe
+- outside the compiled domain, rays are treated by the environment contract as
+  horizon-saturated invalid observations, not as a promise of globally correct
+  analytic SDF continuation
+- inside-solid queries must preserve negative-distance semantics where the
+  runtime supports them, or be explicitly converted into collision semantics at
+  the environment boundary with no ambiguity
 
-Current Phase 2 progress:
+Implementation consequence:
 
-- [x] remove Python-per-sequence hidden-state reconstruction from `MultiTrajectoryBuffer.sample_minibatches(...)` on the canonical BPTT path
-- [x] cache sequence-start hidden states and aux sequence views once per PPO update so minibatch sampling reuses tensor-native indexing instead of iterating CUDA permutation indices in Python
-- [x] cache per-update sequence reshapes inside `MultiTrajectoryBuffer` so repeated PPO epochs reuse BPTT tensor views instead of rebuilding them every sampling pass
-- [x] extend `TrajectoryBuffer.MiniBatch` with tensor-native `hidden_batch` and teach `PpoLearner.train_ppo_epoch(...)` to consume it before falling back to legacy `hidden_states`
-- [x] accumulate PPO minibatch metrics on-device inside `PpoLearner.train_ppo_epoch(...)` so loss, KL, clip fraction, and RND accounting no longer call `.item()` on every minibatch
-- [x] pass cached sequence observations/actions/aux tensors through `TrajectoryBuffer.MiniBatch` so `PpoLearner.train_ppo_epoch(...)` can call `policy.evaluate_sequence(...)` without rebuilding BPTT minibatches from flattened tensors
-- [x] validate the new sequence hidden-batch path with focused actor checks: `22 passed`, focused `ruff`, focused `mypy --strict`
+- runtime docs and environment docs must distinguish field math from published
+  observation semantics
 
-Success criteria:
+### 5.6 Canonical Coordinate Transform Rule
 
-- reduced `ppo_update_ms`
-- stable or improved training correctness metrics
-- no reintroduction of alternate trainer modes
+Canonical statement:
 
-### Phase 3 - Verification And Stability Deepening
+- no dataset transform may be described only in prose
+- each supported dataset adapter must define an explicit rigid transform matrix,
+  handedness convention, and semantic mapping table
 
-Status: planning started in this pass
+Planned canonical policy:
 
-Objective:
+- implement dataset-specific golden tests using known poses and rendered ground
+  truth to verify orientation, scale, and forward axis semantics
 
-- strengthen proof around the current canonical path before deeper runtime redesign
+### 5.7 Canonical Episodic Memory Reward Rule
 
-Work packages:
+Canonical statement:
 
-1. long-run allocation-stability tests around repeated CUDA stepping
-2. explicit dtype and contiguity tests at the extension boundary
-3. deeper `.gmdag` artifact invariant tests tied to the actual in-repo format
-4. optional passive dataset-auditor validation if that surface is implemented
+- loop-foraging logic is valid only if its reward math is explicit
+- the architecture will not claim that memory "eliminates" failure modes unless
+  a precise reward definition is documented and tested
 
-Success criteria:
+Planned canonical policy:
 
-- stronger protection against silent CUDA-boundary regressions
-- stronger confidence in long-running training stability
-- clearer separation between runtime faults and trainer faults
+- define loop similarity metric
+- define threshold for loop activation
+- define reward or penalty term and weighting relative to environment reward
+- define insertion cadence, capacity, and eviction semantics explicitly
 
-### Phase 4 - Benchmark-Gated Runtime Experiments
+### 5.8 Canonical Observer Transport Rule
 
-Status: deferred until Phases 1 through 3 produce clear results
+Canonical statement:
 
-Objective:
+- the production observer surface is ZMQ-based and passive
+- browser or web transport, if present, is an observer-side proxy layer only
+- no browser transport claim may be used in hot-path reasoning
 
-- evaluate whether lower-level runtime redesign is still warranted after hot-path cleanup
+## 6. Program Structure
 
-Candidate experiments:
+The adoption program is organized into eight workstreams that execute in a
+controlled sequence.
 
-1. truncation-aware storage or metadata
-2. alternate payload precision policies
-3. layout redesign such as Morton-style ordering
-4. measured stream-overlap experiments that do not create a second production runtime
-
-Success criteria:
-
-- real trainer win, not just microbenchmark win
-- preserved actor contract
-- no widening of the production architecture surface
-
-## 7. Immediate Planning Output
-
-To make planning progress concrete, the next implementation planning unit is:
-
-### Sprint A - Trainer Materialization Cleanup
+### 6.1 Workstream A - Architecture And Contract Lock
 
 Scope:
 
-- canonical trainer only
-- no format redesign
-- no alternate runtime modes
+- rewrite docs so imported claims become corrected repo-local contracts
+- remove contradictions and undefined terms before large code movement
 
-Primary tasks:
+Deliverables:
 
-1. audit every remaining unconditional `DistanceMatrix` materialization on the trainer path
-2. audit every remaining per-actor `Action` materialization on the trainer path
-3. classify each occurrence as:
-	 - required for passive publication
-	 - required for telemetry
-	 - removable
-	 - replaceable with batched tensor handling
-4. implement the removable cases first
+- updated `docs/ARCHITECTURE.md`
+- updated `docs/CONTRACTS.md`
+- updated `docs/SDFDAG_RUNTIME.md`
+- updated `docs/COMPILER.md`
+- updated `docs/SIMULATION.md`
+- updated `docs/AUDITOR.md`
+- updated `docs/VERIFICATION.md`
+- updated `AGENTS.md` only if a new permanent repository rule is required
 
-Current audited checklist:
+Exit criteria:
 
-- [x] confirm tensor-native stepping is already the preferred trainer path
-- [x] confirm selected-actor publish-time `DistanceMatrix` materialization is already selective
-- [x] identify fallback Python `Action` construction in `ppo_trainer.py`
-- [x] identify fallback observation rebuild via `_obs_to_tensor(...)` in `ppo_trainer.py`
-- [x] identify per-step host extraction for loop similarity and reward accounting in `ppo_trainer.py`
-- [x] identify unconditional tensor-path `depth_cpu` extraction in `SdfDagBackend._consume_actor_observation()`
-- [x] identify tensor-path MJX speed-throttling seam still reading `actor.prev_depth` through NumPy
-- [x] remove canonical-trainer fallback Python `Action` construction in `ppo_trainer.py`
-- [x] remove canonical-trainer fallback observation rebuild via `_obs_to_tensor(...)`
-- [x] require tensor-native `reset_tensor()` and `batch_step_tensor_actions()` on the canonical PPO runtime seam
-- [x] remove the tensor-path MJX speed-throttling host round-trip so previous depth can stay tensor-native until publish-time materialization is requested
-- [x] re-measure `host_extract_ms`, `telemetry_publish_ms`, and `sps` after the first seam cleanup
-- [x] batch intrinsic-reward and loop-similarity host extraction behind telemetry-only need in `ppo_trainer.py`
-- [x] re-measure the canonical trainer after the host-extraction reduction pass
-- [x] move canonical reward/done/truncated rollout tensors onto the `SdfDagTensorStepBatch` seam so the trainer stops rebuilding them from `StepResult` objects each tick
-- [x] re-measure rollout-side `sps`, `env_ms`, `trans_ms`, and `host_extract_ms` after the tensor-result seam change
+- one consistent story for tensor contracts, runtime complexity, DAG layout,
+  semantic mapping, and observer transport
 
-Measurement plan:
+### 6.2 Workstream B - Compiler Correctness And File-Format Lock
 
-- compare before and after trainer runs on the same profile
-- track `sps`, `host_extract_ms`, `telemetry_publish_ms`, and `ppo_update_ms`
-- confirm dashboard and telemetry still function for the selected published actor set
+Scope:
 
-Current post-cleanup measurement:
+- harden `projects/voxel-dag` as a first-class compiler domain
+- formalize `.gmdag` invariants and deduplication behavior
 
-- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048.log`
-- normalized summary artifact: `artifacts/benchmarks/post-sprintA-trainer/canonical_2048.log.summary.json`
-- bounded canonical run: `4` actors, `128x24`, `2048` total steps, default telemetry-on profile
-- current mean metrics: `sps=126.15`, `host_extract_ms=0.7125`, `telemetry_publish_ms=0.0`, `ppo_update_ms=19596.59`
-- summary source: `ppo_update_source=artifact-log`, `final_checkpoint_path=checkpoints\policy_final.pt`
-- previous comparable attribution baseline from `artifacts/benchmarks/attribution-matrix/20260309-095734/summary.csv` row `baseline`: `sps=120.3375`, `host_ms=0.75`, `tele_ms=0.0`, `ppo_update_ms=20967.29`
-- initial interpretation: Sprint A seam cleanup improved steady-state SPS by about `5.8`, slightly reduced host extraction cost, and reduced mean PPO update wall time on this bounded profile
+Tasks:
 
-Current post-host-extraction measurement:
+1. lock canonical file header, payload, and versioning rules
+2. implement canonical hash plus structural equality fallback
+3. document and test node ordering, child mask semantics, and leaf payload
+4. add artifact-level invariant tests and corruption tests
+5. add golden compilation fixtures from representative scenes
 
-- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_hostcut.log`
-- normalized summary artifact: `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_hostcut.log.summary.json`
-- bounded canonical run: `4` actors, `128x24`, `2048` total steps, default telemetry-on profile
-- current mean metrics: `sps=131.19`, `host_extract_ms=0.3625`, `telemetry_publish_ms=0.0`, `ppo_update_ms=19030.26`
-- summary source: `ppo_update_source=artifact-log`, `final_checkpoint_path=checkpoints\policy_final.pt`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048.log`: `sps=+5.04`, `host_extract_ms=-0.35`, `telemetry_publish_ms=+0.0`, `ppo_update_ms=-566.33`
-- delta versus `artifacts/benchmarks/attribution-matrix/20260309-095734/summary.csv` row `baseline`: `sps=+10.85`, `host_ms=-0.3875`, `tele_ms=+0.0`, `ppo_update_ms=-1937.03`
-- interpretation: the host-extraction reduction produced another measurable Sprint A win, roughly halving mean host extraction cost while improving bounded-profile SPS and slightly reducing mean inline PPO update wall time
+Exit criteria:
 
-Current post-result-tensor rollout measurement:
+- `.gmdag` generation is deterministic for fixed inputs
+- corrupted files fail fast with actionable errors
+- deduplication correctness is proven independently of compression ratio
 
-- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_result_tensors.log`
-- bounded canonical run: `4` actors, `128x24`, `2048` total steps, default telemetry-on profile
-- recovered summary artifact: `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_result_tensors.log.summary.json`
-- mean metrics from `8` logged step samples: `sps=132.25`, `env_ms=9.9625`, `mem_ms=1.0375`, `trans_ms=3.725`, `host_extract_ms=0.4375`, `telemetry_publish_ms=0.0`, `ppo_update_ms=23649.38`
-- summary source: `ppo_update_source=artifact-log`, `final_checkpoint_path=checkpoints\policy_final.pt`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_hostcut.log`: `sps=+1.06`, `env_ms=-0.65`, `mem_ms=+0.11`, `trans_ms=+0.40`, `host_extract_ms=+0.075`, `telemetry_publish_ms=+0.0`, `ppo_update_ms=+4619.12`
-- note: bounded-run summaries should use the artifact log when it contains the optimizer tail and fall back to `logs/navi_actor_train.log` only when redirected capture omits the final completion window; the fallback path was validated with a deliberately truncated temporary log
-- interpretation: moving reward/done/truncated tensors onto the canonical step batch improved bounded rollout SPS again and kept host extraction low, while bounded `ppo_update_ms` remains noisy enough that optimizer-wall-time claims still need a larger repeat set than this single recovered run
+### 6.3 Workstream C - CUDA Runtime Contract Hardening
 
-Current post-Phase-2 PPO update measurement:
+Scope:
 
-- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_rerun.log`
-- normalized summary artifact: `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_rerun.log.summary.json`
-- bounded canonical run: `4` actors, `128x24`, `2048` total steps, `apartment_1.gmdag`, fresh actor PUB port `tcp://*:5742`
-- mean metrics from `8` logged step samples: `sps=125.7875`, `env_ms=11.9125`, `mem_ms=1.075`, `trans_ms=3.8625`, `host_extract_ms=0.4`, `telemetry_publish_ms=0.0`, `ppo_update_ms=22105.53`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_result_tensors.log.summary.json`: `sps=-6.4625`, `env_ms=+1.95`, `mem_ms=+0.0375`, `trans_ms=+0.1375`, `host_extract_ms=-0.0375`, `telemetry_publish_ms=+0.0`, `ppo_update_ms=-1543.85`
-- interpretation: the first rerun suggested a real optimizer-side win but was too noisy to trust on its own; the repeat-set aggregate below is the stronger signal
+- harden `projects/torch-sdf` around explicit tensor and kernel rules
 
-Current post-Phase-2 PPO update repeat set:
+Tasks:
 
-- aggregate artifact: `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_repeat_set.summary.json`
-- member summaries:
-	- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_repeat1_rerun.log.summary.json`
-	- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_repeat2_rerun.log.summary.json`
-	- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_repeat3_rerun.log.summary.json`
-- repeat-set mean metrics across `3` bounded runs: `sps=123.4625`, `env_ms=11.4833`, `mem_ms=0.95`, `trans_ms=3.9667`, `host_extract_ms=0.3833`, `telemetry_publish_ms=0.0667`, `ppo_update_ms=20456.99`
-- repeat-set spread: `sps` ranged from `113.175` to `129.1125`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_result_tensors.log.summary.json`: `sps=-8.7875`, `env_ms=+1.5208`, `mem_ms=-0.0875`, `trans_ms=+0.2417`, `host_extract_ms=-0.0542`, `telemetry_publish_ms=+0.0667`, `ppo_update_ms=-3192.39`
-- interpretation: the hidden-batch plus sequence-view PPO cleanup now shows a stronger average optimizer-wall-time reduction of about `3.19s` on this bounded profile, but it does not improve end-to-end rollout throughput on the same run set; the next Phase 2 pass should target learner-side overhead that can preserve the PPO win without giving back SPS
+1. validate device, dtype, rank, shape, and contiguity at the binding boundary
+2. validate normalization tolerance for direction tensors
+3. define and expose `MAX_STEPS`, hit epsilon, horizon clamp, and negative-hit
+   semantics explicitly
+4. prove GIL-release scope and make docs precise about what remains in Python
+5. add unit and integration tests for failure traps and edge conditions
 
-Current post-Phase-2 metric-accumulation rerun:
+Exit criteria:
 
-- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_metricaccum_rerun2.log`
-- normalized summary artifact: `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_metricaccum_rerun2.log.summary.json`
-- bounded canonical run: `4` actors, `128x24`, `2048` total steps, `apartment_1.gmdag`, fresh actor PUB port `tcp://*:5748`
-- mean metrics from `20` logged step samples: `sps=118.815`, `env_ms=11.155`, `mem_ms=1.105`, `trans_ms=4.42`, `host_extract_ms=0.315`, `telemetry_publish_ms=0.165`, `ppo_update_ms=19746.43`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_result_tensors.log.summary.json`: `sps=-13.435`, `env_ms=+1.1925`, `mem_ms=+0.0675`, `trans_ms=+0.695`, `host_extract_ms=-0.1225`, `telemetry_publish_ms=+0.165`, `ppo_update_ms=-3902.95`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_repeat_set.summary.json`: `sps=-4.6475`, `env_ms=-0.3283`, `mem_ms=+0.155`, `trans_ms=+0.4533`, `host_extract_ms=-0.0683`, `telemetry_publish_ms=+0.0983`, `ppo_update_ms=-710.56`
-- interpretation: moving minibatch metric accounting fully onto device cut another `~0.71s` off `ppo_update_ms` relative to the current Phase 2 repeat-set mean and lowered `host_extract_ms` again, but this single rerun still underperformed on end-to-end SPS; the next learner pass should focus on sequence-branch reshape/remainder churn in `learner_ppo.py` before trusting optimizer wins as throughput wins
+- all low-level runtime assumptions are explicit, tested, and documented
+- edge-case behavior is deterministic and identical across docs and code
 
-Current post-Phase-2 direct-sequence rerun:
+### 6.4 Workstream D - Environment Integration Refactor
 
-- `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_directseq_rerun2.log`
-- normalized summary artifact: `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_directseq_rerun2.log.summary.json`
-- bounded canonical run: `4` actors, `128x24`, `2048` total steps, `apartment_1.gmdag`, fresh actor PUB port `tcp://*:5750`
-- mean metrics from `20` logged step samples: `sps=125.74`, `env_ms=11.665`, `mem_ms=1.025`, `trans_ms=3.76`, `host_extract_ms=0.355`, `telemetry_publish_ms=0.0`, `ppo_update_ms=19141.32`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_result_tensors.log.summary.json`: `sps=-6.51`, `env_ms=+1.7025`, `mem_ms=-0.0125`, `trans_ms=+0.035`, `host_extract_ms=-0.0825`, `telemetry_publish_ms=+0.0`, `ppo_update_ms=-4508.06`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_seqcache_repeat_set.summary.json`: `sps=+2.2775`, `env_ms=+0.1817`, `mem_ms=+0.075`, `trans_ms=-0.2067`, `host_extract_ms=-0.0283`, `telemetry_publish_ms=-0.0667`, `ppo_update_ms=-1315.67`
-- delta versus `artifacts/benchmarks/post-sprintA-trainer/canonical_2048_phase2_metricaccum_rerun2.log.summary.json`: `sps=+6.925`, `env_ms=+0.51`, `mem_ms=-0.08`, `trans_ms=-0.66`, `host_extract_ms=+0.04`, `telemetry_publish_ms=-0.165`, `ppo_update_ms=-605.11`
-- interpretation: handing cached sequence tensors straight to `policy.evaluate_sequence(...)` preserved the Phase 2 optimizer-wall-time gains, recovered bounded SPS relative to the prior metric-accumulation rerun, and removed the remaining learner-side reshape/remainder churn on the canonical BPTT path; the next learner pass should target any residual remainder fallback and optimizer-side indexing/allocation churn that still sits above the `~19.1s` inline PPO floor on this profile
+Scope:
 
-## 8. Proposed Order Of Execution
+- integrate corrected imported runtime ideas into `projects/environment`
+- preserve actor contract while maximizing tensor-native behavior internally
 
-The planning order from here should be:
+Tasks:
 
-1. Phase 1 / Sprint A: trainer materialization cleanup
-2. Phase 2: PPO update optimization
-3. Phase 3: runtime-boundary and stability validation expansion
-4. Phase 4 only if the previous phases do not sufficiently move throughput
+1. unify live asset loading, metadata validation, and runtime preflight
+2. keep DAG, ray buffers, and outputs GPU-resident across steps
+3. keep observation adaptation vectorized and selective
+4. formalize outside-domain and horizon-saturation semantics at the environment
+   boundary
+5. move all dataset transforms and semantic remaps behind adapters only
+6. formalize compiled corpus refresh, promotion, overwrite, and resolution
+   replacement behavior
+7. document and test coordinate transforms per dataset source
 
-## 9. User Decisions Currently Needed
+Exit criteria:
 
-None are blocking right now.
+- environment service and direct trainer path both consume the same corrected
+  runtime contracts
+- public `DistanceMatrix` semantics are preserved and precisely documented
 
-The architecture-significant contradictions from `imported/` are already
-resolved by current repo policy and current docs.
+### 6.5 Workstream E - Actor And Trainer Integration
 
-If you want to reopen any of these later, they should be explicit decisions:
+Scope:
 
-- distributed hot-loop stepping vs in-process trainer
-- aggressive runtime-format redesign vs trainer-first optimization
-- swarm-style coordination vs current single-policy parallel training
+- adopt imported tensor-native and dataflow ideas without violating the sacred
+  actor topology or canonical in-process trainer rule
+
+Tasks:
+
+1. keep the actor cognitive stack unchanged in topology
+2. keep canonical training fully in-process with no hot-loop ZMQ dependency
+3. remove any remaining avoidable host staging in rollout and learner paths
+4. migrate canonical rollout storage toward preallocated batched GPU slabs with
+  masked tensor bookkeeping for hidden state, auxiliary state, and episode
+  accumulators
+5. add explicit attribution timers inside PPO update sub-stages
+6. formalize episodic-memory reward math and update cadence
+7. collapse episodic-memory query/add work for shared rollout embedding batches
+  so the canonical trainer normalizes each batch once before reuse
+8. preserve tensor-native observation, action, reward, and rollout seams
+9. batch sparse telemetry host extraction for action and done flags so
+  selected-actor publication avoids per-actor device synchronization on
+  telemetry ticks
+10. batch completed-episode host extraction so actor id, episode return, and
+  episode length cross the device boundary in one packed transfer before
+  sparse episode publication
+11. keep running reward accumulation on-device and skip unused scalar host
+   mirrors when step telemetry is disabled
+12. batch PPO epoch metric materialization so learner loss, KL, entropy, clip,
+  and RND summaries cross to Python in one packed transfer at update end
+13. expose PPO update sub-stage attribution on the canonical learner path for
+  minibatch prep, policy evaluation, backward, gradient clip, optimizer step,
+  and RND step timing
+14. require sequence-native minibatches on the canonical `seq_len > 0` PPO path
+   and remove learner-side flat-to-sequence reshaping fallback
+15. skip hidden-state minibatch reconstruction on the canonical PPO path because
+  the active `Mamba2TemporalCore` ignores hidden state in both step and
+  sequence evaluation
+16. normalize advantages once per finalized rollout and reuse the cached
+  normalized tensor across canonical PPO minibatch sampling instead of
+  re-normalizing per epoch or leaving the batched path unnormalized
+17. remove canonical trainer-side hidden-state carry, reset, and PPO bootstrap
+  plumbing because the active `Mamba2TemporalCore` ignores hidden state during
+  both rollout stepping and sequence evaluation
+18. remove canonical rollout-buffer hidden-state allocation, caching, and
+  minibatch emission on the batched PPO path because the active
+  `Mamba2TemporalCore` does not consume hidden starts
+19. remove per-actor `TrajectoryBuffer` wrapper allocation from the canonical
+  `MultiTrajectoryBuffer(capacity=...)` path so production rollout storage is a
+  real batched slab rather than a dual-surface container
+20. gate completed-episode host extraction behind real sparse episode
+  publication need so canonical training does not batch-copy done actor
+  returns/lengths to the CPU when episode telemetry is disabled or filtered out
+21. gate initial and live observation materialization behind real dashboard
+  publication need so canonical tensor resets and runtime steps do not build
+  `DistanceMatrix` observations when the observation stream is disabled
+22. keep only one canonical trainer surface and frame any ablation as diagnostic
+   only
+
+Exit criteria:
+
+- actor-side runtime and learner paths are explicit, measurable, and aligned
+  with corrected docs
+
+### 6.6 Workstream F - Auditor And Dataset QA Integration
+
+Scope:
+
+- adopt the imported passive-observer and dataset-auditor ideas safely
+
+Tasks:
+
+1. keep dashboard passive and actor-stream-first during training
+2. support optional dataset-auditor rendering through the real runtime, not
+   geometry export
+3. formalize any ZMQ-to-web proxy as observer-only infrastructure
+4. harden `WAITING` and partial-system modes
+5. cap ingestion and rendering cost to protect UI responsiveness
+
+Exit criteria:
+
+- observer tooling remains fully non-blocking and operationally independent
+
+### 6.7 Workstream G - Verification And Qualification
+
+Scope:
+
+- turn the corrected architecture into a complete proof surface
+
+Tasks:
+
+1. unit tests for tensor contracts, math utilities, and semantic transforms
+2. compiler invariant tests and corruption tests
+3. runtime seam tests for CUDA boundary failures and edge behavior
+4. live corpus tests against promoted `.gmdag` fixtures
+5. long-run allocation-stability tests
+6. trainer-seam tests for tensor-native stepping and publication selectivity
+7. end-to-end stack tests for training, resume, dashboard attach, and replay
+
+Exit criteria:
+
+- each architecture claim has a corresponding proof layer
+- correctness failures are attributable to a single domain quickly
+
+### 6.8 Workstream H - Performance Qualification
+
+Scope:
+
+- prove that the adoption is not only correct but performance-safe on the real
+  trainer
+
+Tasks:
+
+1. maintain environment-layer `bench-sdfdag` qualification
+2. add compiler-side artifact size and load-time tracking
+3. add runtime microbenchmarks for cast-rays and observation adaptation
+4. add trainer attribution for rollout, memory, host extraction, PPO sub-stages,
+   and telemetry publication
+5. define canonical benchmark profiles and artifact naming rules
+6. run repeat sets for any major runtime-format or trainer-hot-path change
+
+Exit criteria:
+
+- no architecture promotion without end-to-end trainer proof
+- attribution is rich enough to explain regressions, not just detect them
+
+## 7. Implementation Phases
+
+### Phase 0 - Documentation And Decision Lock
+
+Objective:
+
+- convert imported ideas and review findings into corrected canonical docs
+
+Required outputs:
+
+- corrected complexity language
+- corrected precision language
+- corrected hash and dedup language
+- corrected observer transport language
+- explicit reward and boundary semantics
+
+Validation:
+
+- doc cross-check pass across all touched files
+- no unresolved contradictions between docs
+
+### Phase 1 - Low-Level Contract Hardening
+
+Objective:
+
+- lock compiler and runtime contracts before broad integration changes
+
+Required outputs:
+
+- `.gmdag` invariant suite
+- tensor-boundary validation suite
+- explicit edge-behavior tests
+- deterministic compile fixtures
+
+Validation:
+
+- focused `ruff`
+- focused `mypy --strict`
+- compiler and runtime unit suites
+
+### Phase 2 - Environment Refactor And Corpus Pipeline
+
+Objective:
+
+- integrate corrected imported environment ideas behind one stable boundary
+
+Required outputs:
+
+- hardened corpus refresh and promotion flow
+- corrected dataset adapters
+- corrected horizon and out-of-bounds semantics
+- stable tensor-native environment seam
+
+Validation:
+
+- environment unit tests
+- live compiled-corpus tests
+- `check-sdfdag`
+- `bench-sdfdag`
+
+### Phase 3 - Actor And Trainer Alignment
+
+Objective:
+
+- align actor and trainer with the corrected runtime without changing sacred
+  actor topology
+
+Required outputs:
+
+- explicit PPO sub-stage attribution
+- explicit episodic-memory reward math
+- end-to-end tensor-native learner seams
+- no alternate production trainer path
+
+Validation:
+
+- actor unit tests
+- trainer state tests
+- targeted end-to-end training smoke runs
+
+### Phase 4 - Auditor And Dataset QA Completion
+
+Objective:
+
+- complete passive observability and dataset-auditor surfaces safely
+
+Required outputs:
+
+- passive training-safe dashboard behavior
+- runtime-backed dataset auditor
+- clarified proxy transport if browser clients are supported
+
+Validation:
+
+- auditor unit and smoke tests
+- observer attach during canonical training without regressions
+
+### Phase 5 - End-To-End Qualification
+
+Objective:
+
+- prove the integrated system is complete and robust
+
+Required outputs:
+
+- canonical train-run qualification
+- checkpoint resume qualification
+- dashboard attach qualification
+- corpus refresh to training qualification
+- replay qualification
+
+Validation:
+
+- end-to-end scripted scenarios
+- failure injection for missing assets, invalid tensors, and bad ports
+
+### Phase 6 - Performance Promotion Review
+
+Objective:
+
+- decide whether any benchmark-gated runtime experiments should be promoted
+
+Required outputs:
+
+- repeat-set benchmark comparisons against current canonical trainer
+- decision record for any proposed payload/layout/overlap change
+
+Validation:
+
+- promotion only if correctness stays green and the real trainer wins
+
+## 8. Validation Matrix
+
+### 8.1 Documentation Validation
+
+Checks:
+
+- no contradictory claims across docs
+- every complexity claim uses correct bounded or approximate language
+- every contract uses explicit dimensions, dtype, and tolerances
+
+### 8.2 Compiler Validation
+
+Checks:
+
+- deterministic compile output for golden fixtures
+- hash collision defense tests
+- structural equality fallback tests
+- corrupted header and payload rejection tests
+- child-mask and node-ordering invariant tests
+
+### 8.3 Runtime Validation
+
+Checks:
+
+- CUDA device mismatch traps
+- dtype mismatch traps
+- rank and shape traps
+- non-contiguous tensor traps
+- normalization tolerance traps
+- inside-solid, out-of-bounds, and horizon-saturation behavior tests
+- `MAX_STEPS` termination tests
+
+### 8.4 Dataset And Adapter Validation
+
+Checks:
+
+- coordinate transform golden fixtures
+- semantic remap fixtures
+- scale and orientation sanity tests
+- promoted manifest correctness tests
+
+### 8.5 Environment Validation
+
+Checks:
+
+- reset and step against real compiled assets
+- public `DistanceMatrix` shape and semantic correctness
+- selective materialization correctness
+- reward and truncation contract correctness
+
+### 8.6 Actor And Trainer Validation
+
+Checks:
+
+- sacred actor interface preservation
+- tensor-native minibatch and sequence path tests
+- episodic-memory reward math tests
+- PPO learner attribution stability
+- canonical trainer hot-path no-stall tests
+
+### 8.7 Auditor Validation
+
+Checks:
+
+- passive attach with missing producers
+- actor-only training mode attach
+- capped ingestion and frame-drop safety
+- dataset auditor runtime render correctness
+
+### 8.8 End-To-End Validation
+
+Checks:
+
+- corpus refresh to successful training
+- successful continuous training run
+- checkpoint save and resume
+- dashboard attach during training
+- recorder and replay surfaces
+- fail-fast startup and restart verification
+
+## 9. Performance Qualification Plan
+
+### 9.1 Canonical Benchmark Profiles
+
+Every major adoption step must be measured on stable named profiles.
+
+Required profiles:
+
+1. environment microbench profile
+2. runtime cast-rays microbench profile
+3. direct trainer bounded profile
+4. direct trainer repeat-set profile
+5. optional long-run stability profile
+
+### 9.2 Required Metrics
+
+Environment metrics:
+
+- load time
+- step latency
+- ray throughput
+- observation adaptation time
+
+Trainer metrics:
+
+- `sps`
+- `env_ms`
+- `mem_ms`
+- `trans_ms`
+- `host_extract_ms`
+- `telemetry_publish_ms`
+- `ppo_update_ms`
+- PPO sub-stage attribution for minibatch prep, policy evaluation, backward,
+  gradient clip, optimizer step, and RND step
+
+### 9.3 Performance Gates
+
+A change is promotable only if:
+
+1. quality gates are green
+2. contract behavior stays correct
+3. the change improves or materially advances end-to-end trainer throughput on
+   canonical profiles
+4. any regression is explained and accepted explicitly, not silently carried
+5. no observer or compatibility cost is pushed into the hot path
+
+### 9.4 Artifact Discipline
+
+Every benchmark set must record:
+
+- command profile
+- scene or corpus scope
+- actor count
+- resolution
+- run duration or step bound
+- artifact log path
+- summary path
+- source of final optimizer timing
+- comparison baseline
+
+## 10. End-To-End Completion Checklist
+
+The program is complete only when all items below are true.
+
+1. docs are internally consistent and mathematically corrected
+2. `.gmdag` compile and load contracts are formalized and tested
+3. CUDA boundary contracts are explicit and enforced
+4. environment adaptation is tensor-native internally and contract-correct
+   externally
+5. actor and trainer remain sacred in topology and canonical in topology
+6. episodic-memory reward and boundary semantics are explicit and tested
+7. passive observer tooling is complete and non-blocking
+8. dataset-auditor path works through the real runtime
+9. end-to-end training, resume, and replay flows are operational
+10. performance qualification is recorded and reproducible
+
+## 11. Risk Register And Controls
+
+### 11.1 Major Risks
+
+Risk:
+
+- large documentation-driven refactor creates temporary contract drift
+
+Control:
+
+- Phase 0 completes before major code movement
+
+Risk:
+
+- runtime-format work creates correctness regressions hidden by benchmark noise
+
+Control:
+
+- correctness gates must pass before performance promotion
+
+Risk:
+
+- imported claims are adopted too literally and reintroduce invalid assumptions
+
+Control:
+
+- this plan's corrected canonical answers override imported prose wherever they
+  conflict
+
+Risk:
+
+- observer or web tooling leaks back into hot-path reasoning
+
+Control:
+
+- observer transport remains explicitly non-canonical for throughput reasoning
+
+Risk:
+
+- parallel research paths widen production architecture surface
+
+Control:
+
+- only one production trainer and one production runtime remain canonical at any
+  time
+
+## 12. Execution Order
+
+The implementation order for this refactor is:
+
+1. Phase 0 - documentation and decision lock
+2. Phase 1 - compiler and runtime contract hardening
+3. Phase 2 - environment and corpus pipeline refactor
+4. Phase 3 - actor and trainer alignment
+5. Phase 4 - auditor and dataset QA completion
+6. Phase 5 - end-to-end qualification
+7. Phase 6 - performance promotion review
+
+## 13. Immediate Next Actions
+
+The first implementation sprint under this new plan is:
+
+1. rewrite the affected docs to replace imported overclaims with corrected
+   canonical contracts
+2. formalize `.gmdag` invariants and canonical deduplication rules
+3. formalize CUDA tensor boundary validation including normalization tolerance
+4. add the first missing correctness tests for hash fallback, out-of-bounds
+   semantics, and dataset transform fixtures
+5. add PPO sub-stage attribution so future trainer work is evidence-rich
+
+## 14. Decision Record
+
+This plan makes the following explicit architectural decisions for the adoption:
+
+1. imported architecture ideas are adopted selectively, not wholesale
+2. corrected mathematical contracts override imported prose where they differ
+3. the imported runtime vision is integrated under Navi's in-process canonical
+   trainer rule
+4. correctness and validation are first-class workstreams, not cleanup after the
+   refactor
+5. benchmark-gated runtime experiments remain later-phase work until the core
+   adoption is complete and proven

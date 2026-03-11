@@ -32,16 +32,16 @@ def _option_default(func: object, name: str) -> object:
 def test_validate_sdfdag_training_scenes_accepts_gmdag_assets() -> None:
     """Canonical training scene pools should accept compiled assets only."""
     _validate_sdfdag_training_scenes([
-        str(Path("artifacts/gmdag/corpus/replicacad/stage_one.gmdag")),
-        str(Path("artifacts/gmdag/corpus/hssd/stage_two.gmdag")),
+        str(Path("artifacts/gmdag/corpus/apartment_1.gmdag")),
+        str(Path("artifacts/gmdag/corpus/hssd/102343992.gmdag")),
     ])
 
 
 @pytest.mark.parametrize(
     "scene_path",
     [
-        "data/scenes/replicacad/frl_apartment_stage.glb",
-        "data/scenes/replicacad/frl_apartment_stage.obj",
+        "data/scenes/hssd/102343992.glb",
+        "data/scenes/hssd/102344115.glb",
         "data/scenes/scene_manifest_all.json",
     ],
 )
@@ -58,8 +58,8 @@ def test_validate_sdfdag_training_scenes_rejects_non_gmdag_assets(
 def test_train_defaults_match_canonical_perf_profile() -> None:
     """Canonical training defaults should keep the canonical perf-safe knobs."""
     assert _option_default(train, "actors") == 4
-    assert _option_default(train, "azimuth_bins") == 128
-    assert _option_default(train, "elevation_bins") == 24
+    assert _option_default(train, "azimuth_bins") == 256
+    assert _option_default(train, "elevation_bins") == 48
     assert _option_default(train, "minibatch_size") == 64
     assert _option_default(train, "bptt_len") == 8
     assert _option_default(train, "memory_capacity") == 100_000
@@ -67,6 +67,7 @@ def test_train_defaults_match_canonical_perf_profile() -> None:
     assert _option_default(train, "enable_episodic_memory") is True
     assert _option_default(train, "enable_reward_shaping") is True
     assert _option_default(train, "emit_observation_stream") is True
+    assert _option_default(train, "dashboard_observation_hz") == 10.0
     assert _option_default(train, "emit_training_telemetry") is True
     assert _option_default(train, "emit_perf_telemetry") is True
 
@@ -94,10 +95,11 @@ def test_train_uses_single_canonical_trainer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Canonical training command should construct the single direct trainer."""
+    scene_path = Path("artifacts/gmdag/corpus/apartment_1.gmdag")
+    if not scene_path.exists():
+        pytest.skip("real compiled dataset asset is required for canonical CLI training tests")
     scratch_dir = Path("tests/.tmp_local") / f"cli-canonical-{uuid4().hex}"
     scratch_dir.mkdir(parents=True, exist_ok=True)
-    scene_path = scratch_dir / "sample_scene.gmdag"
-    scene_path.write_bytes(b"G" * 2048)
 
     captured: dict[str, object] = {}
 
@@ -181,6 +183,7 @@ def test_train_uses_single_canonical_trainer(
     assert config.enable_episodic_memory is False
     assert config.enable_reward_shaping is False
     assert config.emit_observation_stream is False
+    assert config.dashboard_observation_hz == 10.0
     assert config.emit_training_telemetry is False
     assert config.emit_perf_telemetry is False
 
@@ -190,13 +193,12 @@ def test_train_defaults_to_prepared_canonical_corpus(
 ) -> None:
     """Canonical training should prepare the full corpus by default."""
     captured: dict[str, object] = {}
+    compiled_one = Path("artifacts/gmdag/corpus/apartment_1.gmdag")
+    compiled_two = Path("artifacts/gmdag/corpus/skokloster-castle.gmdag")
+    if not compiled_one.exists() or not compiled_two.exists():
+        pytest.skip("real compiled dataset assets are required for canonical CLI training tests")
     scratch_dir = Path("tests/.tmp_local") / f"cli-corpus-{uuid4().hex}"
     scratch_dir.mkdir(parents=True, exist_ok=True)
-    compiled_one = scratch_dir / "corpus" / "scene_one.gmdag"
-    compiled_two = scratch_dir / "corpus" / "scene_two.gmdag"
-    compiled_one.parent.mkdir(parents=True, exist_ok=True)
-    compiled_one.write_bytes(b"G" * 2048)
-    compiled_two.write_bytes(b"G" * 2048)
 
     prepared = PreparedSceneCorpus(
         source_root=scratch_dir / "sources",

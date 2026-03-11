@@ -41,6 +41,8 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Dashboard Throughput Default:** The Auditor Dashboard defaults to **actor 0** ingestion/rendering for maximum throughput.
 - **Dynamic Discovery Mode:** Optional selector mode MAY enable dynamic actor discovery/switching for diagnostics.
 - **Canonical Training Corpus Default:** When the user does not explicitly request a scene, manifest, or subset, canonical training MUST use the full discovered dataset corpus rather than a single sample scene.
+- **Canonical Bootstrap Dataset Default:** When bootstrap downloads are requested without an explicit dataset override, the canonical source refresh MUST fetch both the public Habitat test scenes and the public ReplicaCAD stage set so default training is not limited to the 3-scene test bundle.
+- **Canonical Observation Default:** All production-facing CLI commands, wrappers, benchmarks, and training surfaces MUST default to the full-resolution `256x48` observation contract. Retired `128x24` defaults are forbidden.
 - **Canonical Training Duration Default:** When the user does not explicitly request a step/time bound, canonical training MUST run continuously until stopped.
 
 ### 2.4 Mode Detection Standard
@@ -55,6 +57,13 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Cyclic Logs:** File logging MUST be cyclic (RotatingFileHandler) with a strict cap to prevent disk explosion (e.g., max 1MB per file, max 10 backups).
 - **Format:** Logs must use a professional, high-quality structure: `[%(asctime)s] [%(levelname)-8s] [%(name)s:%(lineno)d] - %(message)s`.
 - **Enforcement:** Each project's CLI entry point (`cli.py`) MUST invoke this setup immediately upon startup.
+
+### 2.4.1 Nightly Validation Standard
+- **Single Canonical Nightly Surface:** End-to-end overnight validation MUST run from one orchestration entrypoint in `scripts/` rather than a loose manual checklist.
+- **Hard Gates First:** CUDA/runtime preflight, focused regression suites, and bounded canonical qualification MUST complete successfully before the overnight soak begins.
+- **Shared-Model Proof:** The nightly flow MUST prove that canonical multi-actor training can checkpoint, resume, and continue emitting fresh checkpoints from one shared model state.
+- **Soft Warning Policy:** Throughput drift, attach instability, and other non-fatal regressions MAY emit warnings, but hard failures must stop the nightly and produce machine-readable artifacts.
+- **Artifact Rule:** Every nightly run MUST emit one timestamped artifact root containing raw phase outputs plus a top-level summary JSON for morning review.
 
 ### 2.5 Non-Negotiables
 1. **Wire Contracts:** v2 only (`RobotPose`, `DistanceMatrix`, `Action`, etc.).
@@ -75,8 +84,10 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Tensor-Native Training Rule:** Canonical training internals MUST prefer CUDA tensor representations for observations, actions, rewards, and rollout storage. Materializing Python `DistanceMatrix` or `Action` objects inside the rollout hot path is forbidden except for coarse diagnostics, replay, or external service surfaces.
 - **Corpus Refresh Rule:** Canonical training may auto-compile source scene meshes into `.gmdag` assets, and dataset refresh tooling MUST support overwrite-first refresh of source data and compiled outputs when explicitly requested.
 - **Compile Profile Rule:** Canonical corpus refresh, environment CLI compilation, and actor training wrappers MUST default to `.gmdag` compile resolution `512` unless the user explicitly overrides it.
+- **Real Dataset Scene Rule:** Canonical tests, benchmarks, scripts, and training surfaces MUST use only real dataset scenes or real compiled dataset `.gmdag` assets. Generated, synthetic, procedural, or sample-scene substitutes are forbidden on the canonical path.
 - **Transactional Refresh Rule:** Canonical corpus refresh MUST stage downloaded source datasets and newly compiled outputs outside the live corpus, promote the compiled corpus only after a successful rebuild, and remove transient source downloads after successful integration.
 - **Resolution Mismatch Rule:** When a discovered compiled `.gmdag` asset does not match the requested canonical compile resolution, refresh tooling MUST automatically replace it rather than silently reusing it.
+- **Upgrade Refresh Rule:** After compiler/runtime package upgrades that may affect compiled asset structure or performance, the canonical corpus MUST be fully refreshed before performance conclusions are drawn.
 
 ### 2.6 Compatibility Elimination Standard
 - **Canonical-Only Runtime:** Backward-compatible runtime paths are forbidden. Keep only actively emitted, actively consumed, canonical event and API paths.
@@ -122,6 +133,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Use coarse-grained metrics (every 100 steps) for performance tracking.
 - Default mode detection/reporting should rely on low-volume `actor.training.*` update/perf/episode telemetry.
 - Environment-side compiled-path perf telemetry MUST remain coarse (`environment.sdfdag.perf`) and must not emit more frequently than the existing 100-step cadence.
+- Passive dashboard observation publication for the selected actor MUST remain low-volume and droppable, but the default live cadence must stay visibly responsive at roughly `5-10 Hz` rather than a stale multi-second feel.
 
 ### 3.3.1 Actor Hot-Path Discipline
 - Once SDF/DAG acceleration makes the environment subdominant, actor-side rollout code becomes the critical path and must be treated like systems code.
@@ -157,6 +169,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Gallery Layer tools (Dashboard, Recorder) MUST be operational independent of Simulation/Brain layers.
 - Tools MUST handle missing ZMQ streams gracefully, displaying a `WAITING` state instead of crashing.
 - During canonical training, the Dashboard MUST run in passive actor-only mode: subscribe to the actor PUB stream only and MUST NOT open environment REP/manual-step control paths or depend on environment PUB availability.
+- Dashboard heartbeats during optimizer windows MUST reuse the same passive observation cadence policy as live observation publication instead of falling back to a slower hidden rate.
 - **Default Filter:** UI defaults to actor-0 stream filtering to preserve training throughput.
 - **Dynamic Discovery (Optional):** UI may detect/list/switch actors dynamically when selector mode is explicitly enabled.
 - **UI Throughput:** Processing (ZMQ polling, heavy rendering) MUST NOT block the UI thread for > 16ms per tick. Ingestion MUST be capped or moved to a background thread to maintain 60 FPS responsiveness.

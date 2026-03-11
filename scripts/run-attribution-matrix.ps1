@@ -3,8 +3,8 @@ param(
     [int]$Actors = 4,
     [int]$TotalSteps = 2048,
     [int]$LogEvery = 256,
-    [int]$AzimuthBins = 128,
-    [int]$ElevationBins = 24,
+    [int]$AzimuthBins = 256,
+    [int]$ElevationBins = 48,
     [int]$BasePort = 5700,
     [string]$OutputRoot = "artifacts/benchmarks/attribution-matrix"
 )
@@ -161,8 +161,32 @@ for ($mask = 0; $mask -lt 32; $mask++) {
 
     Write-Host "[$($mask + 1)/32] $runName"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & uv @args *> $logPath
-    $exitCode = $LASTEXITCODE
+    $stdoutPath = "$logPath.stdout"
+    $stderrPath = "$logPath.stderr"
+    if (Test-Path $stdoutPath) { Remove-Item $stdoutPath -Force }
+    if (Test-Path $stderrPath) { Remove-Item $stderrPath -Force }
+
+    $proc = Start-Process `
+        -FilePath "uv" `
+        -ArgumentList $args `
+        -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -NoNewWindow `
+        -PassThru `
+        -Wait
+    $exitCode = $proc.ExitCode
+
+    $mergedLines = @()
+    if (Test-Path $stderrPath) {
+        $mergedLines += Get-Content $stderrPath
+    }
+    if (Test-Path $stdoutPath) {
+        $mergedLines += Get-Content $stdoutPath
+    }
+    Set-Content -Encoding UTF8 -Path $logPath -Value $mergedLines
+    if (Test-Path $stdoutPath) { Remove-Item $stdoutPath -Force }
+    if (Test-Path $stderrPath) { Remove-Item $stderrPath -Force }
     $sw.Stop()
 
     $lines = Get-Content $logPath

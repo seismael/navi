@@ -45,6 +45,13 @@ Forbidden patterns on the canonical hot path:
 
 - GPU -> CPU -> GPU observation bounces
 - per-actor Python object rebuilding when batched tensors already exist
+- per-actor hidden-state or episode-state dictionaries when the rollout horizon is fixed and a batched tensor can carry the same state
+- re-normalizing the same embedding batch separately for episodic-memory query and episodic-memory add in one rollout tick
+- per-actor device synchronization for sparse telemetry fields when one batched CPU mirror can serve the same selected-actor publish tick
+- fragmented completed-episode host copies when one packed done-event mirror can carry actor id, episode return, and episode length for sparse publication
+- host copies of rollout scalar tensors that are not consumed on the current tick, including shaped-reward mirrors when step telemetry is disabled
+- per-tick reward-sum device synchronization when aggregate reward accounting can stay on-device until final metric materialization
+- repeated learner metric `.item()` extraction at PPO epoch end when one packed metric mirror can serve debug logging and returned `PpoMetrics`
 - new transport hops inserted into direct trainer stepping
 - per-step allocation churn when reusable buffers are practical
 
@@ -58,8 +65,19 @@ Current high-value work therefore includes:
 
 - minimizing device copies during minibatch assembly
 - stacking rollout tensors once per PPO update and reusing them across epochs
+- writing rollout ticks into reusable `(actors, time, ...)` device slabs instead of appending actor-by-actor into Python-managed buffers
 - passing cached BPTT sequence views directly into learner sequence evaluation instead of flattening and reshaping them again inside the PPO epoch loop
 - keeping shuffle indices on the same device as the sampled tensors
+- materializing PPO epoch summary metrics through one packed host transfer and reusing that mirror for debug logging and returned metrics
+- attributing PPO update wall time on the canonical learner path into minibatch prep, policy evaluation, backward, gradient clip, optimizer step, and RND step means
+- requiring sequence-native minibatches on the canonical BPTT path instead of flattening and reshaping minibatch tensors again inside the learner
+- normalizing rollout advantages once per finalized PPO update buffer and reusing the cached normalized tensor across epochs instead of recomputing normalization during each sampling pass
+- skipping hidden-state minibatch reconstruction on the canonical BPTT path because the active temporal core ignores hidden state
+- removing trainer-side rollout hidden carry, reset, and PPO bootstrap plumbing on the canonical path because the active temporal core ignores hidden state during both rollout and sequence execution
+- removing batched rollout-buffer hidden allocation, cache population, and minibatch emission on the canonical PPO path because the active temporal core never consumes hidden starts
+- removing per-actor fallback `TrajectoryBuffer` allocation from the canonical `MultiTrajectoryBuffer(capacity=...)` path so batched rollout storage does not pay dual-surface Python overhead
+- gating completed-episode host extraction behind real sparse episode publication need so done-actor reset bookkeeping stays on-device when episode telemetry is disabled or filtered out
+- gating initial and live observation materialization behind real dashboard publication need so the canonical trainer does not ask the runtime to build `DistanceMatrix` objects when no observation stream will publish them
 - hardening attribution toggles so perf-only telemetry configurations remain valid
 
 ### 3.4 Keep Observability Passive
@@ -120,6 +138,9 @@ investigation. Only one rule matters for canonical comparison:
 - final optimizer timing such as `ppo_update_ms` must be recovered from the same artifact when present, or from `logs/navi_actor_train.log` for the matching trainer start window when the artifact tail is incomplete
 - comparison notes must state which source supplied `ppo_update_ms` whenever fallback recovery was needed
 
+Environment-layer benchmark captures should prefer the structured `uv run navi-environment bench-sdfdag --json ...` summary so actor count, warmup, resolution, and measured throughput are recorded explicitly in one machine-readable artifact.
+When run-to-run variance is non-trivial on the local machine, canonical environment comparison should prefer `bench-sdfdag --repeats N --json` and compare the reported median `measured_sps` rather than a single run.
+
 ### 5.4 Experimental Work Classification
 
 `TSDF.md` and the imported docs describe multiple classes of change. Navi does
@@ -137,6 +158,15 @@ Benchmark-gated only:
 - Morton or other layout redesigns
 - stream-overlap or double-buffering changes that complicate the single canonical trainer
 
+### 5.5 Nightly Validation Thresholds
+
+The canonical overnight validation flow should treat these as different classes of signal:
+
+- hard failures: process crash, non-finite training metrics, failed bounded qualification, failed checkpoint resume proof, or stalled checkpoint production
+- soft warnings: attach instability, environment benchmark drift, and degraded but still finite rollout throughput
+
+Nightly summaries should compare against the last accepted baseline instead of treating one run in isolation.
+
 ## 6. Current Reference Baselines
 
 These values are current reference points, not final goals.
@@ -144,7 +174,6 @@ These values are current reference points, not final goals.
 | Profile | Resolution | Steps | Mean SPS | Mean Zero-Wait Ratio | Soft Warnings |
 | --- | --- | --- | --- | --- | --- |
 | Baseline long run | `256x48` | 29,600 | `17.32` | `19.16%` | `269` |
-| Focused pass | `128x24` | 5,000 | `20.62` | `0.00%` | `2` |
 
 ## 7. Current Implementation Priorities
 

@@ -124,6 +124,38 @@ def test_tensor_batch_query_and_add_stay_vectorized() -> None:
     assert torch.all(loop_flags[:-1])
 
 
+def test_prepared_tensor_query_and_add_matches_regular_batch_path() -> None:
+    regular = _make_memory(dim=4, capacity=8, exclusion_window=1, threshold=0.8)
+    prepared = _make_memory(dim=4, capacity=8, exclusion_window=1, threshold=0.8)
+    seed_batch = torch.eye(4, dtype=torch.float32)
+    query_batch = torch.tensor(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    regular.add_batch_tensor(seed_batch)
+    prepared.add_normalized_batch_tensor(prepared.normalize_batch_tensor(seed_batch))
+
+    regular_similarities, regular_loops = regular.query_batch_tensor(query_batch)
+    regular.add_batch_tensor(query_batch)
+
+    prepared_batch = prepared.normalize_batch_tensor(query_batch)
+    prepared_similarities, prepared_loops = prepared.query_normalized_batch_tensor(prepared_batch)
+    prepared.add_normalized_batch_tensor(prepared_batch)
+
+    assert torch.allclose(prepared_similarities, regular_similarities)
+    assert torch.equal(prepared_loops, regular_loops)
+    assert prepared.size == regular.size
+    assert prepared._storage is not None
+    assert regular._storage is not None
+    assert torch.allclose(prepared._storage[: prepared.size], regular._storage[: regular.size])
+
+
 def test_orthogonal_vectors_no_loop() -> None:
     """Orthogonal vectors should produce low similarity → no loop."""
     mem = _make_memory(exclusion_window=0, threshold=0.85)

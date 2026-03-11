@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from navi_contracts import Action, DistanceMatrix, RobotPose, StepResult
+from navi_environment.backends.adapter import materialize_distance_matrix
 from navi_environment.backends.base import SimulatorBackend
 from navi_environment.integration import GmDagAsset, load_gmdag_asset
 from navi_environment.mjx_env import MjxEnvironment
@@ -44,6 +45,7 @@ _PROXIMITY_PENALTY_SCALE: float = 0.8
 _SPAWN_CANDIDATES_PER_AXIS: int = 3
 _SPAWN_HEIGHT_SAMPLES: int = 5
 _PERF_EMA_ALPHA: float = 0.1
+_RAY_DIRECTION_NORM_EPS: float = 1e-4
 
 
 def _obstacle_clearance_reward(
@@ -132,6 +134,26 @@ def build_spherical_ray_directions(azimuth_bins: int, elevation_bins: int) -> np
         ],
         axis=-1,
     ).astype(np.float32)
+
+
+def _validate_unit_direction_tensor(
+    torch_module: Any,
+    ray_dirs: Any,
+    *,
+    name: str,
+    eps: float = _RAY_DIRECTION_NORM_EPS,
+) -> None:
+    if ray_dirs.ndim < 2 or ray_dirs.shape[-1] != 3:
+        msg = f"{name} must have trailing dimension 3; got shape {tuple(int(dim) for dim in ray_dirs.shape)}"
+        raise RuntimeError(msg)
+    norms = torch_module.linalg.vector_norm(ray_dirs, dim=-1)
+    if bool((~torch_module.isfinite(norms)).any().item()):
+        msg = f"{name} must contain only finite direction vectors"
+        raise RuntimeError(msg)
+    max_error = float(torch_module.abs(norms - 1.0).amax().detach().cpu().item())
+    if max_error > eps:
+        msg = f"{name} must be normalized within tolerance {eps}; max error was {max_error:.6g}"
+        raise RuntimeError(msg)
 
 
 @dataclass
@@ -230,6 +252,7 @@ class SdfDagBackend(SimulatorBackend):
         self._bbox_max: list[float] = []
 
         self._ray_dirs_local = self._build_ray_directions().to(self._device)
+        _validate_unit_direction_tensor(self._torch, self._ray_dirs_local, name="ray_dirs_local")
         self._ray_origins = self._torch.empty(
             (self._n_actors, self._n_rays, 3),
             device=self._device,
@@ -916,7 +939,7 @@ class SdfDagBackend(SimulatorBackend):
         return reward_tensor, done_tensor, truncated_tensor, episode_id_tensor
 
     def close(self) -> None:
-        self._dag_tensor = None  # type: ignore[assignment]
+        self._dag_tensor = None
 
     @property
     def pose(self) -> RobotPose:
@@ -1023,6 +1046,57 @@ class SdfDagBackend(SimulatorBackend):
     def _build_ray_directions(self) -> Any:
         return self._torch.from_numpy(build_spherical_ray_directions(self._az_bins, self._el_bins))
 
+    def _validate_cast_rays_inputs(
+        self,
+        dag_tensor: Any,
+        origins: Any,
+        dirs: Any,
+        out_distances: Any,
+        out_semantics: Any,
+    ) -> None:
+        expected_device = self._device.type
+        tensors = (
+            ("dag_tensor", dag_tensor, self._torch.int64),
+            ("origins", origins, self._torch.float32),
+            ("dirs", dirs, self._torch.float32),
+            ("out_distances", out_distances, self._torch.float32),
+            ("out_semantics", out_semantics, self._torch.int32),
+        )
+        for name, tensor, dtype in tensors:
+            if tensor.device.type != expected_device:
+                msg = f"{name} must be on {expected_device}; got {tensor.device.type}"
+                raise RuntimeError(msg)
+            if tensor.dtype != dtype:
+                msg = f"{name} must have dtype {dtype}; got {tensor.dtype}"
+                raise RuntimeError(msg)
+            if not tensor.is_contiguous():
+                msg = f"{name} must be contiguous"
+                raise RuntimeError(msg)
+
+        if origins.ndim != 3 or tuple(int(dim) for dim in origins.shape[2:]) != (3,):
+            msg = f"origins must have shape [batch, rays, 3]; got {tuple(int(dim) for dim in origins.shape)}"
+            raise RuntimeError(msg)
+        if dirs.ndim != 3 or tuple(int(dim) for dim in dirs.shape[2:]) != (3,):
+            msg = f"dirs must have shape [batch, rays, 3]; got {tuple(int(dim) for dim in dirs.shape)}"
+            raise RuntimeError(msg)
+        expected_ray_shape = (int(origins.shape[0]), int(origins.shape[1]), 3)
+        if tuple(int(dim) for dim in dirs.shape) != expected_ray_shape:
+            msg = f"dirs must match origins shape {expected_ray_shape}; got {tuple(int(dim) for dim in dirs.shape)}"
+            raise RuntimeError(msg)
+        expected_output_shape = (int(origins.shape[0]), int(origins.shape[1]))
+        if tuple(int(dim) for dim in out_distances.shape) != expected_output_shape:
+            msg = (
+                f"out_distances must have shape {expected_output_shape}; got "
+                f"{tuple(int(dim) for dim in out_distances.shape)}"
+            )
+            raise RuntimeError(msg)
+        if tuple(int(dim) for dim in out_semantics.shape) != expected_output_shape:
+            msg = (
+                f"out_semantics must have shape {expected_output_shape}; got "
+                f"{tuple(int(dim) for dim in out_semantics.shape)}"
+            )
+            raise RuntimeError(msg)
+
     def _cast_actor_batch(
         self,
         actor_ids: tuple[int, ...],
@@ -1071,8 +1145,10 @@ class SdfDagBackend(SimulatorBackend):
 
         out_distances = self._out_distances[:actor_count]
         out_semantics = self._out_semantics[:actor_count]
+        dag_tensor = self._require_dag_tensor()
+        self._validate_cast_rays_inputs(dag_tensor, origins, dirs_world, out_distances, out_semantics)
         self._torch_sdf.cast_rays(
-            self._require_dag_tensor(),
+            dag_tensor,
             origins,
             dirs_world,
             out_distances,
@@ -1154,10 +1230,9 @@ class SdfDagBackend(SimulatorBackend):
         valid_2d: np.ndarray,
     ) -> DistanceMatrix:
         actor = self._actors[actor_id]
-        return DistanceMatrix(
+        return materialize_distance_matrix(
             episode_id=actor.episode_id,
-            env_ids=np.array([actor_id], dtype=np.int32),
-            matrix_shape=depth_2d.shape,
+            env_id=actor_id,
             depth=depth_2d[np.newaxis, ...],
             delta_depth=delta_2d[np.newaxis, ...],
             semantic=semantic_2d[np.newaxis, ...],
@@ -1165,7 +1240,6 @@ class SdfDagBackend(SimulatorBackend):
             overhead=np.zeros((256, 256, 3), dtype=np.float32),
             robot_pose=actor.pose,
             step_id=step_id,
-            timestamp=time.time(),
         )
 
     def _build_observation(
@@ -1291,8 +1365,10 @@ class SdfDagBackend(SimulatorBackend):
             device=self._device,
             dtype=self._torch.int32,
         )
+        dag_tensor = self._require_dag_tensor()
+        self._validate_cast_rays_inputs(dag_tensor, origins, dirs, out_distances, out_semantics)
         self._torch_sdf.cast_rays(
-            self._require_dag_tensor(),
+            dag_tensor,
             origins,
             dirs,
             out_distances,

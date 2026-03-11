@@ -1,13 +1,13 @@
-# VERIFICATION.md - Runtime And Benchmark Validation
+# VERIFICATION.md — Runtime And Benchmark Validation
 
 ## 1. Purpose
 
 This document organizes Navi verification around the boundaries that actually
 matter for the canonical runtime.
 
-The imported docs were correct that a serious system needs more than generic
-unit tests. Navi now documents verification in layers that match the active
-codebase rather than assumed external infrastructure.
+The imported docs were right to separate mathematical correctness, low-level
+memory contracts, and performance validation. Navi now keeps that structure,
+but ties it to the current codebase rather than assumed external tooling.
 
 ## 2. Mandatory Repository Gates
 
@@ -17,45 +17,56 @@ All changes still pass through the repository quality gates:
 - `mypy --strict`
 - `pytest`
 
-For canonical runtime work, that is the minimum, not the whole proof.
+For canonical runtime work, that is the minimum, not the whole story.
 
 ## 3. Verification Layers
 
-### 3.1 Compiler And Artifact Invariants
+### 3.1 Contract Tests
 
-Compiler validation should cover:
+These assert the behavior of the current runtime seam.
 
-- successful `.gmdag` generation from supported source assets
-- header validity and payload-size consistency
-- reproducible load behavior in the environment integration layer
-- resolution and bounding-box metadata correctness
-
-Some imported ideas such as analytical sphere proofs and deep compiler
-invariant tests remain good ideas, but they should be implemented against the
-actual in-repo compiler rather than copied as abstract requirements.
-
-### 3.2 Runtime Seam Validation
-
-These tests assert the behavior of the current CUDA and environment seam.
-
-Important covered examples already present in the repo include:
+Examples already present in the repo include:
 
 - horizon propagation from environment config into batched ray casting
 - clamp and validity behavior for rays beyond the fixed horizon
-- tensor-step preference tests when runtime tensor seams are available
+- tensor-step preference tests on the actor trainer when runtime tensor seams are available
 
-### 3.3 Live Corpus Validation
+### 3.2 Live Corpus Validation
 
-These tests assert that promoted compiled assets are actually usable on the real
+These assert that promoted compiled assets are actually usable on the real
 runtime.
 
 Current live checks include:
 
 - compiled corpus manifests point at live compiled assets
+- compiled corpus manifest metadata (`scene_count`, `gmdag_root`, `requested_resolution`, `compiled_resolutions`) matches the live promoted assets
 - `SdfDagBackend` can reset and step against a real `.gmdag`
 - saturated rays from the live backend obey the fixed-horizon depth and validity contract
+- `check-sdfdag --json` produces a parseable runtime-plus-corpus summary suitable for qualification artifacts and scripted preflight checks
+- `bench-sdfdag --json` produces a parseable benchmark summary suitable for live promoted-corpus throughput smoke checks
+- `navi-auditor dataset-audit --json` merges those runtime-backed checks into one passive observer-side artifact
+- auditor integration smoke covers live `dataset-audit --json` execution against the promoted corpus when the runtime is available
+- `navi-auditor dashboard-attach-check --json` provides a headless passive proof that the dashboard-visible actor stream is observable during live training or replay
+- `check-sdfdag` validates the promoted corpus manifest metadata against live `.gmdag` assets and the canonical compile resolution when run without `--gmdag-file`
 
-### 3.4 CUDA Boundary Validation
+### 3.2.1 End-To-End Qualification
+
+The first scripted canonical end-to-end qualification surface is:
+
+- `./scripts/qualify-canonical-stack.ps1`
+
+It runs one bounded canonical train through `run-ghost-stack.ps1 -Train`,
+captures a passive observer recording, proves live passive attach on the actor
+stream, proves checkpoint resume from a produced periodic checkpoint, replays
+the captured session, proves passive attach on the replay PUB, and emits one
+JSON artifact under `artifacts/qualification/canonical_stack/`.
+
+When invoked with `-EnableCorpusRefreshQualification`, the same script first
+runs `scripts/refresh-scene-corpus.ps1` into a sandboxed compiled corpus root
+under the run artifact and then trains against that refreshed corpus without
+overwriting the user's live promoted corpus.
+
+### 3.3 CUDA Boundary Validation
 
 The imported project correctly emphasized that the Python-to-CUDA seam must be
 validated aggressively.
@@ -65,77 +76,77 @@ For Navi this means tests should continue to cover:
 - device mismatch rejection
 - dimensionality rejection
 - contiguity assumptions
+- normalization tolerance enforcement for direction tensors
 - CUDA-only fail-fast behavior when the backend is unavailable
 
-### 3.5 Trainer-Seam Validation
+### 3.4 Compiler And File-Format Validation
 
-Because the canonical training runtime now depends on tensor-native environment
-surfaces, tests should also protect:
+Compiler and artifact correctness should continue to expand around the real
+`.gmdag` implementation.
 
-- observation-tensor preference over object rebuilding when available
-- action-tensor stepping preference when available
-- safe publication of only selected actor observations for passive viewers
-- perf-only telemetry configurations that do not crash the trainer
+Important coverage includes:
 
-### 3.6 Benchmark Proof
+- deterministic compile output for fixed fixtures
+- hash-collision defense and structural-equality fallback tests
+- corrupted-header and corrupted-payload rejection tests
+- child-mask and node-ordering invariants
+- documented payload precision checks against the actual stored format
+
+### 3.5 Dataset And Transform Validation
+
+Dataset-adapter behavior must be verified explicitly rather than described only
+in prose.
+
+Important coverage includes:
+
+- coordinate-transform golden fixtures
+- semantic remap fixtures
+- forward-axis and orientation sanity checks
+- adapter-backed fixture-sequence checks that prove episode resets clear delta-depth state before `DistanceMatrix` materialization
+- dataset-preset checks that prove Habitat's explicit camera transform preserves Navi's canonical `+X` right, `+Y` up, `-Z` forward axes
+
+### 3.6 Performance Proof
 
 Performance claims are valid only when measured on the current canonical path.
-Proof should distinguish between:
 
-- environment-layer attribution via `bench-sdfdag`
-- service and integration correctness checks
-- full trainer impact on the production rollout loop
+Required proof style:
 
-## 4. Current Implemented Proof Surfaces
+- use the real trainer for hot-path changes
+- use `bench-sdfdag` for environment-layer attribution and preflight benchmarking
+- compare against current baselines and current bottleneck interpretation
+- report end-to-end impact, not just isolated kernel numbers
+- prefer structured `bench-sdfdag --json` summaries when capturing benchmark artifacts for comparison
 
-Current repo-local proof surfaces include:
+## 4. Current Gaps Worth Closing
 
-- runtime readiness checks through `navi-environment check-sdfdag`
-- direct environment throughput attribution through `navi-environment bench-sdfdag`
-- unit tests for fixed-horizon semantics and tensor-step preference
-- live integration tests against promoted compiled assets
-
-## 5. Current Gaps Worth Closing
-
-The imported docs highlighted useful missing checks. The following remain strong
-next additions:
+The imported docs also highlighted areas where more verification would be
+valuable. The following are reasonable next additions:
 
 1. long-run allocation-stability tests around repeated CUDA stepping
-2. explicit dtype and contiguity traps at the extension boundary
-3. deeper compiler invariant tests that reflect the actual in-repo file format
-4. passive dataset-auditor validation if that surface is implemented
-5. longer trainer attribution regression tests for host extraction and telemetry cost
+2. more explicit tests for tensor contiguity and dtype traps at the extension boundary
+3. explicit `MAX_STEPS`, hit-epsilon, inside-solid, and out-of-domain behavior tests
+4. native compiler/kernel invariant tests where practical, provided they reflect the real in-repo implementation
+5. broader long-run end-to-end qualification beyond the first bounded scripted surface
 
-## 6. Benchmark Language Policy
+The first passive dataset-auditor validation surface now exists as
+`navi-auditor dataset-audit --json`, so future work can extend it toward richer
+runtime-native rendering instead of building a second geometry-export proof path.
 
-Documentation must not claim throughput numbers that are not currently backed by
-Navi measurements.
+## 5. Benchmark Language Policy
+
+The documentation must not claim throughput numbers that are not currently
+backed by Navi measurements.
 
 Use these rules instead:
 
 - state current measured baselines as baselines
 - state acceptance floors as floors
-- state candidate ideas as candidates
+- state experiments as experiments
 - avoid importing external headline numbers as if they were repo facts
 
-## 7. Failure Interpretation Rule
+## 6. Related Docs
 
-When a benchmark or training run regresses, interpret it using the current
-layered model:
-
-- if `check-sdfdag` fails, the issue is in compiler/runtime readiness
-- if `bench-sdfdag` regresses but trainer SPS does not, the issue may be local to
-  environment attribution and not production-critical
-- if trainer SPS regresses while environment timing stays flat, the issue is
-  likely actor-side dataflow or PPO update cost
-- if passive observers trigger regressions, the failure is architectural because
-  observability must remain droppable
-
-## 8. Related Docs
-
-- `docs/ARCHITECTURE.md`
 - `docs/PERFORMANCE.md`
 - `docs/SDFDAG_RUNTIME.md`
 - `docs/SIMULATION.md`
-- `docs/DATAFLOW.md`
 - `PLAN.md`

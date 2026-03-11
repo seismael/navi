@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(VoxelDagCompiler VERSION 1.0.0 LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -36,3 +38,17 @@ add_executable(voxel-dag
 )
 
 target_link_libraries(voxel-dag PRIVATE assimp::assimp)
+
+if(BUILD_TESTING)
+    add_executable(voxel-dag-contract-tests
+        tests/test_compiler_contracts.cpp
+        src/compiler.cpp
+    )
+
+    target_link_libraries(voxel-dag-contract-tests PRIVATE assimp::assimp)
+
+    add_test(
+        NAME voxel_dag_contract_tests
+        COMMAND voxel-dag-contract-tests
+    )
+endif()

@@ -63,13 +63,13 @@ uv run dashboard
 
 ```powershell
 # Canonical environment service
-./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag
+./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
 
 # Canonical actor service
 ./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
 
 # Canonical full inference stack
-./scripts/run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag
+./scripts/run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
 
 # Canonical full training stack
 ./scripts/run-ghost-stack.ps1 -Train
@@ -88,8 +88,8 @@ uv run dashboard
 uv run --project .\projects\environment navi-environment prepare-corpus --force-recompile
 
 # Validate and benchmark the compiled runtime
-uv run --project .\projects\environment navi-environment check-sdfdag --gmdag-file .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag
-uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-file .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag --actors 4 --steps 200
+uv run --project .\projects\environment navi-environment check-sdfdag --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
+uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag --actors 4 --steps 200
 ```
 
 ## Training
@@ -101,8 +101,11 @@ uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-fi
 # Canonical long-duration training wrapper
 ./scripts/train-all-night.ps1
 
+# Refresh the default public bootstrap corpus (Habitat test scenes + ReplicaCAD stages)
+./scripts/refresh-scene-corpus.ps1
+
 # Explicit narrowing override
-./scripts/train.ps1 -Scene .\data\scenes\replicacad\frl_apartment_stage.glb -AutoCompileGmDag -TotalSteps 500000
+./scripts/train.ps1 -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag -TotalSteps 500000
 ```
 
 ## Wire Topics

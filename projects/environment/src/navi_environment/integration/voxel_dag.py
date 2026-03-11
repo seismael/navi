@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import importlib
 import os
 import struct
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -150,6 +150,18 @@ def load_gmdag_asset(path: Path) -> GmDagAsset:
         if magic != b"GDAG":
             msg = f"Unsupported gmdag magic in {path}: {magic!r}"
             raise RuntimeError(msg)
+        if version != 1:
+            msg = f"Unsupported gmdag version in {path}: {version}"
+            raise RuntimeError(msg)
+        if resolution <= 0:
+            msg = f"Invalid gmdag resolution in {path}: {resolution}"
+            raise RuntimeError(msg)
+        if voxel_size <= 0.0:
+            msg = f"Invalid gmdag voxel size in {path}: {voxel_size}"
+            raise RuntimeError(msg)
+        if node_count <= 0:
+            msg = f"Invalid gmdag node count in {path}: {node_count}"
+            raise RuntimeError(msg)
 
         nodes = np.fromfile(handle, dtype=np.uint64, count=node_count)
         if nodes.shape[0] != node_count:
@@ -157,6 +169,10 @@ def load_gmdag_asset(path: Path) -> GmDagAsset:
                 f"Invalid gmdag node payload in {path}: expected {node_count} nodes, "
                 f"found {nodes.shape[0]}"
             )
+            raise RuntimeError(msg)
+        trailing_bytes = handle.read(1)
+        if trailing_bytes:
+            msg = f"Invalid gmdag payload in {path}: trailing bytes detected"
             raise RuntimeError(msg)
 
     bbox_min = (float(bmin_x), float(bmin_y), float(bmin_z))

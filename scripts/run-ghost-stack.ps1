@@ -7,13 +7,13 @@
 
 .EXAMPLE
     # Inference on the canonical compiled runtime
-    .\run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\replicacad\frl_apartment_stage.gmdag
+    .\run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
 
     # Canonical PPO training on the full discovered corpus with live dashboard
     .\run-ghost-stack.ps1 -Train
 
     # Canonical PPO training with an explicit scene override and refresh
-    .\run-ghost-stack.ps1 -Train -Scene .\data\scenes\replicacad\frl_apartment_stage.glb -AutoCompileGmDag
+    .\run-ghost-stack.ps1 -Train -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag
 
   # Resume from checkpoint
   .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint "checkpoints\policy_step_0010000.pt"

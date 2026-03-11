@@ -45,6 +45,12 @@ uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559
 # Dashboard with step controls (WASD/arrows, Tab toggle)
 uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559 --step-endpoint tcp://localhost:5560
 
+# Passive runtime-backed dataset audit against the canonical environment CLI
+uv run navi-auditor dataset-audit --json
+
+# Headless passive attach proof for live training or replay streams
+uv run navi-auditor dashboard-attach-check --actor-sub tcp://localhost:5557 --json
+
 # Shortcut command (equivalent to: navi-auditor dashboard)
 uv run dashboard
 
@@ -76,6 +82,30 @@ diagnosing specific env IDs.
 The dashboard displays compact live status metrics for fast observability while
 full histories remain available through service logs, telemetry streams, and
 recorder outputs.
+
+## Dataset Audit
+
+`dataset-audit` is the first runtime-backed dataset QA surface in the auditor
+layer.
+
+It remains passive and observer-side:
+
+- runs `check-sdfdag --json` and optionally `bench-sdfdag --json` through the
+  environment CLI
+- avoids importing environment service packages into the auditor runtime
+- emits one combined JSON summary suitable for scripted verification
+- defaults to the promoted corpus when `--gmdag-file` is omitted
+
+## Passive Attach Proof
+
+`dashboard-attach-check` is the first headless proof that the dashboard-visible
+actor stream is actually observable.
+
+It remains passive and observer-side:
+
+- subscribes to the actor-visible topics the dashboard consumes
+- works against the live actor PUB stream or a replay PUB stream
+- emits one JSON summary suitable for qualification scripts
 
 ## Validation
 

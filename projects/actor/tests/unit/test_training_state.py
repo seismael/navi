@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from navi_actor.config import ActorConfig
+from navi_actor.rollout_buffer import MultiTrajectoryBuffer
 from navi_actor.training.ppo_trainer import PpoTrainer
 from navi_contracts import (
     TOPIC_DISTANCE_MATRIX,
@@ -159,6 +160,138 @@ def test_publish_observation_emits_distance_matrix_topic() -> None:
     restored = deserialize(payload)
     assert isinstance(restored, DistanceMatrix)
     assert restored.step_id == 7
+
+
+def test_dashboard_publish_gate_uses_configured_live_cadence() -> None:
+    """Selected-actor observation publication should use the configured cadence."""
+    trainer = _make_trainer()
+    trainer._config.dashboard_observation_hz = 10.0
+    trainer._last_dashboard_heartbeat_at = 100.0
+
+    perf_values = iter((100.05, 100.11))
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("navi_actor.training.ppo_trainer.time.perf_counter", lambda: next(perf_values))
+    try:
+        assert trainer._should_publish_dashboard_observation() is False
+        assert trainer._should_publish_dashboard_observation() is True
+    finally:
+        monkeypatch.undo()
+
+
+def test_reward_ema_batch_update_matches_sequential_actor_order() -> None:
+    """Vectorized reward EMA should preserve the historic per-actor update order."""
+    trainer = _make_trainer()
+    rewards = torch.tensor([1.25, -0.5, 0.75, 0.0], dtype=torch.float32, device=trainer._device)
+    initial_ema = 0.33
+
+    expected = initial_ema
+    for reward in rewards.detach().to(device="cpu", dtype=torch.float32).tolist():
+        expected = 0.01 * float(reward) + 0.99 * expected
+
+    actual = trainer._update_reward_ema(initial_ema, rewards)
+
+    assert actual == pytest.approx(expected)
+
+
+def test_run_ppo_update_bootstrap_ignores_hidden_state_on_canonical_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Canonical PPO bootstrap should not feed hidden state into the learner policy."""
+    trainer = _make_trainer()
+    n = trainer._n_actors
+    obs = torch.randn(n, 3, 128, 24, device=trainer._device)
+    aux = torch.zeros((n, 3), dtype=torch.float32, device=trainer._device)
+    buffer = MultiTrajectoryBuffer(
+        n_actors=n,
+        gamma=trainer._config.gamma,
+        gae_lambda=trainer._config.gae_lambda,
+        capacity=1,
+    )
+    buffer.append_batch(
+        observations=obs,
+        actions=torch.zeros((n, 4), dtype=torch.float32, device=trainer._device),
+        log_probs=torch.zeros((n,), dtype=torch.float32, device=trainer._device),
+        values=torch.zeros((n,), dtype=torch.float32, device=trainer._device),
+        rewards=torch.zeros((n,), dtype=torch.float32, device=trainer._device),
+        dones=torch.zeros((n,), dtype=torch.bool, device=trainer._device),
+        truncateds=torch.zeros((n,), dtype=torch.bool, device=trainer._device),
+        aux_tensors=aux,
+    )
+
+    captured: dict[str, torch.Tensor | None] = {"hidden": None}
+
+    original_forward = trainer._learner_policy.forward
+
+    def recording_forward(
+        observation: torch.Tensor,
+        hidden: torch.Tensor | None = None,
+        *,
+        aux_tensor: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        captured["hidden"] = hidden
+        return original_forward(observation, hidden, aux_tensor=aux_tensor)
+
+    monkeypatch.setattr(trainer._learner_policy, "forward", recording_forward)
+
+    def fake_train_ppo_epoch(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(trainer._learner, "train_ppo_epoch", fake_train_ppo_epoch)
+
+    trainer._run_ppo_update(
+        multi_buffer=buffer,
+        obs_batch=obs,
+        aux_batch=aux,
+        ppo_epochs=1,
+        minibatch_size=n,
+        seq_len=0,
+    )
+
+    assert captured["hidden"] is None
+    assert len(buffer) == 0
+
+
+def test_selected_episode_telemetry_actor_indices_skip_when_training_telemetry_disabled() -> None:
+    """Done-actor host extraction should be skipped when episode telemetry is off."""
+    trainer = _make_trainer()
+    trainer._config.emit_training_telemetry = False
+    trainer._pub_socket = object()  # type: ignore[assignment]
+    done_indices = torch.tensor([0, 2, 3], dtype=torch.int64, device=trainer._device)
+
+    selected = trainer._selected_episode_telemetry_actor_indices(done_indices)
+
+    assert selected.numel() == 0
+
+
+def test_selected_episode_telemetry_actor_indices_filter_to_selected_actor() -> None:
+    """Default sparse episode telemetry should only materialize the selected actor."""
+    trainer = _make_trainer()
+    trainer._config.emit_training_telemetry = True
+    trainer._config.telemetry_all_actors = False
+    trainer._config.telemetry_actor_id = 2
+    trainer._pub_socket = object()  # type: ignore[assignment]
+    done_indices = torch.tensor([0, 2, 3], dtype=torch.int64, device=trainer._device)
+
+    selected = trainer._selected_episode_telemetry_actor_indices(done_indices)
+
+    assert torch.equal(selected, torch.tensor([2], dtype=torch.int64, device=trainer._device))
+
+
+def test_extract_completed_episode_host_batch_uses_selected_actor_subset() -> None:
+    """Completed-episode host extraction should only mirror the requested actor subset."""
+    trainer = _make_trainer()
+    episode_returns = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=trainer._device)
+    episode_lengths = torch.tensor([10, 20, 30, 40], dtype=torch.int32, device=trainer._device)
+
+    batch = trainer._extract_completed_episode_host_batch(
+        actor_indices=torch.tensor([1, 3], dtype=torch.int64, device=trainer._device),
+        episode_returns=episode_returns,
+        episode_lengths=episode_lengths,
+    )
+
+    assert batch is not None
+    assert torch.equal(batch.actor_id_tensor, torch.tensor([1, 3], dtype=torch.int64))
+    assert torch.equal(batch.episode_return_tensor, torch.tensor([2.0, 4.0], dtype=torch.float32))
+    assert torch.equal(batch.episode_length_tensor, torch.tensor([20, 40], dtype=torch.int32))
 
 
 def test_publish_perf_telemetry_tolerates_socket_send_failure() -> None:
@@ -456,21 +589,82 @@ def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
     assert published[0].step_id == 0
 
 
+def test_observation_publish_actor_ids_respects_stream_and_selector_config() -> None:
+    """Canonical trainer should compute observation publish actor ids from config only."""
+    trainer = _make_trainer()
+    trainer._config.emit_observation_stream = False
+    assert trainer._observation_publish_actor_ids() == ()
+
+    trainer._config.emit_observation_stream = True
+    trainer._config.telemetry_all_actors = False
+    trainer._config.telemetry_actor_id = 0
+    assert trainer._observation_publish_actor_ids() == (0,)
+
+    trainer._config.telemetry_all_actors = True
+    assert trainer._observation_publish_actor_ids() == tuple(range(trainer._n_actors))
+
+
+def test_load_initial_observation_batch_skips_materialization_when_stream_disabled() -> None:
+    """Initial tensor resets should not request published observations when streaming is off."""
+    trainer = _make_trainer()
+    trainer._config.emit_observation_stream = False
+    materialize_calls: list[bool] = []
+
+    class FakeRuntime:
+        def batch_step_tensor_actions(
+            self,
+            action_tensor: torch.Tensor,
+            step_id: int,
+            *,
+            publish_actor_ids: tuple[int, ...] = (),
+        ) -> tuple[object, tuple[object, ...]]:
+            del action_tensor, step_id, publish_actor_ids
+            raise AssertionError("not used")
+
+        def reset_tensor(
+            self,
+            episode_id: int,
+            *,
+            actor_id: int = 0,
+            materialize: bool = False,
+        ) -> tuple[torch.Tensor, DistanceMatrix | None]:
+            del episode_id, actor_id
+            materialize_calls.append(materialize)
+            return torch.ones((3, 8, 4), device=trainer._device), None
+
+        def perf_snapshot(self) -> object:
+            raise AssertionError("not used")
+
+        def close(self) -> None:
+            return None
+
+    trainer._runtime = FakeRuntime()  # type: ignore[assignment]
+
+    obs_batch, published = trainer._load_initial_observation_batch()
+
+    assert obs_batch.shape == (1, 3, 8, 4)
+    assert published == {}
+    assert materialize_calls == [False]
+
+
 def test_extract_host_rollout_scalars_skips_telemetry_columns_when_not_needed() -> None:
-    """Canonical trainer should not mirror intrinsic and loop scalars when step telemetry is off."""
+    """Canonical trainer should skip rollout scalar host mirrors when step telemetry is off."""
     trainer = _make_trainer()
 
     payload = trainer._extract_host_rollout_scalars(
+        raw_rewards=torch.tensor([0.5, 1.5], dtype=torch.float32, device=trainer._device),
         shaped_rewards=torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device),
         intrinsic_rewards=torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device),
         loop_similarities=torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device),
+        done_flags=torch.tensor([True, False], dtype=torch.bool, device=trainer._device),
         include_telemetry_scalars=False,
     )
 
-    assert payload.shaped_reward_tensor.device.type == "cpu"
-    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
+    assert payload.raw_reward_tensor is None
+    assert payload.shaped_reward_tensor is None
     assert payload.intrinsic_reward_tensor is None
     assert payload.loop_similarity_tensor is None
+    assert payload.done_tensor is None
 
 
 def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() -> None:
@@ -478,17 +672,57 @@ def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() ->
     trainer = _make_trainer()
 
     payload = trainer._extract_host_rollout_scalars(
+        raw_rewards=torch.tensor([0.5, 1.5], dtype=torch.float32, device=trainer._device),
         shaped_rewards=torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device),
         intrinsic_rewards=torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device),
         loop_similarities=torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device),
+        done_flags=torch.tensor([True, False], dtype=torch.bool, device=trainer._device),
         include_telemetry_scalars=True,
     )
 
+    assert payload.raw_reward_tensor is not None
     assert payload.intrinsic_reward_tensor is not None
     assert payload.loop_similarity_tensor is not None
+    assert payload.done_tensor is not None
+    assert payload.raw_reward_tensor.device.type == "cpu"
     assert payload.shaped_reward_tensor.device.type == "cpu"
     assert payload.intrinsic_reward_tensor.device.type == "cpu"
     assert payload.loop_similarity_tensor.device.type == "cpu"
+    assert payload.done_tensor.device.type == "cpu"
+    assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32))
     assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
     assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32))
     assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32))
+    assert torch.equal(payload.done_tensor, torch.tensor([True, False], dtype=torch.bool))
+
+
+def test_extract_completed_episode_host_batch_returns_none_when_no_actor_finished() -> None:
+    """Canonical trainer should skip sparse episode extraction when nothing finished."""
+    trainer = _make_trainer()
+
+    payload = trainer._extract_completed_episode_host_batch(
+        actor_indices=torch.tensor([], dtype=torch.int64, device=trainer._device),
+        episode_returns=torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device),
+        episode_lengths=torch.tensor([3, 4], dtype=torch.int32, device=trainer._device),
+    )
+
+    assert payload is None
+
+
+def test_extract_completed_episode_host_batch_packs_done_events_once() -> None:
+    """Canonical trainer should batch sparse completed-episode host extraction in one packed copy."""
+    trainer = _make_trainer()
+
+    payload = trainer._extract_completed_episode_host_batch(
+        actor_indices=torch.tensor([1, 2], dtype=torch.int64, device=trainer._device),
+        episode_returns=torch.tensor([1.0, 2.5, 3.5], dtype=torch.float32, device=trainer._device),
+        episode_lengths=torch.tensor([10, 20, 30], dtype=torch.int32, device=trainer._device),
+    )
+
+    assert payload is not None
+    assert payload.actor_id_tensor.device.type == "cpu"
+    assert payload.episode_return_tensor.device.type == "cpu"
+    assert payload.episode_length_tensor.device.type == "cpu"
+    assert torch.equal(payload.actor_id_tensor, torch.tensor([1, 2], dtype=torch.int64))
+    assert torch.allclose(payload.episode_return_tensor, torch.tensor([2.5, 3.5], dtype=torch.float32))
+    assert torch.equal(payload.episode_length_tensor, torch.tensor([20, 30], dtype=torch.int32))
