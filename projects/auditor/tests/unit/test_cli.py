@@ -84,7 +84,7 @@ def test_dashboard_passive_mode_disables_environment_sockets(monkeypatch: Any) -
         "actor_sub": "tcp://actor-pub:5557",
         "step_endpoint": "",
         "actor_id": 0,
-        "enable_actor_selector": False,
+        "enable_actor_selector": True,
         "hz": 30.0,
         "linear_speed": 1.5,
         "yaw_rate": 1.5,
@@ -139,6 +139,8 @@ def test_dashboard_default_mode_uses_configured_environment_wiring(monkeypatch: 
     assert _ViewerSpy.last_kwargs["matrix_sub"] == "tcp://env-pub:5559"
     assert _ViewerSpy.last_kwargs["actor_sub"] == "tcp://actor-pub:5557"
     assert _ViewerSpy.last_kwargs["step_endpoint"] == "tcp://env-rep:5560"
+    assert _ViewerSpy.last_kwargs["enable_actor_selector"] is True
+    assert _ViewerSpy.last_kwargs["actor_id"] == 0
 
 
 def test_dashboard_attach_check_emits_json_summary(monkeypatch: Any) -> None:

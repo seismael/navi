@@ -461,6 +461,13 @@ class PpoTrainer:
                 label="observation",
             )
 
+    def _publish_dashboard_observations(self, observations: dict[int, DistanceMatrix]) -> None:
+        """Publish selector-visible observations without reusing telemetry sparsity rules."""
+        if not observations:
+            return
+        for actor_id in sorted(observations):
+            self._publish_observation(observations[actor_id])
+
     def _should_publish_dashboard_observation(self) -> bool:
         """Return True when a fresh dashboard frame should be materialized."""
         if not self._config.emit_observation_stream:
@@ -502,9 +509,7 @@ class PpoTrainer:
         """Return the actor ids whose DistanceMatrix observations may be published."""
         if not self._config.emit_observation_stream:
             return ()
-        if self._config.telemetry_all_actors:
-            return tuple(range(self._n_actors))
-        return (int(self._config.telemetry_actor_id),)
+        return tuple(range(self._n_actors))
 
     def _should_publish_actor_telemetry(self, actor_id: int) -> bool:
         if self._config.telemetry_all_actors:
@@ -766,10 +771,7 @@ class PpoTrainer:
         aux_states = torch.zeros((n, 3), dtype=torch.float32, device=self._device)
 
         current_obs_batch, obs_dict = self._load_initial_observation_batch()
-        telemetry_actor_id = int(self._config.telemetry_actor_id)
-        initial_view = obs_dict.get(telemetry_actor_id)
-        if initial_view is not None and self._should_publish_actor_telemetry(telemetry_actor_id):
-            self._publish_observation(initial_view)
+        self._publish_dashboard_observations(obs_dict)
 
         t_start = time.perf_counter()
         acc_fwd, acc_pack, acc_step, acc_mem, acc_trans, acc_shape, acc_madd, acc_buf, acc_host, acc_tel, acc_tick, t_cnt = (
@@ -973,12 +975,9 @@ class PpoTrainer:
                     aux_states.index_fill_(0, done_indices, 0.0)
 
                 if publish_observations:
-                    for actor_id, observation in published_observations.items():
-                        if not self._should_publish_actor_telemetry(actor_id):
-                            continue
-                        t_tel_start = time.perf_counter()
-                        self._publish_observation(observation)
-                        telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
+                    t_tel_start = time.perf_counter()
+                    self._publish_dashboard_observations(published_observations)
+                    telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
                 if self._config.enable_episodic_memory:
                     t_memory_add_start = time.perf_counter()
                     if normalized_memory_batch is None:

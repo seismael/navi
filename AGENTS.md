@@ -133,7 +133,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Use coarse-grained metrics (every 100 steps) for performance tracking.
 - Default mode detection/reporting should rely on low-volume `actor.training.*` update/perf/episode telemetry.
 - Environment-side compiled-path perf telemetry MUST remain coarse (`environment.sdfdag.perf`) and must not emit more frequently than the existing 100-step cadence.
-- Passive dashboard observation publication for the selected actor MUST remain low-volume and droppable, but the default live cadence must stay visibly responsive at roughly `5-10 Hz` rather than a stale multi-second feel.
+- Passive dashboard observation publication for selector-visible actors MUST remain low-volume and droppable, but the default live cadence must stay visibly responsive at roughly `5-10 Hz` rather than a stale multi-second feel.
 
 ### 3.3.1 Actor Hot-Path Discipline
 - Once SDF/DAG acceleration makes the environment subdominant, actor-side rollout code becomes the critical path and must be treated like systems code.
@@ -170,8 +170,8 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Tools MUST handle missing ZMQ streams gracefully, displaying a `WAITING` state instead of crashing.
 - During canonical training, the Dashboard MUST run in passive actor-only mode: subscribe to the actor PUB stream only and MUST NOT open environment REP/manual-step control paths or depend on environment PUB availability.
 - Dashboard heartbeats during optimizer windows MUST reuse the same passive observation cadence policy as live observation publication instead of falling back to a slower hidden rate.
-- **Default Filter:** UI defaults to actor-0 stream filtering to preserve training throughput.
-- **Dynamic Discovery (Optional):** UI may detect/list/switch actors dynamically when selector mode is explicitly enabled.
+- **Default Selector:** UI defaults to selector-enabled actor discovery so operators can switch the observed actor without relaunching the dashboard.
+- **Initial Focus:** The dashboard MAY still start focused on actor `0`, but live operator switching MUST be available by default.
 - **UI Throughput:** Processing (ZMQ polling, heavy rendering) MUST NOT block the UI thread for > 16ms per tick. Ingestion MUST be capped or moved to a background thread to maintain 60 FPS responsiveness.
 - UI components MUST be non-blocking during stream connection attempts.
 

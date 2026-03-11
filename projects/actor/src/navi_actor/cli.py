@@ -252,7 +252,7 @@ def train(
     dashboard_observation_hz: float = typer.Option(
         10.0,
         min=1.0,
-        help="Target passive dashboard observation cadence in Hz for the selected actor.",
+        help="Target passive dashboard observation cadence in Hz for selector-visible actors.",
     ),
     emit_training_telemetry: bool = typer.Option(
         True,

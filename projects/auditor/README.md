@@ -10,7 +10,7 @@ Gallery Layer for Ghost-Matrix runtime.
 - Records `distance_matrix_v2`, `action_v2`, and `telemetry_event_v2` streams.
 - Replays recorded streams via ZMQ PUB.
 - Provides a live PyQtGraph dashboard with a single selected actor depth view
-  (actor 0 by default).
+  and actor selector enabled by default.
 - Dashboard metrics are intentionally not rendered in UI; metrics remain
   available via logs, telemetry events, and recorder artifacts.
 - Visualization types (RGB frames, camera images) are handled here in the Gallery
@@ -54,8 +54,8 @@ uv run navi-auditor dashboard-attach-check --actor-sub tcp://localhost:5557 --js
 # Shortcut command (equivalent to: navi-auditor dashboard)
 uv run dashboard
 
-# Enable dynamic actor selector when needed for diagnostics
-uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --enable-actor-selector
+# Live dashboard with actor selector enabled by default
+uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557
 ```
 
 ## Windows Wrapper Script
@@ -63,7 +63,7 @@ uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559 --actor-sub tcp:
 ```powershell
 # From repository root
 ./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560
-./scripts/run-dashboard.ps1 --enable-actor-selector
+./scripts/run-dashboard.ps1
 ```
 
 ## Dashboard
@@ -71,13 +71,13 @@ uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559 --actor-sub tcp:
 The `GhostMatrixDashboard` is a standalone PyQtGraph application that connects
 via ZMQ PUB/SUB and can run independently from training. It displays:
 
-- One selected live actor depth view (actor 0 by default)
+- One selected live actor depth view with the selector enabled by default
 - WAITING / OBSERVER / TRAINING / INFERENCE mode indicator
 - Compact same-line status telemetry: stall time, SPS, reward EMA, episode
   count, latest step, optimizer wall-time, and zero-wait ratio
 
-Optional selector mode can be enabled to switch the displayed actor when
-diagnosing specific env IDs.
+The selector stays available by default so operators can switch the
+displayed actor when diagnosing specific env IDs.
 
 The dashboard displays compact live status metrics for fast observability while
 full histories remain available through service logs, telemetry streams, and

@@ -20,7 +20,7 @@ class MatrixViewer:
         actor_sub: str = "",
         step_endpoint: str | None = None,
         actor_id: int = 0,
-        enable_actor_selector: bool = False,
+        enable_actor_selector: bool = True,
         hz: float = 30.0,
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,

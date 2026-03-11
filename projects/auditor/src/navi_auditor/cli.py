@@ -315,8 +315,8 @@ def dashboard(
         help="Actor ID to display (default: 0).",
     ),
     enable_actor_selector: bool = typer.Option(
-        False,
-        help="Enable actor selector UI. Disabled by default for maximum throughput.",
+        True,
+        help="Enable actor selector UI so the watched actor can be changed live.",
     ),
     hz: float = typer.Option(30.0, help="Dashboard + teleop tick rate"),
     linear_speed: float = typer.Option(1.5, help="Max horizontal linear speed"),

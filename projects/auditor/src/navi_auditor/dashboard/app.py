@@ -1,8 +1,8 @@
 """Ghost-Matrix RL Dashboard — single selected actor view.
 
 The dashboard is intentionally visual-only: it renders one live actor
-depth view with mode/status indication. By default actor 0 is shown for
-scalability. Optional selector mode can be enabled to switch actor.
+depth view with mode/status indication. The actor selector is enabled by
+default so operators can switch the watched actor without relaunching.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         actor_sub: str = "",
         step_endpoint: str = "",
         actor_id: int = 0,
-        enable_actor_selector: bool = False,
+        enable_actor_selector: bool = True,
         hz: float = 30.0,
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
@@ -113,6 +113,10 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         main_layout.addWidget(self._status_bar)
 
         if self._enable_actor_selector:
+            self._actor_selector_label = QtWidgets.QLabel()
+            self._actor_selector_label.setStyleSheet(
+                "color: #d5dde8; font-weight: 700; font-size: 13px; padding: 2px 6px;"
+            )
             self._actor_selector = QtWidgets.QComboBox()
             self._actor_selector.setStyleSheet(
                 "QComboBox { background: #1a1a2e; color: #fff; border: 1px solid #333; "
@@ -120,17 +124,28 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
                 "QComboBox::drop-down { border: none; } "
                 "QComboBox QAbstractItemView { background: #1a1a2e; color: #fff; selection-background-color: #2e86de; }"
             )
+            self._actor_selector.addItem(f"Actor {self._selected_actor}", self._selected_actor)
             self._actor_selector.currentIndexChanged.connect(self._on_actor_selector_changed)
+            self._update_actor_selector_label()
 
             selector_container = QtWidgets.QWidget()
             selector_layout = QtWidgets.QHBoxLayout(selector_container)
             selector_layout.setContentsMargins(10, 5, 10, 5)
             selector_layout.addWidget(QtWidgets.QLabel("ACTOR:"))
             selector_layout.addWidget(self._actor_selector)
+            selector_layout.addWidget(self._actor_selector_label)
             selector_layout.addStretch()
             main_layout.addWidget(selector_container)
 
         main_layout.addWidget(self._actor_panel, stretch=1)
+
+    def _update_actor_selector_label(self) -> None:
+        """Render the currently watched actor beside the selector."""
+        if not self._enable_actor_selector:
+            return
+        known_count = len(self._known_actors)
+        suffix = f" | discovered={known_count}" if known_count > 0 else " | waiting"
+        self._actor_selector_label.setText(f"Watching actor {self._selected_actor}{suffix}")
 
     def _refresh_selector(self) -> None:
         """Refresh actor selector options from discovered stream actors."""
@@ -147,6 +162,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             if idx >= 0:
                 self._actor_selector.setCurrentIndex(idx)
             self._actor_selector.blockSignals(False)
+        self._update_actor_selector_label()
 
     def _on_actor_selector_changed(self, _index: int) -> None:
         """Switch selected actor from UI selector."""
@@ -157,6 +173,20 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             return
         self._selected_actor = int(actor_id)
         self._engine.set_selected_actor(self._selected_actor)
+        self._update_actor_selector_label()
+
+    def _shared_metrics_state(self) -> object | None:
+        """Return one actor state carrying shared coarse trainer metrics."""
+        for actor_state in self._engine.actor_states.values():
+            if (
+                len(actor_state.perf_sps_history) > 0
+                or len(actor_state.env_perf_sps_history) > 0
+                or len(actor_state.ppo_reward_ema_history) > 0
+                or len(actor_state.reward_history) > 0
+                or len(actor_state.episode_return_history) > 0
+            ):
+                return actor_state
+        return None
 
     # ── tick / render loop ───────────────────────────────────────────
 
@@ -186,7 +216,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             mode = "OBSERVER"
         self._status_bar.set_mode(mode)
         self._status_bar.set_metrics_text(
-            build_status_metrics_line(state, now=time.time()),
+            build_status_metrics_line(
+                state,
+                now=time.time(),
+                fallback_state=self._shared_metrics_state(),
+            ),
         )
 
         if state.latest_matrix is not None:
@@ -285,7 +319,7 @@ def run_dashboard(
     actor_sub: str = "",
     step_endpoint: str = "",
     actor_id: int = 0,
-    enable_actor_selector: bool = False,
+    enable_actor_selector: bool = True,
     hz: float = 30.0,
     linear_speed: float = 1.5,
     yaw_rate: float = 1.5,

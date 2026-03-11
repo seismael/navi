@@ -162,6 +162,51 @@ def test_publish_observation_emits_distance_matrix_topic() -> None:
     assert restored.step_id == 7
 
 
+def test_publish_dashboard_observations_emits_all_actor_frames() -> None:
+    """Dashboard observation publication should not be limited by sparse telemetry actor selection."""
+    trainer = _make_trainer()
+    trainer._config.telemetry_all_actors = False
+    trainer._config.telemetry_actor_id = 0
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.messages: list[list[bytes]] = []
+
+        def send_multipart(self, parts: list[bytes]) -> None:
+            self.messages.append(parts)
+
+    fake_socket = FakeSocket()
+    trainer._pub_socket = fake_socket  # type: ignore[assignment]
+
+    observations = {
+        actor_id: DistanceMatrix(
+            episode_id=1,
+            env_ids=np.array([actor_id], dtype=np.int32),
+            matrix_shape=(8, 4),
+            depth=np.ones((1, 8, 4), dtype=np.float32),
+            delta_depth=np.zeros((1, 8, 4), dtype=np.float32),
+            semantic=np.zeros((1, 8, 4), dtype=np.int32),
+            valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
+            overhead=np.zeros((8, 8, 3), dtype=np.float32),
+            robot_pose=RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0),
+            step_id=actor_id + 10,
+            timestamp=1.0,
+        )
+        for actor_id in (0, 1, 2)
+    }
+
+    trainer._publish_dashboard_observations(observations)
+
+    assert len(fake_socket.messages) == 3
+    restored_env_ids = []
+    for topic, payload in fake_socket.messages:
+        assert topic == TOPIC_DISTANCE_MATRIX.encode("utf-8")
+        restored = deserialize(payload)
+        assert isinstance(restored, DistanceMatrix)
+        restored_env_ids.append(int(restored.env_ids[0]))
+    assert restored_env_ids == [0, 1, 2]
+
+
 def test_dashboard_publish_gate_uses_configured_live_cadence() -> None:
     """Selected-actor observation publication should use the configured cadence."""
     trainer = _make_trainer()
@@ -589,8 +634,8 @@ def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
     assert published[0].step_id == 0
 
 
-def test_observation_publish_actor_ids_respects_stream_and_selector_config() -> None:
-    """Canonical trainer should compute observation publish actor ids from config only."""
+def test_observation_publish_actor_ids_returns_all_actors_when_stream_enabled() -> None:
+    """Canonical trainer should publish low-rate dashboard observations for every actor."""
     trainer = _make_trainer()
     trainer._config.emit_observation_stream = False
     assert trainer._observation_publish_actor_ids() == ()
@@ -598,9 +643,6 @@ def test_observation_publish_actor_ids_respects_stream_and_selector_config() -> 
     trainer._config.emit_observation_stream = True
     trainer._config.telemetry_all_actors = False
     trainer._config.telemetry_actor_id = 0
-    assert trainer._observation_publish_actor_ids() == (0,)
-
-    trainer._config.telemetry_all_actors = True
     assert trainer._observation_publish_actor_ids() == tuple(range(trainer._n_actors))
 
 

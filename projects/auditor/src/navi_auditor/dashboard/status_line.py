@@ -36,6 +36,7 @@ def build_status_metrics_line(
     state: StreamState | None,
     *,
     now: float | None = None,
+    fallback_state: StreamState | None = None,
 ) -> str:
     """Build a compact one-line telemetry summary for the dashboard top bar."""
     if state is None:
@@ -49,14 +50,34 @@ def build_status_metrics_line(
     sps = _last_value(state.perf_sps_history)
     if sps is None:
         sps = _last_value(state.env_perf_sps_history)
+    if sps is None and fallback_state is not None:
+        sps = _last_value(fallback_state.perf_sps_history)
+        if sps is None:
+            sps = _last_value(fallback_state.env_perf_sps_history)
+
     reward_ema = _last_value(state.ppo_reward_ema_history)
     if reward_ema is None:
         reward_ema = _last_value(state.reward_history)
+    if reward_ema is None and fallback_state is not None:
+        reward_ema = _last_value(fallback_state.ppo_reward_ema_history)
+        if reward_ema is None:
+            reward_ema = _last_value(fallback_state.reward_history)
+
     opt_ms = _last_value(state.perf_opt_ms_history)
     if opt_ms is None:
         opt_ms = _last_value(state.env_perf_batch_ms_history)
+    if opt_ms is None and fallback_state is not None:
+        opt_ms = _last_value(fallback_state.perf_opt_ms_history)
+        if opt_ms is None:
+            opt_ms = _last_value(fallback_state.env_perf_batch_ms_history)
+
     zero_wait = _last_value(state.perf_zero_wait_history)
+    if zero_wait is None and fallback_state is not None:
+        zero_wait = _last_value(fallback_state.perf_zero_wait_history)
+
     episodes = len(state.episode_return_history)
+    if episodes == 0 and fallback_state is not None:
+        episodes = len(fallback_state.episode_return_history)
 
     step_id: int | None = None
     if len(state.telemetry_buffer) > 0:

@@ -67,3 +67,26 @@ def test_build_status_metrics_line_falls_back_to_environment_perf() -> None:
     assert "sps=64.2" in text
     assert "opt=14ms" in text
     assert "step=320" in text
+
+
+def test_build_status_metrics_line_uses_shared_fallback_metrics() -> None:
+    state = StreamState()
+    state.last_rx_time = 75.0
+    state.latest_matrix = type("Matrix", (), {"step_id": 912})()
+
+    fallback = StreamState()
+    fallback.perf_sps_history.append(58.4)
+    fallback.ppo_reward_ema_history.append(1.234)
+    fallback.perf_opt_ms_history.append(91.0)
+    fallback.perf_zero_wait_history.append(0.02)
+    fallback.episode_return_history.append(3.0)
+
+    text = build_status_metrics_line(state, now=75.2, fallback_state=fallback)
+
+    assert "stall=200ms" in text
+    assert "sps=58.4" in text
+    assert "ema=1.234" in text
+    assert "ep=1" in text
+    assert "step=912" in text
+    assert "opt=91ms" in text
+    assert "zw=2.0%" in text
