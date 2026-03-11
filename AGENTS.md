@@ -161,6 +161,8 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Continuous Learning:** Agents must learn to "escape" or "fly away" from geometry through continuous per-step negative rewards.
 - **Escape Incentive:** Canonical environment reward MUST provide a positive shaping signal when an actor increases obstacle clearance while near geometry so recovery behavior is learned in-scene instead of via reset churn.
 - **Information Foraging Incentive:** Canonical environment reward MUST penalize overly blind horizon-saturated views and near-field wall-hugging using starvation/proximity ratios derived from the already-produced spherical observation.
+- **Structure Seeking Incentive:** Canonical environment reward MUST positively value stable mid-range structure visibility and reorientation toward informative geometry so agents prefer navigable interiors over empty void-facing views.
+- **Inspection Incentive:** Canonical reward MAY positively score controlled look-around only when the spherical observation gains structure information; blind spinning in empty space MUST NOT become rewarding.
 - **Context Preservation:** Temporal hidden states (selected canonical temporal core) MUST NOT be reset upon grazing geometry, preserving situational awareness.
 - **Hard Truncation:** A hard step limit (e.g., 2000 steps) MUST be enforced to ensure episodic diversity.
 - **Scene Residency:** Canonical scene-pool training MUST keep actors on each compiled scene for multiple completed episodes before rotation; switching after only one episode per actor is too eager for both throughput and local scene mastery.

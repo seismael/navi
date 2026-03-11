@@ -32,17 +32,17 @@ def test_collision_penalty_on_done() -> None:
 
 
 def test_velocity_heuristic() -> None:
-    """Forward velocity should yield positive bonus, spinning yields negative."""
+    """Forward velocity should yield positive bonus, turning should not be punished."""
     shaper = _make_shaper(velocity_weight=0.1)
     # Forward motion
     fwd = shaper.shape(raw_reward=0.0, done=False, forward_velocity=1.0)
     assert fwd.velocity_bonus > 0.0
 
-    # Pure spinning
+    # Pure turning should be neutral so env-side inspection reward can dominate
     spin = shaper.shape(
         raw_reward=0.0, done=False, forward_velocity=0.0, angular_velocity=2.0,
     )
-    assert spin.velocity_bonus < 0.0
+    assert spin.velocity_bonus == 0.0
 
 
 def test_intrinsic_reward_scaling() -> None:

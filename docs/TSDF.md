@@ -140,6 +140,11 @@ By injecting this tensor math into your PPO environment:
 1. **Emergent Wall-Following:** If the drone is spawned in a massive open hangar, it will learn to immediately fly toward the nearest wall or pillar and navigate alongside it, keeping it within the $10$-meter peripheral vision.
 2. **Cornering:** When approaching a blind corner, the agent will learn to swing wide. If it hugs the inside corner, its `proximity_penalty` spikes. If it flies entirely into the open room, its `starvation_penalty` spikes. It will naturally find the geometric center-line.
 
+For the canonical Ghost-Matrix trainer, this base foraging logic is extended with two low-cost observation-derived terms:
+
+1. **Structure-Band Reward:** positive weight on valid mid-range geometry so the agent prefers navigable interiors and corridors over staring into empty halls.
+2. **Inspection Reward:** positive reward only when a turn or slight repositioning increases visible structure density, plus negative reward when the agent looks away from known geometry into emptier views.
+
 ---
 
 Would you like me to map out the exact integration point for this reward tensor within your existing `navi` rollout collection loop, ensuring it scales correctly with your Mamba-2 Critic network's Advantage estimation?

@@ -42,6 +42,12 @@ _STARVATION_RATIO_THRESHOLD: float = 0.8
 _STARVATION_PENALTY_SCALE: float = 1.5
 _PROXIMITY_DISTANCE_THRESHOLD: float = 1.0
 _PROXIMITY_PENALTY_SCALE: float = 0.8
+_STRUCTURE_BAND_MIN_DISTANCE: float = 1.5
+_STRUCTURE_BAND_MAX_DISTANCE: float = 10.0
+_STRUCTURE_BAND_REWARD_SCALE: float = 0.35
+_FORWARD_STRUCTURE_REWARD_SCALE: float = 0.2
+_INSPECTION_REWARD_SCALE: float = 0.25
+_INSPECTION_ACTIVATION_THRESHOLD: float = 0.05
 _SPAWN_CANDIDATES_PER_AXIS: int = 3
 _SPAWN_HEIGHT_SAMPLES: int = 5
 _PERF_EMA_ALPHA: float = 0.1
@@ -75,13 +81,17 @@ def _starvation_penalty(
     ratio_threshold: float,
     penalty_scale: float,
 ) -> float:
-    """Penalize frames where too much of the sphere sees only horizon-saturated space."""
+    """Penalize frames that see too little usable structure.
+
+    The penalty is always present for emptier observations, then steepens once
+    the configured starvation threshold is exceeded.
+    """
     if penalty_scale <= 0.0:
         return 0.0
-    overflow = starvation_ratio - max(0.0, ratio_threshold)
-    if overflow <= 0.0:
-        return 0.0
-    return -penalty_scale * float(min(overflow, 1.0))
+    starvation_ratio = max(0.0, min(1.0, starvation_ratio))
+    baseline = 0.35 * starvation_ratio
+    overflow = max(0.0, starvation_ratio - max(0.0, ratio_threshold))
+    return -penalty_scale * float(min(baseline + overflow, 1.0))
 
 
 def _proximity_penalty(
@@ -95,21 +105,101 @@ def _proximity_penalty(
     return -penalty_scale * float(min(proximity_ratio, 1.0))
 
 
+def _structure_band_reward(
+    structure_band_ratio: float,
+    *,
+    reward_scale: float,
+) -> float:
+    """Reward observations that keep navigable mid-range geometry in view."""
+    if reward_scale <= 0.0 or structure_band_ratio <= 0.0:
+        return 0.0
+    return reward_scale * float(min(max(structure_band_ratio, 0.0), 1.0))
+
+
+def _forward_structure_reward(
+    forward_structure_ratio: float,
+    *,
+    reward_scale: float,
+) -> float:
+    """Reward keeping informative geometry in the forward sector."""
+    if reward_scale <= 0.0 or forward_structure_ratio <= 0.0:
+        return 0.0
+    return reward_scale * float(min(max(forward_structure_ratio, 0.0), 1.0))
+
+
+def _inspection_reward(
+    previous_structure_band_ratio: float | None,
+    current_structure_band_ratio: float,
+    *,
+    previous_forward_structure_ratio: float | None,
+    current_forward_structure_ratio: float,
+    reward_scale: float,
+    activation_threshold: float,
+) -> float:
+    """Reward turns or repositioning that reveal more usable structure."""
+    if reward_scale <= 0.0:
+        return 0.0
+    if previous_structure_band_ratio is None or previous_forward_structure_ratio is None:
+        return 0.0
+    activation = max(
+        previous_structure_band_ratio,
+        current_structure_band_ratio,
+        previous_forward_structure_ratio,
+        current_forward_structure_ratio,
+    )
+    if activation < activation_threshold:
+        return 0.0
+    delta = (
+        (current_structure_band_ratio - previous_structure_band_ratio)
+        + 0.5 * (current_forward_structure_ratio - previous_forward_structure_ratio)
+    )
+    return reward_scale * float(max(-1.0, min(1.0, delta)))
+
+
 def _observation_profile(
     depth_2d: np.ndarray,
     valid_2d: np.ndarray,
     *,
     max_distance: float,
     proximity_distance_threshold: float,
-) -> tuple[float, float]:
-    """Return `(starvation_ratio, proximity_ratio)` for one spherical observation."""
+    structure_band_min_distance: float,
+    structure_band_max_distance: float,
+) -> tuple[float, float, float, float]:
+    """Return observation-derived ratios for one spherical observation."""
     valid_ratio = float(np.mean(valid_2d, dtype=np.float32))
     starvation_ratio = max(0.0, min(1.0, 1.0 - valid_ratio))
+    structure_band_ratio = 0.0
+    forward_structure_ratio = 0.0
+    if (
+        structure_band_max_distance > structure_band_min_distance
+        and max_distance > 0.0
+    ):
+        metric_depth = depth_2d * max_distance
+        structure_mask = np.logical_and(
+            valid_2d,
+            np.logical_and(
+                metric_depth >= structure_band_min_distance,
+                metric_depth <= structure_band_max_distance,
+            ),
+        )
+        structure_band_ratio = float(np.mean(structure_mask, dtype=np.float32))
+
+        forward_half_bins = max(1, depth_2d.shape[0] // 6)
+        forward_sector = np.concatenate(
+            (structure_mask[:forward_half_bins, :], structure_mask[-forward_half_bins:, :]),
+            axis=0,
+        )
+        forward_structure_ratio = float(np.mean(forward_sector, dtype=np.float32))
     if proximity_distance_threshold <= 0.0 or max_distance <= 0.0:
-        return starvation_ratio, 0.0
+        return starvation_ratio, 0.0, structure_band_ratio, forward_structure_ratio
     near_mask = np.logical_and(valid_2d, depth_2d * max_distance <= proximity_distance_threshold)
     proximity_ratio = float(np.mean(near_mask, dtype=np.float32))
-    return starvation_ratio, max(0.0, min(1.0, proximity_ratio))
+    return (
+        starvation_ratio,
+        max(0.0, min(1.0, proximity_ratio)),
+        max(0.0, min(1.0, structure_band_ratio)),
+        max(0.0, min(1.0, forward_structure_ratio)),
+    )
 
 
 def build_spherical_ray_directions(azimuth_bins: int, elevation_bins: int) -> np.ndarray:
@@ -166,6 +256,8 @@ class _ActorState:
     prev_depth: np.ndarray | None = None
     prev_depth_tensor: Any | None = None
     prev_min_distance: float | None = None
+    prev_structure_band_ratio: float | None = None
+    prev_forward_structure_ratio: float | None = None
     episode_return: float = 0.0
     visited_cells: set[tuple[int, int]] = field(default_factory=set)
     needs_reset: bool = False
@@ -196,6 +288,7 @@ class SdfDagTensorStepBatch:
     truncated_tensor: Any
     episode_id_tensor: Any
     published_observations: dict[int, DistanceMatrix]
+    reward_component_tensor: Any | None = None
 
 
 class SdfDagBackend(SimulatorBackend):
@@ -241,6 +334,24 @@ class SdfDagBackend(SimulatorBackend):
         )
         self._proximity_penalty_scale = float(
             getattr(config, "proximity_penalty_scale", _PROXIMITY_PENALTY_SCALE)
+        )
+        self._structure_band_min_distance = float(
+            getattr(config, "structure_band_min_distance", _STRUCTURE_BAND_MIN_DISTANCE)
+        )
+        self._structure_band_max_distance = float(
+            getattr(config, "structure_band_max_distance", _STRUCTURE_BAND_MAX_DISTANCE)
+        )
+        self._structure_band_reward_scale = float(
+            getattr(config, "structure_band_reward_scale", _STRUCTURE_BAND_REWARD_SCALE)
+        )
+        self._forward_structure_reward_scale = float(
+            getattr(config, "forward_structure_reward_scale", _FORWARD_STRUCTURE_REWARD_SCALE)
+        )
+        self._inspection_reward_scale = float(
+            getattr(config, "inspection_reward_scale", _INSPECTION_REWARD_SCALE)
+        )
+        self._inspection_activation_threshold = float(
+            getattr(config, "inspection_activation_threshold", _INSPECTION_ACTIVATION_THRESHOLD)
         )
         self._scene_pool: list[str] = list(config.scene_pool) if config.scene_pool else []
         self._scene_pool_idx: int = 0
@@ -354,6 +465,8 @@ class SdfDagBackend(SimulatorBackend):
         actor.prev_depth = None
         actor.prev_depth_tensor = None
         actor.prev_min_distance = None
+        actor.prev_structure_band_ratio = None
+        actor.prev_forward_structure_ratio = None
         actor.episode_return = 0.0
         actor.visited_cells.clear()
         actor.needs_reset = False
@@ -369,6 +482,16 @@ class SdfDagBackend(SimulatorBackend):
             valid_2d=valid_batch[0],
             materialize_depth_cpu=True,
         )
+        _starvation_ratio, _proximity_ratio, structure_band_ratio, forward_structure_ratio = _observation_profile(
+            depth_cpu,
+            valid_batch[0].detach().cpu().numpy().astype(np.bool_, copy=False),
+            max_distance=self._max_distance,
+            proximity_distance_threshold=self._proximity_distance_threshold,
+            structure_band_min_distance=self._structure_band_min_distance,
+            structure_band_max_distance=self._structure_band_max_distance,
+        )
+        actor.prev_structure_band_ratio = structure_band_ratio
+        actor.prev_forward_structure_ratio = forward_structure_ratio
         assert depth_cpu is not None
         return self._materialize_observation(
             actor_id=actor_id,
@@ -410,6 +533,8 @@ class SdfDagBackend(SimulatorBackend):
         actor.prev_depth = None
         actor.prev_depth_tensor = None
         actor.prev_min_distance = None
+        actor.prev_structure_band_ratio = None
+        actor.prev_forward_structure_ratio = None
         actor.episode_return = 0.0
         actor.visited_cells.clear()
         actor.needs_reset = False
@@ -425,6 +550,29 @@ class SdfDagBackend(SimulatorBackend):
             valid_2d=valid_batch[0],
             materialize_depth_cpu=materialize,
         )
+        structure_band_ratio = 0.0
+        forward_structure_ratio = 0.0
+        if materialize:
+            assert depth_cpu is not None
+            _starvation_ratio, _proximity_ratio, structure_band_ratio, forward_structure_ratio = _observation_profile(
+                depth_cpu,
+                valid_batch[0].detach().cpu().numpy().astype(np.bool_, copy=False),
+                max_distance=self._max_distance,
+                proximity_distance_threshold=self._proximity_distance_threshold,
+                structure_band_min_distance=self._structure_band_min_distance,
+                structure_band_max_distance=self._structure_band_max_distance,
+            )
+        else:
+            _starvation_ratio, _proximity_ratio, structure_band_ratio, forward_structure_ratio = _observation_profile(
+                depth_batch[0].detach().cpu().numpy().astype(np.float32, copy=False),
+                valid_batch[0].detach().cpu().numpy().astype(np.bool_, copy=False),
+                max_distance=self._max_distance,
+                proximity_distance_threshold=self._proximity_distance_threshold,
+                structure_band_min_distance=self._structure_band_min_distance,
+                structure_band_max_distance=self._structure_band_max_distance,
+            )
+        actor.prev_structure_band_ratio = structure_band_ratio
+        actor.prev_forward_structure_ratio = forward_structure_ratio
         published = None
         if materialize:
             assert depth_cpu is not None
@@ -510,6 +658,31 @@ class SdfDagBackend(SimulatorBackend):
                     valid_2d,
                     max_distance=self._max_distance,
                     proximity_distance_threshold=self._proximity_distance_threshold,
+                    structure_band_min_distance=self._structure_band_min_distance,
+                    structure_band_max_distance=self._structure_band_max_distance,
+                )
+                structure_band_ratio = 0.0
+                forward_structure_ratio = 0.0
+                if len((starvation_ratio, proximity_ratio)) == 4:
+                    starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = _observation_profile(
+                        depth_2d,
+                        valid_2d,
+                        max_distance=self._max_distance,
+                        proximity_distance_threshold=self._proximity_distance_threshold,
+                        structure_band_min_distance=self._structure_band_min_distance,
+                        structure_band_max_distance=self._structure_band_max_distance,
+                    )
+                else:
+                    structure_band_ratio = 0.0
+                    forward_structure_ratio = 0.0
+                
+                starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = _observation_profile(
+                    depth_2d,
+                    valid_2d,
+                    max_distance=self._max_distance,
+                    proximity_distance_threshold=self._proximity_distance_threshold,
+                    structure_band_min_distance=self._structure_band_min_distance,
+                    structure_band_max_distance=self._structure_band_max_distance,
                 )
 
                 obs = self._build_observation(
@@ -522,7 +695,7 @@ class SdfDagBackend(SimulatorBackend):
 
                 actor.step_count += 1
                 truncated = actor.step_count >= self._max_steps_per_episode
-                reward = self._compute_reward(
+                reward, _reward_components = self._compute_reward(
                     actor_id=actor_id,
                     previous_pose=previous_pose,
                     current_pose=actor.pose,
@@ -531,7 +704,11 @@ class SdfDagBackend(SimulatorBackend):
                     current_clearance=min_distance,
                     starvation_ratio=starvation_ratio,
                     proximity_ratio=proximity_ratio,
+                    current_structure_band_ratio=structure_band_ratio,
+                    current_forward_structure_ratio=forward_structure_ratio,
                 )
+                actor.prev_structure_band_ratio = structure_band_ratio
+                actor.prev_forward_structure_ratio = forward_structure_ratio
                 actor.episode_return += reward
                 actor.needs_reset = truncated
 
@@ -572,6 +749,7 @@ class SdfDagBackend(SimulatorBackend):
         published_observations: dict[int, DistanceMatrix] = {}
         observation_tensors_by_actor: dict[int, Any] = {}
         results_by_actor: dict[int, StepResult] = {}
+        reward_components_by_actor: dict[int, np.ndarray] = {}
         active_actor_ids: list[int] = []
         previous_poses: dict[int, RobotPose] = {}
         publish_actor_set = set(publish_actor_ids)
@@ -629,6 +807,21 @@ class SdfDagBackend(SimulatorBackend):
                 )
             else:
                 proximity_ratios = [0.0] * len(active_actor_ids)
+            metric_depth_batch = depth_batch.mul(self._max_distance)
+            if self._structure_band_max_distance > self._structure_band_min_distance:
+                structure_mask = metric_depth_batch.ge(self._structure_band_min_distance).logical_and(
+                    metric_depth_batch.le(self._structure_band_max_distance)
+                ).logical_and(valid_batch)
+                structure_band_ratios = structure_mask.to(dtype=self._torch.float32).mean(dim=(1, 2)).detach().cpu().tolist()
+                forward_half_bins = max(1, self._az_bins // 6)
+                forward_sector = self._torch.cat(
+                    (structure_mask[:, :forward_half_bins, :], structure_mask[:, -forward_half_bins:, :]),
+                    dim=1,
+                )
+                forward_structure_ratios = forward_sector.to(dtype=self._torch.float32).mean(dim=(1, 2)).detach().cpu().tolist()
+            else:
+                structure_band_ratios = [0.0] * len(active_actor_ids)
+                forward_structure_ratios = [0.0] * len(active_actor_ids)
 
             for batch_idx, actor_id in enumerate(active_actor_ids):
                 actor = self._actors[actor_id]
@@ -649,11 +842,18 @@ class SdfDagBackend(SimulatorBackend):
                     semantic_2d = corrected_semantic[0]
                     valid_2d = corrected_valid[0]
                     current_clearance = float(depth_2d.amin().detach().cpu()) * self._max_distance
-                    starvation_ratios[batch_idx], proximity_ratios[batch_idx] = _observation_profile(
+                    (
+                        starvation_ratios[batch_idx],
+                        proximity_ratios[batch_idx],
+                        structure_band_ratios[batch_idx],
+                        forward_structure_ratios[batch_idx],
+                    ) = _observation_profile(
                         depth_2d.detach().cpu().numpy().astype(np.float32, copy=False),
                         valid_2d.detach().cpu().numpy().astype(np.bool_, copy=False),
                         max_distance=self._max_distance,
                         proximity_distance_threshold=self._proximity_distance_threshold,
+                        structure_band_min_distance=self._structure_band_min_distance,
+                        structure_band_max_distance=self._structure_band_max_distance,
                     )
 
                 obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
@@ -680,7 +880,7 @@ class SdfDagBackend(SimulatorBackend):
 
                 actor.step_count += 1
                 truncated = actor.step_count >= self._max_steps_per_episode
-                reward = self._compute_reward(
+                reward, reward_components = self._compute_reward(
                     actor_id=actor_id,
                     previous_pose=previous_pose,
                     current_pose=actor.pose,
@@ -689,9 +889,14 @@ class SdfDagBackend(SimulatorBackend):
                     current_clearance=current_clearance,
                     starvation_ratio=float(starvation_ratios[batch_idx]),
                     proximity_ratio=float(proximity_ratios[batch_idx]),
+                    current_structure_band_ratio=float(structure_band_ratios[batch_idx]),
+                    current_forward_structure_ratio=float(forward_structure_ratios[batch_idx]),
                 )
+                actor.prev_structure_band_ratio = float(structure_band_ratios[batch_idx])
+                actor.prev_forward_structure_ratio = float(forward_structure_ratios[batch_idx])
                 actor.episode_return += reward
                 actor.needs_reset = truncated
+                reward_components_by_actor[actor_id] = reward_components
 
                 results_by_actor[actor_id] = StepResult(
                     step_id=step_id,
@@ -712,6 +917,9 @@ class SdfDagBackend(SimulatorBackend):
             ordered_results.append(results_by_actor[actor_id])
 
         reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(ordered_results)
+        reward_component_tensor = self._build_reward_component_tensor(
+            [reward_components_by_actor.get(int(action.env_ids[0]) if len(action.env_ids) > 0 else idx, np.zeros((9,), dtype=np.float32)) for idx, action in enumerate(actions)]
+        )
 
         self._record_perf_sample(
             batch_seconds=time.perf_counter() - batch_started_at,
@@ -732,6 +940,7 @@ class SdfDagBackend(SimulatorBackend):
                 done_tensor=done_tensor,
                 truncated_tensor=truncated_tensor,
                 episode_id_tensor=episode_id_tensor,
+                reward_component_tensor=reward_component_tensor,
                 published_observations=published_observations,
             ),
             tuple(ordered_results),
@@ -750,6 +959,7 @@ class SdfDagBackend(SimulatorBackend):
         published_observations: dict[int, DistanceMatrix] = {}
         observation_tensors_by_actor: dict[int, Any] = {}
         results_by_actor: dict[int, StepResult] = {}
+        reward_components_by_actor: dict[int, np.ndarray] = {}
         active_actor_ids: list[int] = []
         previous_poses: dict[int, RobotPose] = {}
         publish_actor_set = set(publish_actor_ids)
@@ -808,6 +1018,21 @@ class SdfDagBackend(SimulatorBackend):
                 )
             else:
                 proximity_ratios = [0.0] * len(active_actor_ids)
+            metric_depth_batch = depth_batch.mul(self._max_distance)
+            if self._structure_band_max_distance > self._structure_band_min_distance:
+                structure_mask = metric_depth_batch.ge(self._structure_band_min_distance).logical_and(
+                    metric_depth_batch.le(self._structure_band_max_distance)
+                ).logical_and(valid_batch)
+                structure_band_ratios = structure_mask.to(dtype=self._torch.float32).mean(dim=(1, 2)).detach().cpu().tolist()
+                forward_half_bins = max(1, self._az_bins // 6)
+                forward_sector = self._torch.cat(
+                    (structure_mask[:, :forward_half_bins, :], structure_mask[:, -forward_half_bins:, :]),
+                    dim=1,
+                )
+                forward_structure_ratios = forward_sector.to(dtype=self._torch.float32).mean(dim=(1, 2)).detach().cpu().tolist()
+            else:
+                structure_band_ratios = [0.0] * len(active_actor_ids)
+                forward_structure_ratios = [0.0] * len(active_actor_ids)
 
             for batch_idx, actor_id in enumerate(active_actor_ids):
                 actor = self._actors[actor_id]
@@ -828,11 +1053,18 @@ class SdfDagBackend(SimulatorBackend):
                     semantic_2d = corrected_semantic[0]
                     valid_2d = corrected_valid[0]
                     current_clearance = float(depth_2d.amin().detach().cpu()) * self._max_distance
-                    starvation_ratios[batch_idx], proximity_ratios[batch_idx] = _observation_profile(
+                    (
+                        starvation_ratios[batch_idx],
+                        proximity_ratios[batch_idx],
+                        structure_band_ratios[batch_idx],
+                        forward_structure_ratios[batch_idx],
+                    ) = _observation_profile(
                         depth_2d.detach().cpu().numpy().astype(np.float32, copy=False),
                         valid_2d.detach().cpu().numpy().astype(np.bool_, copy=False),
                         max_distance=self._max_distance,
                         proximity_distance_threshold=self._proximity_distance_threshold,
+                        structure_band_min_distance=self._structure_band_min_distance,
+                        structure_band_max_distance=self._structure_band_max_distance,
                     )
 
                 obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
@@ -859,7 +1091,7 @@ class SdfDagBackend(SimulatorBackend):
 
                 actor.step_count += 1
                 truncated = actor.step_count >= self._max_steps_per_episode
-                reward = self._compute_reward(
+                reward, reward_components = self._compute_reward(
                     actor_id=actor_id,
                     previous_pose=previous_pose,
                     current_pose=actor.pose,
@@ -868,9 +1100,14 @@ class SdfDagBackend(SimulatorBackend):
                     current_clearance=current_clearance,
                     starvation_ratio=float(starvation_ratios[batch_idx]),
                     proximity_ratio=float(proximity_ratios[batch_idx]),
+                    current_structure_band_ratio=float(structure_band_ratios[batch_idx]),
+                    current_forward_structure_ratio=float(forward_structure_ratios[batch_idx]),
                 )
+                actor.prev_structure_band_ratio = float(structure_band_ratios[batch_idx])
+                actor.prev_forward_structure_ratio = float(forward_structure_ratios[batch_idx])
                 actor.episode_return += reward
                 actor.needs_reset = truncated
+                reward_components_by_actor[actor_id] = reward_components
 
                 results_by_actor[actor_id] = StepResult(
                     step_id=step_id,
@@ -887,6 +1124,9 @@ class SdfDagBackend(SimulatorBackend):
         ordered_results = [results_by_actor[actor_id] for actor_id in range(int(action_rows.shape[0]))]
 
         reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(ordered_results)
+        reward_component_tensor = self._build_reward_component_tensor(
+            [reward_components_by_actor.get(actor_id, np.zeros((9,), dtype=np.float32)) for actor_id in range(int(action_rows.shape[0]))]
+        )
 
         self._record_perf_sample(
             batch_seconds=time.perf_counter() - batch_started_at,
@@ -900,9 +1140,20 @@ class SdfDagBackend(SimulatorBackend):
                 done_tensor=done_tensor,
                 truncated_tensor=truncated_tensor,
                 episode_id_tensor=episode_id_tensor,
+                reward_component_tensor=reward_component_tensor,
                 published_observations=published_observations,
             ),
             tuple(ordered_results),
+        )
+
+    def _build_reward_component_tensor(self, ordered_components: list[np.ndarray]) -> Any | None:
+        """Pack reward decomposition terms for low-volume trainer telemetry."""
+        if not ordered_components:
+            return None
+        return self._torch.tensor(
+            ordered_components,
+            device=self._device,
+            dtype=self._torch.float32,
         )
 
     def _build_result_tensors(
@@ -1279,36 +1530,67 @@ class SdfDagBackend(SimulatorBackend):
         current_clearance: float,
         starvation_ratio: float,
         proximity_ratio: float,
-    ) -> float:
+        current_structure_band_ratio: float,
+        current_forward_structure_ratio: float,
+    ) -> tuple[float, np.ndarray]:
         actor = self._actors[actor_id]
-        reward = 0.0
         cell = (math.floor(current_pose.x / 2.0), math.floor(current_pose.z / 2.0))
+        exploration_reward = 0.0
         if cell not in actor.visited_cells:
             actor.visited_cells.add(cell)
-            reward += _EXPLORATION_REWARD
+            exploration_reward = _EXPLORATION_REWARD
 
         dx = current_pose.x - previous_pose.x
         dy = current_pose.y - previous_pose.y
         dz = current_pose.z - previous_pose.z
-        reward += _PROGRESS_REWARD_SCALE * float(math.sqrt(dx * dx + dy * dy + dz * dz))
-        reward += _obstacle_clearance_reward(
+        progress_reward = _PROGRESS_REWARD_SCALE * float(math.sqrt(dx * dx + dy * dy + dz * dz))
+        clearance_reward = _obstacle_clearance_reward(
             previous_clearance,
             current_clearance,
             proximity_window=self._obstacle_clearance_window,
             reward_scale=self._obstacle_clearance_reward_scale,
         )
-        reward += _starvation_penalty(
+        starvation_penalty = _starvation_penalty(
             starvation_ratio,
             ratio_threshold=self._starvation_ratio_threshold,
             penalty_scale=self._starvation_penalty_scale,
         )
-        reward += _proximity_penalty(
+        proximity_penalty = _proximity_penalty(
             proximity_ratio,
             penalty_scale=self._proximity_penalty_scale,
         )
-        if collision:
-            reward += _COLLISION_PENALTY
-        return reward
+        structure_reward = _structure_band_reward(
+            current_structure_band_ratio,
+            reward_scale=self._structure_band_reward_scale,
+        )
+        forward_structure_reward = _forward_structure_reward(
+            current_forward_structure_ratio,
+            reward_scale=self._forward_structure_reward_scale,
+        )
+        inspection_reward = _inspection_reward(
+            actor.prev_structure_band_ratio,
+            current_structure_band_ratio,
+            previous_forward_structure_ratio=actor.prev_forward_structure_ratio,
+            current_forward_structure_ratio=current_forward_structure_ratio,
+            reward_scale=self._inspection_reward_scale,
+            activation_threshold=self._inspection_activation_threshold,
+        )
+        collision_penalty = _COLLISION_PENALTY if collision else 0.0
+        reward_components = np.array(
+            [
+                exploration_reward,
+                progress_reward,
+                clearance_reward,
+                starvation_penalty,
+                proximity_penalty,
+                structure_reward,
+                forward_structure_reward,
+                inspection_reward,
+                collision_penalty,
+            ],
+            dtype=np.float32,
+        )
+        return float(reward_components.sum()), reward_components
 
     def _find_spawns(self, count: int) -> list[tuple[float, float, float]]:
         asset = self._require_asset()

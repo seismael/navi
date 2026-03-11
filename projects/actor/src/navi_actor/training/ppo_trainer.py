@@ -523,8 +523,12 @@ class PpoTrainer:
             return
         if not self._should_publish_actor_telemetry(actor_id):
             return
-        p = np.array([kwargs.get(k, 0.0) for k in ["raw_reward", "shaped_reward", "intrinsic_reward",
-                     "loop_similarity", "is_loop", "beta", "done", "forward_vel", "yaw_vel"]], dtype=np.float32)
+        p = np.array([kwargs.get(k, 0.0) for k in [
+                     "raw_reward", "shaped_reward", "intrinsic_reward",
+                     "loop_similarity", "is_loop", "beta", "done", "forward_vel", "yaw_vel",
+                     "exploration_reward", "progress_reward", "clearance_reward", "starvation_penalty",
+                     "proximity_penalty", "structure_reward", "forward_structure_reward", "inspection_reward",
+                     "collision_reward"]], dtype=np.float32)
         event = TelemetryEvent(event_type="actor.training.ppo.step", episode_id=episode_id, env_id=actor_id,
                                step_id=step_id, payload=p, timestamp=time.time())
         _safe_pub_send(
@@ -830,6 +834,7 @@ class PpoTrainer:
                 )
                 next_obs_batch = step_batch.observation_tensor
                 published_observations = step_batch.published_observations
+                reward_component_tensor = step_batch.reward_component_tensor
                 step_ms = (time.perf_counter() - t_step_start) * 1000
 
                 t_pack_start = time.perf_counter()
@@ -928,6 +933,9 @@ class PpoTrainer:
                         if not self._should_publish_actor_telemetry(actor_id):
                             continue
                         loop_similarity = float(host_scalar_batch.loop_similarity_tensor[actor_id])
+                        reward_components = None
+                        if reward_component_tensor is not None:
+                            reward_components = reward_component_tensor[actor_id]
                         t_tel_start = time.perf_counter()
                         self._publish_step_telemetry(
                             step_id=step_id,
@@ -942,6 +950,15 @@ class PpoTrainer:
                             done=bool(host_scalar_batch.done_tensor[actor_id]),
                             forward_vel=float(host_batch.action_cpu_tensor[actor_id, 0]),
                             yaw_vel=float(host_batch.action_cpu_tensor[actor_id, 3]),
+                            exploration_reward=0.0 if reward_components is None else float(reward_components[0]),
+                            progress_reward=0.0 if reward_components is None else float(reward_components[1]),
+                            clearance_reward=0.0 if reward_components is None else float(reward_components[2]),
+                            starvation_penalty=0.0 if reward_components is None else float(reward_components[3]),
+                            proximity_penalty=0.0 if reward_components is None else float(reward_components[4]),
+                            structure_reward=0.0 if reward_components is None else float(reward_components[5]),
+                            forward_structure_reward=0.0 if reward_components is None else float(reward_components[6]),
+                            inspection_reward=0.0 if reward_components is None else float(reward_components[7]),
+                            collision_reward=0.0 if reward_components is None else float(reward_components[8]),
                         )
                         telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
 

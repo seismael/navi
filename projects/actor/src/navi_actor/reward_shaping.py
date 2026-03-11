@@ -118,10 +118,10 @@ class RewardShaper:
         # Existential tax — per-step cost
         tax = self._existential_tax
 
-        # Velocity heuristic: encourage forward motion, penalize spinning
-        vel_bonus = self._velocity_weight * (
-            max(0.0, forward_velocity) - 0.5 * abs(angular_velocity)
-        )
+        # Velocity heuristic: reward deliberate forward motion without punishing
+        # information-seeking turns. Geometry-aware turn reward belongs env-side.
+        del angular_velocity
+        vel_bonus = self._velocity_weight * max(0.0, forward_velocity)
 
         # Intrinsic curiosity with annealing
         beta = self.beta
@@ -167,9 +167,8 @@ class RewardShaper:
         )
 
         tax = self._existential_tax
-        vel_bonus = self._velocity_weight * (
-            forward_velocities.clamp(min=0.0) - 0.5 * angular_velocities.abs()
-        )
+        del angular_velocities
+        vel_bonus = self._velocity_weight * forward_velocities.clamp(min=0.0)
 
         beta = self.beta
         intrinsic = beta * intrinsic_rewards

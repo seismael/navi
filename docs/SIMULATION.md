@@ -122,6 +122,9 @@ The environment reward seam now includes:
 - positive clearance-delta reward when an actor increases free space near geometry
 - starvation penalty when horizon-saturated observations dominate the sphere
 - proximity penalty when very near valid hits dominate the sphere
+- positive structure-band reward when stable mid-range geometry stays visible
+- positive forward-structure reward when informative geometry remains in the forward sector
+- inspection reward when turning or repositioning reveals more usable structure instead of less
 
 These terms are derived from already-produced batched depth and validity data.
 They do not require a second sensing pipeline.

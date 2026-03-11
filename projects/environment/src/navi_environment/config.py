@@ -131,4 +131,31 @@ class EnvironmentConfig(BaseSettings):
         default=0.8,
         validation_alias="NAVI_PROXIMITY_PENALTY_SCALE",
     )
+    structure_band_min_distance: float = Field(
+        default=1.5,
+        validation_alias="NAVI_STRUCTURE_BAND_MIN_DISTANCE",
+        gt=0.0,
+    )
+    structure_band_max_distance: float = Field(
+        default=10.0,
+        validation_alias="NAVI_STRUCTURE_BAND_MAX_DISTANCE",
+        gt=0.0,
+    )
+    structure_band_reward_scale: float = Field(
+        default=0.35,
+        validation_alias="NAVI_STRUCTURE_BAND_REWARD_SCALE",
+    )
+    forward_structure_reward_scale: float = Field(
+        default=0.2,
+        validation_alias="NAVI_FORWARD_STRUCTURE_REWARD_SCALE",
+    )
+    inspection_reward_scale: float = Field(
+        default=0.25,
+        validation_alias="NAVI_INSPECTION_REWARD_SCALE",
+    )
+    inspection_activation_threshold: float = Field(
+        default=0.05,
+        validation_alias="NAVI_INSPECTION_ACTIVATION_THRESHOLD",
+        ge=0.0,
+    )
     scene_pool: tuple[str, ...] = ()

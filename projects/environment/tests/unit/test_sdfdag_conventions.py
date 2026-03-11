@@ -11,10 +11,13 @@ import torch
 
 from navi_environment.backends.sdfdag_backend import (
     SdfDagBackend,
+    _forward_structure_reward,
+    _inspection_reward,
     _observation_profile,
     _obstacle_clearance_reward,
     _proximity_penalty,
     _starvation_penalty,
+    _structure_band_reward,
     _validate_unit_direction_tensor,
     build_spherical_ray_directions,
 )
@@ -63,28 +66,61 @@ def test_obstacle_clearance_reward_is_zero_when_both_clearances_are_far() -> Non
 
 
 def test_observation_profile_tracks_starvation_and_near_geometry() -> None:
-    depth = np.array([[1.0, 0.02], [1.0, 0.50]], dtype=np.float32)
-    valid = np.array([[False, True], [False, True]], dtype=np.bool_)
+    depth = np.array([[1.0, 0.02], [0.10, 0.50]], dtype=np.float32)
+    valid = np.array([[False, True], [True, True]], dtype=np.bool_)
 
-    starvation_ratio, proximity_ratio = _observation_profile(
+    starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = _observation_profile(
         depth,
         valid,
         max_distance=30.0,
         proximity_distance_threshold=1.0,
+        structure_band_min_distance=1.5,
+        structure_band_max_distance=10.0,
     )
 
-    assert math.isclose(starvation_ratio, 0.5)
+    assert math.isclose(starvation_ratio, 0.25)
     assert math.isclose(proximity_ratio, 0.25)
+    assert math.isclose(structure_band_ratio, 0.25)
+    assert math.isclose(forward_structure_ratio, 0.25)
 
 
 def test_starvation_penalty_triggers_only_beyond_threshold() -> None:
-    assert _starvation_penalty(0.7, ratio_threshold=0.8, penalty_scale=1.5) == 0.0
+    assert _starvation_penalty(0.7, ratio_threshold=0.8, penalty_scale=1.5) < 0.0
     assert _starvation_penalty(0.9, ratio_threshold=0.8, penalty_scale=1.5) < 0.0
 
 
 def test_proximity_penalty_scales_with_near_field_ratio() -> None:
     assert _proximity_penalty(0.0, penalty_scale=0.8) == 0.0
     assert _proximity_penalty(0.5, penalty_scale=0.8) == -0.4
+
+
+def test_structure_band_reward_scales_with_mid_range_geometry() -> None:
+    assert _structure_band_reward(0.0, reward_scale=0.35) == 0.0
+    assert _structure_band_reward(0.5, reward_scale=0.35) == pytest.approx(0.175)
+
+
+def test_forward_structure_reward_scales_with_forward_visibility() -> None:
+    assert _forward_structure_reward(0.0, reward_scale=0.2) == 0.0
+    assert _forward_structure_reward(0.5, reward_scale=0.2) == pytest.approx(0.1)
+
+
+def test_inspection_reward_requires_structure_and_tracks_information_gain() -> None:
+    assert _inspection_reward(
+        0.10,
+        0.35,
+        previous_forward_structure_ratio=0.05,
+        current_forward_structure_ratio=0.20,
+        reward_scale=0.25,
+        activation_threshold=0.05,
+    ) > 0.0
+    assert _inspection_reward(
+        0.35,
+        0.10,
+        previous_forward_structure_ratio=0.20,
+        current_forward_structure_ratio=0.05,
+        reward_scale=0.25,
+        activation_threshold=0.05,
+    ) < 0.0
 
 
 def test_validate_unit_direction_tensor_rejects_unnormalized_vectors() -> None:
