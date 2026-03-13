@@ -1,210 +1,253 @@
-You absolutely can, and using an agentic CLI tool (like an AI coding assistant in YOLO/auto-approve mode) is the modern way to execute massive boilerplate refactors.
+You successfully executed Phase 1 and Phase 2 by moving the state tensors onto the GPU and vectorizing the math. However, the SPS drop from 100 to 50 is a classic symptom of **Control Flow Stalling**.
 
-However, there is a critical danger in using a generic prompt like *"implement all features in NOTES.md"* for this specific task.
+You moved the *data* to the GPU, but you left the *logic* in Python. Every time Python needs to make an `if/else` decision based on a GPU tensor, it halts the entire CUDA pipeline, copies the data across the PCIe bus, evaluates the boolean, and then resumes.
 
-### The Danger of Autonomous "Lazy" Coding
-
-Autonomous AI agents optimize for getting the tests to pass, not for hardware utilization. If you give an agent a generic command to "fix the performance," it will likely take the path of least resistance. It might wrap things in `@torch.jit.script`, sprinkle some `torch.no_grad()`, or rewrite your `for` loops into slightly faster list comprehensions.
-
-It will **not** spontaneously invent a zero-copy DLPack bridge between PyTorch and JAX unless explicitly forced into that architectural corner. If the agent uses `.cpu()` even once in the hot path to make an array easier to slice, your $>10,000$ SPS goal dies instantly.
-
-### The "God Prompt" for Strict Architectural Enforcement
-
-To force the agent to execute the refactor iteratively while adhering to the strict Data-Oriented memory constraints we established, you must inject the engineering laws directly into your CLI prompt.
-
-Execute your agent (e.g., `gemini -y` or your chosen CLI) using this exact, hardened prompt:
-
-```bash
-gemini -y "Read NOTES.md. You are acting as a Senior HPC Engineer. You must execute the refactor of sdfdag_backend.py strictly step-by-step as outlined in NOTES.md. 
-
-CRITICAL ARCHITECTURAL LAWS YOU MUST OBEY:
-1. ZERO HOST-DEVICE SYNCS: You are forbidden from using .cpu(), .numpy(), or .tolist() anywhere in the rollout hot-path. Tensors must stay on 'cuda'.
-2. ZERO PYTHON LOOPS: You are forbidden from iterating over actors (e.g., 'for actor in actors:'). All math must be vectorized using PyTorch tensor operations.
-3. ZERO-COPY PHYSICS: You must use jax.dlpack and torch.utils.dlpack to pass data between the PyTorch actor states and the JAX/MJX environment.
-
-EXECUTION PROTOCOL:
-Pick the first phase in NOTES.md. Implement it completely. Do not leave '...rest of code...' comments; write the full file. Run the tests. If the tests fail, fix them. You may only move to the next phase in NOTES.md AFTER the current phase is fully implemented and passes execution."
-
-```
+Here is the in-depth proof of exactly what is killing your performance, followed by the fully vectorized solution that bypasses the CPU entirely.
 
 ---
 
-### The Required `NOTES.md` Structure
+### The Deep Investigation: Death by a Thousand Cuts
 
-For the agent to succeed iteratively, your `NOTES.md` file cannot just be a brain dump. It must be a strict state machine. Overwrite your `NOTES.md` with this exact checklist so the agent knows exactly what "Phase 1" and "Phase 2" mean:
+Your `batch_step_tensor_actions` inside `sdfdag_backend.py` has four catastrophic bottlenecks.
 
-```markdown
-# OmniSense Backend Refactor Roadmap (Target: >10,000 SPS)
+#### 1. The PCIe "Action Bounce"
 
-## Phase 1: Eradicate Python Objects & Pre-allocate Tensors
-* Target File: `projects/environment/src/navi_environment/backends/sdfdag_backend.py`
-* Action: Remove the `_ActorState` dataclass.
-* Action: In `SdfDagBackend.__init__`, pre-allocate contiguous CUDA tensors for: `_actor_positions` (N, 3), `_actor_yaws` (N,), `_actor_steps` (N,), and `_episode_returns` (N,).
-* Validation: Run `pytest projects/environment/tests/` to ensure initialization does not crash.
+At the very top of the function, you do this:
 
-## Phase 2: Vectorize the Reward Engine
-* Target File: `sdfdag_backend.py` -> `_compute_reward`
-* Action: Rewrite `_compute_reward` to ingest the full batch of tensors.
-* Action: Replace all `math.sqrt` and scalar arithmetic with `torch.norm` and batched tensor operations. Return a flat `(N,)` tensor of rewards.
-* Validation: Run tests to ensure reward shapes match the `(N,)` requirement.
-
-## Phase 3: The DLPack MuJoCo Bridge
-* Target File: `sdfdag_backend.py` -> `batch_step_tensor_actions`
-* Action: Replace the `for` loop stepping individual `_mjx_envs`.
-* Action: Use `torch.utils.dlpack.to_dlpack` and `jax.dlpack.from_dlpack` to pass the PyTorch `action_tensor` to a batched MJX environment.
-* Action: Use DLPack to pull the resulting JAX positions/yaws back into the PyTorch `_actor_positions` tensors.
-* Validation: Ensure the physics step executes without throwing memory location or device mismatch errors.
-
-## Phase 4: Telemetry Isolation
-* Target File: `sdfdag_backend.py` -> `batch_step_tensor_actions`
-* Action: Locate all instances of `.cpu()`, `.numpy()`, and `.tolist()`.
-* Action: Lock these calls strictly behind an `if actor_id in publish_actor_set:` block so they only execute when the dashboard explicitly requests them. 
+```python
+action_rows = self._coerce_action_rows(action_tensor)
 
 ```
 
-By structuring the attack this way, you box the AI into a corner. It has no choice but to write the high-performance C++/CUDA style Python you need, and it will iterate relentlessly until the checklist is complete.
+If you trace `_coerce_action_rows`, it executes `.detach().cpu().numpy()`. Then, ten lines later, you execute `self._torch.from_numpy(...).to(self._device)`.
+**The Math:** You are taking the Mamba-2 action tensor natively sitting on the GPU, pushing it to CPU RAM over the PCIe bus, slicing it, and immediately pushing it *back* to the GPU. This destroys your throughput instantly.
 
-This is the definitive architectural audit for your OmniSense execution pipeline. You have engineered a phenomenal $O(1)$ stackless CUDA sphere tracer (`torch-sdf`), but the Python wrapper surrounding it is severely throttling the hardware.
+#### 2. The Implicit Scalar Sync (`_needs_reset_mask`)
 
-To achieve the theoretical maximum throughput ($>10,000$ SPS), we must mathematically eliminate the Global Interpreter Lock (GIL) and all Host-Device (CPU-GPU) memory transfers during the rollout phase.
+```python
+for actor_id in range(int(action_rows.shape[0])):
+    if self._needs_reset_mask[actor_id]:
 
-Here is the robust, proof-backed analysis, the precise implementation blueprint, and the newly identified critical bottleneck you missed.
+```
+
+**The Math:** `_needs_reset_mask` is a CUDA boolean tensor. When Python evaluates `if tensor[index]:`, it must physically halt the GPU, transfer that *single* boolean to the CPU, and evaluate it. You are doing this inside a `for` loop 256 times per step.
+
+#### 3. The Dynamic Recast Branch
+
+```python
+collisions_t = min_distances_t < _COLLISION_CLEARANCE
+if collisions_t.any():
+
+```
+
+**The Math:** `.any()` forces a synchronization. Furthermore, if a collision happens, you recalculate the ray directions and launch a *second* `self._torch_sdf.cast_rays` kernel strictly for the collided actors. This fractures the GPU execution graph.
+*Fix:* Do not re-cast rays. If the drone hits a wall, just snap its position back to `previous_positions_t`. The observation tensor will show the wall at `0.0m`, which is exactly what the neural network needs to see to learn the penalty.
+
+#### 4. Indexing overhead in Kinematics
+
+Your custom kinematics engine expects a tuple of `actor_ids` and uses `actor_indices = list(actor_ids)`. We must make it operate on the entire batch matrix implicitly without indexing arrays.
 
 ---
 
-### Part 1: Deep Investigation & Proof-Based Claims
+### The Fix: 100% Vectorized GPU Rollout
 
-The current `sdfdag_backend.py` implementation contains three terminal bottlenecks that neutralize your CUDA acceleration.
+To fix this, we must completely eradicate the `for` loops. We treat the entire 256-actor pool as a single, contiguous block of fluid matrix logic.
 
-#### Flaw 1: Host-Device Starvation via Forced Synchronization
+Replace your existing `batch_step_tensor_actions` and add the `_step_kinematics_vectorized` function in `sdfdag_backend.py` with the following strictly on-device code:
 
-* **The Claim:** You are forcing the GPU to halt, wait, and transfer massive memory blocks across the PCIe bus to the CPU every single step.
-* **The Proof:** In `navi_environment/backends/sdfdag_backend.py`, immediately after the CUDA kernel finishes, you execute:
-`min_distances = depth_batch.amin(dim=(1, 2)).mul(self._max_distance).detach().cpu().tolist()`
-`starvation_ratios = valid_batch.logical_not().to(dtype=self._torch.float32).mean(dim=(1, 2)).detach().cpu().tolist()`
-* **The Physics:** `.cpu()` triggers a synchronous memory copy. `.tolist()` forces PyTorch to deserialize the C++ tensor into native Python floats. The GPU sits at $0\%$ utilization while the CPU parses this list.
-
-#### Flaw 2: De-vectorized Python Scalar Loops
-
-* **The Claim:** You are calculating rewards and observation profiles using a single-threaded Python loop, executing hundreds of scalar math operations sequentially.
-* **The Proof:** Inside `batch_step_tensor_actions`, you iterate over the batch: `for batch_idx, actor_id in enumerate(active_actor_ids):`. Inside this loop, you pass scalar values into `_compute_reward`, which uses `math.sqrt` and native Python arithmetic instead of tensor operations.
-* **The Physics:** If you have 256 actors, you are executing 256 Python function calls per step. Python's GIL limits this to one CPU core, capping your SPS strictly to the speed of Python's `math` library.
-
-#### Flaw 3: Instancing MuJoCo XLA (MJX) Incorrectly
-
-* **The Claim:** You are stepping individual physics environments in a loop, defeating the purpose of MuJoCo XLA's batched acceleration.
-* **The Proof:** You iterate over `action_rows.shape[0]` and call `actor.pose = self._mjx_envs[actor_id].step_pose_commands(...)`.
-* **The Physics:** MJX is built on JAX to leverage XLA (Accelerated Linear Algebra) for massive parallelization on the GPU. By stepping `_mjx_envs` individually, you trigger hundreds of tiny, separate JAX dispatches, creating massive overhead.
-
----
-
-### Part 2: The Missing Bottleneck (Critical Discovery)
-
-During the audit, a fourth, highly destructive bottleneck was identified in how you manage actor states.
-
-#### Flaw 4: Python List Comprehension Tensor Generation
-
-* **The Claim:** You are rebuilding the `positions` and `yaws` tensors from scratch every single frame using Python list comprehensions.
-* **The Proof:** In `_cast_actor_batch_tensors`, you execute:
 ```python
-positions = self._torch.tensor(
-    [
-        [self._actors[actor_id].pose.x, self._actors[actor_id].pose.y, self._actors[actor_id].pose.z]
-        for actor_id in actor_ids
-    ],
-    device=self._device,
-    dtype=self._torch.float32,
-)
+    def batch_step_tensor_actions(
+        self,
+        action_tensor: Any,
+        step_id: int,
+        *,
+        publish_actor_ids: tuple[int, ...] = (),
+    ) -> tuple[SdfDagTensorStepBatch, tuple[StepResult, ...]]:
+        batch_started_at = time.perf_counter()
+        
+        # 1. VECTORIZED RESETS (Single sync via .nonzero() vs 256 individual syncs)
+        reset_indices = self._needs_reset_mask.nonzero(as_tuple=False).flatten()
+        if reset_indices.numel() > 0:
+            self._episode_ids[reset_indices] += 1
+            self._actor_positions[reset_indices] = self._spawn_positions[reset_indices]
+            self._actor_yaws[reset_indices] = (2.0 * math.pi * reset_indices.float()) / max(self._n_actors, 1)
+            
+            # Zero memory states
+            self._actor_steps[reset_indices] = 0
+            self._prev_depth_tensors[reset_indices].zero_()
+            self._prev_min_distances[reset_indices] = 0.0
+            self._prev_structure_band_ratios[reset_indices] = 0.0
+            self._prev_forward_structure_ratios[reset_indices] = 0.0
+            self._episode_returns[reset_indices] = 0.0
+            self._visit_grid[reset_indices].zero_()
+            self._prev_linear_vels[reset_indices].zero_()
+            self._prev_angular_vels[reset_indices].zero_()
+            self._needs_reset_mask[reset_indices] = False
+
+        # 2. VECTORIZED KINEMATICS (Zero CPU transfers, pure PyTorch tensor slicing)
+        previous_positions_t = self._actor_positions.clone()
+        previous_yaws_t = self._actor_yaws.clone()
+
+        lin_actions = action_tensor[:, :3].contiguous()
+        ang_actions = self._torch.zeros((self._n_actors, 3), device=self._device, dtype=self._torch.float32)
+        ang_actions[:, 2] = action_tensor[:, 3]
+
+        self._step_kinematics_vectorized(lin_actions, ang_actions)
+
+        # 3. LOCK-STEP RAYCASTING (No subset branching)
+        yaws = self._actor_yaws
+        positions = self._actor_positions
+
+        cos_yaw = self._torch.cos(yaws).unsqueeze(1)
+        sin_yaw = self._torch.sin(yaws).unsqueeze(1)
+        base_dirs = self._ray_dirs_local.unsqueeze(0).expand(self._n_actors, -1, -1)
+        
+        dirs_world = self._ray_dirs_world
+        dirs_world[..., 0] = base_dirs[..., 0] * cos_yaw + base_dirs[..., 2] * sin_yaw
+        dirs_world[..., 1] = base_dirs[..., 1]
+        dirs_world[..., 2] = -base_dirs[..., 0] * sin_yaw + base_dirs[..., 2] * cos_yaw
+
+        origins = self._ray_origins
+        origins.copy_(positions.unsqueeze(1).expand(-1, self._n_rays, -1))
+
+        self._torch_sdf.cast_rays(
+            self._require_dag_tensor(), origins, dirs_world,
+            self._out_distances, self._out_semantics,
+            self._config.sdf_max_steps, self._max_distance,
+            self._bbox_min, self._bbox_max, self._require_asset().resolution,
+        )
+
+        distances = self._out_distances.clamp(min=0.0, max=self._max_distance)
+        valid_batch = self._out_distances <= self._max_distance
+        depth_batch = distances.div_(self._max_distance).reshape(self._n_actors, self._az_bins, self._el_bins)
+        semantic_batch = self._out_semantics.reshape(self._n_actors, self._az_bins, self._el_bins)
+        valid_batch = valid_batch.reshape(self._n_actors, self._az_bins, self._el_bins)
+        
+        min_distances_t = depth_batch.amin(dim=(1, 2)).mul_(self._max_distance)
+
+        # 4. MATHEMATICAL COLLISION RESOLUTION (No re-casting)
+        collisions_t = min_distances_t < _COLLISION_CLEARANCE
+        # Overwrite current position with previous safe position using where() to avoid CPU sync branching
+        self._actor_positions = self._torch.where(collisions_t.unsqueeze(-1), previous_positions_t, self._actor_positions)
+        self._actor_yaws = self._torch.where(collisions_t, previous_yaws_t, self._actor_yaws)
+
+        # 5. VECTORIZED PROFILING
+        starvation_ratios_t = valid_batch.logical_not().to(dtype=self._torch.float32).mean(dim=(1, 2))
+        prox_thresh = self._proximity_distance_threshold / self._max_distance if self._max_distance > 0 else 0.0
+        proximity_ratios_t = depth_batch.le(prox_thresh).logical_and(valid_batch).to(dtype=self._torch.float32).mean(dim=(1, 2))
+        
+        metric_depth = depth_batch.mul(self._max_distance)
+        struct_mask = metric_depth.ge(self._structure_band_min_distance).logical_and(metric_depth.le(self._structure_band_max_distance)).logical_and(valid_batch)
+        structure_band_ratios_t = struct_mask.to(dtype=self._torch.float32).mean(dim=(1, 2))
+        
+        fwd_bins = max(1, self._az_bins // 6)
+        fwd_sector = self._torch.cat((struct_mask[:, :fwd_bins, :], struct_mask[:, -fwd_bins:, :]), dim=1)
+        forward_structure_ratios_t = fwd_sector.to(dtype=self._torch.float32).mean(dim=(1, 2))
+
+        # 6. VECTORIZED REWARDS
+        rewards_t, components_t = self._compute_reward_batch(
+            actor_ids=tuple(range(self._n_actors)),
+            previous_positions=previous_positions_t,
+            current_positions=self._actor_positions,
+            collisions=collisions_t,
+            previous_clearances=self._prev_min_distances,
+            current_clearances=min_distances_t,
+            starvation_ratios=starvation_ratios_t,
+            proximity_ratios=proximity_ratios_t,
+            current_structure_band_ratios=structure_band_ratios_t,
+            current_forward_structure_ratios=forward_structure_ratios_t,
+        )
+
+        obs_batch_t, deltas_batch_t = self._consume_observation_batch(
+            actor_ids=tuple(range(self._n_actors)),
+            depth_batch=depth_batch,
+            semantic_batch=semantic_batch,
+            valid_batch=valid_batch,
+            current_clearances=min_distances_t
+        )
+
+        self._actor_steps += 1
+        truncated_mask_t = self._actor_steps >= self._max_steps_per_episode
+        self._needs_reset_mask = truncated_mask_t
+        self._episode_returns += rewards_t
+        self._prev_structure_band_ratios = structure_band_ratios_t
+        self._prev_forward_structure_ratios = forward_structure_ratios_t
+
+        # 7. BULK SCALAR EXTRACTION (1 sync for the entire step)
+        ep_ids_cpu, trunc_cpu, rwds_cpu, rets_cpu = self._extract_step_result_scalars(
+            actor_indices=self._torch.arange(self._n_actors, device=self._device),
+            rewards=rewards_t,
+            truncated_mask=truncated_mask_t,
+        )
+
+        # 8. TELEMETRY PUBLISHING
+        published_observations = {}
+        ordered_results = []
+        publish_set = set(publish_actor_ids)
+        
+        for actor_id in range(self._n_actors):
+            ordered_results.append(StepResult(
+                step_id=step_id, env_id=actor_id, episode_id=ep_ids_cpu[actor_id],
+                done=False, truncated=bool(trunc_cpu[actor_id]), reward=float(rwds_cpu[actor_id]),
+                episode_return=float(rets_cpu[actor_id]), timestamp=time.time(),
+            ))
+
+        if publish_actor_ids:
+            self._materialize_selected_observations(
+                actor_ids=list(publish_actor_ids), row_indices=list(publish_actor_ids),
+                step_id=step_id, depth_batch=depth_batch, delta_batch=deltas_batch_t,
+                semantic_batch=semantic_batch, valid_batch=valid_batch,
+                published_observations=published_observations,
+            )
+
+        r_t, d_t, t_t, e_id_t = self._build_result_tensors(ordered_results)
+
+        self._record_perf_sample(batch_seconds=time.perf_counter() - batch_started_at, actor_count=self._n_actors)
+
+        return SdfDagTensorStepBatch(
+            observation_tensor=obs_batch_t, reward_tensor=r_t, done_tensor=d_t,
+            truncated_tensor=t_t, episode_id_tensor=e_id_t, reward_component_tensor=components_t,
+            published_observations=published_observations,
+        ), tuple(ordered_results)
+
+    def _step_kinematics_vectorized(self, actions_linear: Any, actions_angular: Any) -> None:
+        """Matrix-native kinematics (No loops, no indexing)."""
+        span = max(1, self._az_bins // 8)
+        
+        # Calculate frontal proximity dynamically per actor
+        front_left = self._prev_depth_tensors[:, :span, :].reshape(self._n_actors, -1).amin(dim=1)
+        front_right = self._prev_depth_tensors[:, -span:, :].reshape(self._n_actors, -1).amin(dim=1)
+        min_front = self._torch.minimum(front_left, front_right)
+        
+        speed_factors = (min_front * self._max_distance / 1.5).clamp(0.05, 1.0).unsqueeze(1)
+        
+        linear_cmd = actions_linear.clone()
+        linear_cmd[:, 0] *= self._speed_fwd
+        linear_cmd[:, 1] *= self._speed_vert
+        linear_cmd[:, 2] *= self._speed_lat
+        linear_cmd *= speed_factors
+        
+        angular_cmd = actions_angular.clone()
+        angular_cmd[:, 2] *= self._speed_yaw
+        
+        a = self._smoothing
+        self._prev_linear_vels = (1.0 - a) * linear_cmd + a * self._prev_linear_vels
+        self._prev_angular_vels = (1.0 - a) * angular_cmd + a * self._prev_angular_vels
+        
+        cos_yaw = self._torch.cos(self._actor_yaws)
+        sin_yaw = self._torch.sin(self._actor_yaws)
+        
+        fwd = self._prev_linear_vels[:, 0]
+        lat = self._prev_linear_vels[:, 2]
+        
+        dx = fwd * cos_yaw - lat * sin_yaw
+        dz = fwd * sin_yaw + lat * cos_yaw
+        
+        self._actor_positions[:, 0] += dx * self._dt
+        self._actor_positions[:, 1] += self._prev_linear_vels[:, 1] * self._dt
+        self._actor_positions[:, 2] += dz * self._dt
+        self._actor_yaws += self._prev_angular_vels[:, 2] * self._dt
 
 ```
 
-
-* **The Physics:** You are reading attributes from a Python dataclass (`_ActorState`), packing them into a Python list, sending that list to PyTorch, allocating new GPU memory, and copying the data over. Doing this $10,000$ times a second will completely crush your CPU memory bandwidth.
-
----
-
-### Part 3: The Precise Implementation Blueprint (The Fix)
-
-To solve this, we must transition the architecture from an "Object-Oriented" paradigm to a strictly "Data-Oriented" paradigm. **All state must live in pre-allocated CUDA tensors.**
-
-#### Step 1: Eradicate `_ActorState` and Pre-allocate Tensors
-
-Remove the Python `_ActorState` dataclass entirely. In your `SdfDagBackend.__init__`, allocate contiguous state tensors that live permanently on the GPU:
-
-```python
-# Shape: (n_actors, 3) for X, Y, Z
-self._actor_positions = torch.zeros((self._n_actors, 3), device=self._device)
-# Shape: (n_actors,) for Yaw
-self._actor_yaws = torch.zeros((self._n_actors,), device=self._device)
-# Shape: (n_actors,) for Step Counts, Episode Returns, etc.
-self._actor_steps = torch.zeros((self._n_actors,), device=self._device, dtype=torch.int32)
-self._episode_returns = torch.zeros((self._n_actors,), device=self._device)
-
-```
-
-When calculating ray origins in `_cast_actor_batch_tensors`, you simply read directly from `self._actor_positions`, eliminating the list comprehension entirely.
-
-#### Step 2: Vectorize the Reward Function
-
-Rewrite `_compute_reward` to operate on the entire batch of tensors simultaneously.
-
-```python
-def _compute_rewards_vectorized(self, prev_positions, current_positions, metric_depth_batch, valid_batch):
-    # 1. Progress Reward: ||current - prev||
-    deltas = current_positions - prev_positions
-    progress_rewards = _PROGRESS_REWARD_SCALE * torch.norm(deltas, dim=1) # Shape: (n_actors,)
-
-    # 2. Collision Penalty
-    min_distances = metric_depth_batch.amin(dim=(1, 2))
-    collisions = min_distances < _COLLISION_CLEARANCE
-    collision_penalties = torch.where(collisions, _COLLISION_PENALTY, 0.0)
-
-    # 3. Starvation Penalty
-    starvation_ratios = (~valid_batch).float().mean(dim=(1, 2))
-    starvation_penalties = torch.relu(starvation_ratios - self._starvation_ratio_threshold) * -self._starvation_penalty_scale
-
-    # Sum and return the shape (n_actors,) tensor
-    total_rewards = progress_rewards + collision_penalties + starvation_penalties
-    return total_rewards
-
-```
-
-#### Step 3: Implement Zero-Copy MJX Physics (DLPack)
-
-You must consolidate your MuJoCo environments into a single vectorized MJX environment using `jax.vmap`.
-Because PyTorch and JAX normally live in separate memory silos, you must use **DLPack** to pass the `self._actor_positions` and `action_tensor` directly from PyTorch to JAX without copying them to the CPU.
-
-```python
-import torch.utils.dlpack as torch_dlpack
-import jax.dlpack as jax_dlpack
-
-# Inside your step function:
-# 1. Zero-copy transfer PyTorch actions to JAX
-jax_actions = jax_dlpack.from_dlpack(torch_dlpack.to_dlpack(action_tensor))
-
-# 2. Step the physics for ALL actors simultaneously
-new_jax_positions, new_jax_yaws = self._batched_mjx_env.step(jax_actions)
-
-# 3. Zero-copy transfer JAX results back to PyTorch
-self._actor_positions = torch_dlpack.from_dlpack(jax_dlpack.to_dlpack(new_jax_positions))
-self._actor_yaws = torch_dlpack.from_dlpack(jax_dlpack.to_dlpack(new_jax_yaws))
-
-```
-
-#### Step 4: Strict Telemetry Isolation
-
-In your training loop, only execute `.cpu().numpy()` if it is strictly a logging step.
-
-```python
-# In batch_step_tensor_actions:
-if actor_id in publish_actor_set:
-    # ONLY perform CPU extraction if this specific actor is requested for the dashboard
-    depth_cpu = depth_2d.detach().cpu().numpy()
-
-```
-
-### Strategic Conclusion
-
-If you implement these four steps, you will mathematically decouple your execution speed from the Python interpreter. The execution pipeline will become an unbroken chain of GPU operations: `Actor Output (GPU) -> DLPack -> MJX Physics (GPU) -> DLPack -> Torch-SDF Sphere Tracing (GPU) -> Vectorized Reward Shaping (GPU) -> Actor Update (GPU)`.
-
-This is the exact architectural standard required to break the 100 SPS ceiling and saturate your CUDA hardware.
+By removing `_coerce_action_rows` and enforcing mathematical resolution of `collisions_t` via `torch.where()`, your Python process now runs strictly as an asynchronous dispatcher, unlocking the absolute hardware ceiling of your CUDA module.

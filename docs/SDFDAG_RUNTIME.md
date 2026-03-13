@@ -146,6 +146,9 @@ Those remain benchmark-gated experiments.
 Performance work on this stack should assume:
 
 - reusable buffers are preferred over per-step allocation
+- canonical action-tensor stepping must keep command rows on device rather than bouncing CUDA actions through NumPy
+- reset handling should batch state reinitialization and initial observation seeding for all selected actors instead of walking the CUDA reset mask actor-by-actor
+- collision rollback on the canonical tensor path should restore the previous safe pose without launching a second collided-subset ray cast in the same tick
 - materialization for dashboards and telemetry should be selective
 - host extraction should be batched and coarse when unavoidable
 - any optimization that helps only the kernel but regresses trainer dataflow is incomplete

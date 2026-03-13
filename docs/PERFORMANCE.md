@@ -44,8 +44,10 @@ not more environment experimentation. It is removal of needless staging.
 Forbidden patterns on the canonical hot path:
 
 - GPU -> CPU -> GPU observation bounces
+- GPU -> CPU -> GPU action bounces for already-CUDA policy outputs
 - per-actor Python object rebuilding when batched tensors already exist
 - per-actor hidden-state or episode-state dictionaries when the rollout horizon is fixed and a batched tensor can carry the same state
+- per-actor Python branching over CUDA reset masks when one batched reset-index extraction can drive the same state transition
 - re-normalizing the same embedding batch separately for episodic-memory query and episodic-memory add in one rollout tick
 - per-actor device synchronization for sparse telemetry fields when one batched CPU mirror can serve the same selected-actor publish tick
 - fragmented completed-episode host copies when one packed done-event mirror can carry actor id, episode return, and episode length for sparse publication
@@ -54,6 +56,7 @@ Forbidden patterns on the canonical hot path:
 - repeated learner metric `.item()` extraction at PPO epoch end when one packed metric mirror can serve debug logging and returned `PpoMetrics`
 - new transport hops inserted into direct trainer stepping
 - per-step allocation churn when reusable buffers are practical
+- collision-triggered subset re-casts when rollback to the previous safe pose already preserves the non-terminal wall-contact signal the actor needs
 
 ### 3.3 Treat PPO Update As Part Of The Hot Path
 
@@ -109,6 +112,13 @@ One concrete remaining environment-to-actor seam still worth cleaning is the
 MJX speed-throttling dependency on previous depth. On tensor-native trainer
 paths, that seam should read the already-kept previous-depth tensor and only pay
 for host materialization when a published `DistanceMatrix` is actually required.
+
+The validated March 13 environment refactor also establishes two concrete rules
+for the canonical tensor path:
+
+- batch reset seeding should reuse one batched ray cast plus one batched state write for all reset actors in the tick
+- indexed CUDA state updates must use proper indexed assignment semantics rather than `.copy_()` on advanced-indexed temporary tensors
+- actor-index routing on the canonical tensor path should stay tensor-native through batch stepping, reset seeding, and observation casting; convert to Python only at the final public result or selected publish seam
 
 ## 5. Benchmark Gates
 

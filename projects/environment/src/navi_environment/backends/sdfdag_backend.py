@@ -725,20 +725,19 @@ class SdfDagBackend(SimulatorBackend):
     def _consume_observation_batch(
         self,
         *,
-        actor_ids: tuple[int, ...],
+        actor_indices: Any,
         depth_batch: Any,    # (B, Az, El)
         semantic_batch: Any, # (B, Az, El)
         valid_batch: Any,    # (B, Az, El)
         current_clearances: Any, # (B,)
     ) -> tuple[Any, Any]: # (obs_batch, deltas_batch)
         """Vectorized observation state update (Phase 4)."""
-        actor_indices = list(actor_ids)
-        prev_depths = self._prev_depth_tensors[actor_indices]
+        prev_depths = self._prev_depth_tensors.index_select(0, actor_indices)
         
         deltas = depth_batch - prev_depths
         # Update state
-        self._prev_depth_tensors[actor_indices].copy_(depth_batch)
-        self._prev_min_distances[actor_indices].copy_(current_clearances)
+        self._prev_depth_tensors[actor_indices] = depth_batch
+        self._prev_min_distances[actor_indices] = current_clearances
         
         obs_batch = self._torch.stack([
             depth_batch,
@@ -747,6 +746,36 @@ class SdfDagBackend(SimulatorBackend):
         ], dim=1) # (B, 3, Az, El)
         
         return obs_batch, deltas
+
+    def _compute_observation_ratios(
+        self,
+        *,
+        depth_batch: Any,
+        valid_batch: Any,
+    ) -> tuple[Any, Any, Any, Any]:
+        """Compute starvation, proximity, and structure ratios in one CUDA pass."""
+        starvation_ratios = valid_batch.logical_not().to(dtype=self._torch.float32).mean(dim=(1, 2))
+        proximity_threshold = self._proximity_distance_threshold / self._max_distance if self._max_distance > 0 else 0.0
+        proximity_ratios = (
+            depth_batch.le(proximity_threshold)
+            .logical_and(valid_batch)
+            .to(dtype=self._torch.float32)
+            .mean(dim=(1, 2))
+        )
+        metric_depth_batch = depth_batch * self._max_distance
+        structure_mask = (
+            metric_depth_batch.ge(self._structure_band_min_distance)
+            .logical_and(metric_depth_batch.le(self._structure_band_max_distance))
+            .logical_and(valid_batch)
+        )
+        structure_band_ratios = structure_mask.to(dtype=self._torch.float32).mean(dim=(1, 2))
+        forward_half_bins = max(1, self._az_bins // 6)
+        forward_sector = self._torch.cat(
+            (structure_mask[:, :forward_half_bins, :], structure_mask[:, -forward_half_bins:, :]),
+            dim=1,
+        )
+        forward_structure_ratios = forward_sector.to(dtype=self._torch.float32).mean(dim=(1, 2))
+        return starvation_ratios, proximity_ratios, structure_band_ratios, forward_structure_ratios
 
     def _extract_step_result_scalars(
         self,
@@ -971,7 +1000,7 @@ class SdfDagBackend(SimulatorBackend):
             prev_clearances_t = self._prev_min_distances[actor_indices_t]
             
             rewards_t, components_t = self._compute_reward_batch(
-                actor_ids=tuple(active_actor_ids),
+                 actor_indices=actor_indices_t,
                 previous_positions=previous_positions_t,
                 current_positions=curr_positions_t,
                 collisions=collisions_t,
@@ -984,7 +1013,7 @@ class SdfDagBackend(SimulatorBackend):
             )
 
             obs_batch_t, deltas_batch_t = self._consume_observation_batch(
-                actor_ids=tuple(active_actor_ids),
+                actor_indices=actor_indices_t,
                 depth_batch=depth_batch,
                 semantic_batch=semantic_batch,
                 valid_batch=valid_batch,
@@ -1079,80 +1108,68 @@ class SdfDagBackend(SimulatorBackend):
         publish_actor_ids: tuple[int, ...] = (),
     ) -> tuple[SdfDagTensorStepBatch, tuple[StepResult, ...]]:
         """Step actors from a tensor/array command batch without Python Action objects."""
-        action_rows = self._coerce_action_rows(action_tensor)
+        action_rows = self._coerce_action_tensor_rows(action_tensor)
         batch_started_at = time.perf_counter()
         published_observations: dict[int, DistanceMatrix] = {}
-        observation_tensors_by_actor: dict[int, Any] = {}
-        results_by_actor: dict[int, StepResult] = {}
-        reward_components_by_actor: dict[int, Any] = {}
-        active_actor_ids: list[int] = []
         publish_actor_set = set(publish_actor_ids)
+        actor_count = int(action_rows.shape[0])
+        if actor_count > self._n_actors:
+            msg = f"action_tensor batch size {actor_count} exceeds configured actors {self._n_actors}"
+            raise ValueError(msg)
 
-        for actor_id in range(int(action_rows.shape[0])):
-            if self._needs_reset_mask[actor_id]:
-                obs_tensor, published = self.reset_tensor(
-                    int(self._episode_ids[actor_id]) + 1,
-                    actor_id=actor_id,
-                    materialize=actor_id in publish_actor_set,
-                )
-                observation_tensors_by_actor[actor_id] = obs_tensor
-                if published is not None:
-                    published_observations[actor_id] = published
-                results_by_actor[actor_id] = StepResult(
+        ordered_observations: list[Any | None] = [None] * actor_count
+        ordered_results: list[StepResult | None] = [None] * actor_count
+        reward_component_tensor = self._torch.zeros((actor_count, 9), device=self._device, dtype=self._torch.float32)
+        batch_actor_indices_t = self._torch.arange(actor_count, device=self._device, dtype=self._torch.long)
+        reset_local_indices_t = self._needs_reset_mask[batch_actor_indices_t].nonzero(as_tuple=False).flatten()
+        if reset_local_indices_t.numel() > 0:
+            self._advance_reset_bookkeeping(int(reset_local_indices_t.numel()))
+            reset_local_indices_t = self._needs_reset_mask[batch_actor_indices_t].nonzero(as_tuple=False).flatten()
+            if reset_local_indices_t.numel() > 0:
+                self._reset_tensor_actor_batch(
+                    actor_indices=batch_actor_indices_t.index_select(0, reset_local_indices_t),
                     step_id=step_id,
-                    env_id=actor_id,
-                    episode_id=int(self._episode_ids[actor_id]),
-                    done=False,
-                    truncated=False,
-                    reward=0.0,
-                    episode_return=0.0,
-                    timestamp=time.time(),
+                    publish_actor_set=publish_actor_set,
+                    ordered_observations=ordered_observations,
+                    ordered_results=ordered_results,
+                    published_observations=published_observations,
                 )
-                continue
 
-            active_actor_ids.append(actor_id)
+        active_local_indices_t = self._needs_reset_mask[batch_actor_indices_t].logical_not().nonzero(as_tuple=False).flatten()
+        if active_local_indices_t.numel() > 0:
+            actor_indices_t = batch_actor_indices_t.index_select(0, active_local_indices_t)
+            previous_positions_t = self._actor_positions.index_select(0, actor_indices_t).clone()
+            previous_yaws_t = self._actor_yaws.index_select(0, actor_indices_t).clone()
 
-        if active_actor_ids:
-            actor_indices_t = self._torch.as_tensor(active_actor_ids, device=self._device, dtype=self._torch.long)
-            previous_positions_t = self._actor_positions[actor_indices_t].clone()
-            previous_yaws_t = self._actor_yaws[actor_indices_t].clone()
+            active_actions = action_rows.index_select(0, active_local_indices_t)
+            lin_actions = active_actions[:, :3].contiguous()
+            ang_actions = self._torch.zeros((int(actor_indices_t.shape[0]), 3), device=self._device, dtype=self._torch.float32)
+            ang_actions[:, 2] = active_actions[:, 3]
 
-            # Vectorized kinematics (Phase 3)
-            # action_rows: (N, 4) -> [fwd, vert, lat, yaw]
-            B = len(active_actor_ids)
-            active_actions = action_rows[list(active_actor_ids)]
-            lin_actions = self._torch.from_numpy(active_actions[:, :3].astype(np.float32, copy=False)).to(self._device)
-            
-            ang_actions = self._torch.zeros((B, 3), device=self._device, dtype=self._torch.float32)
-            ang_actions[:, 2] = self._torch.from_numpy(active_actions[:, 3]).to(self._device) # yaw
-            
-            self._step_kinematics_batch(
-                actor_ids=tuple(active_actor_ids),
+            self._step_kinematics_indexed(
+                actor_indices=actor_indices_t,
                 actions_linear=lin_actions,
                 actions_angular=ang_actions,
             )
 
-            # Inlined vectorized raycasting (Phase 4)
-            actor_count = len(active_actor_ids)
-            yaws = self._actor_yaws[list(active_actor_ids)]
-            positions = self._actor_positions[list(active_actor_ids)]
-
+            active_count = int(actor_indices_t.shape[0])
+            yaws = self._actor_yaws.index_select(0, actor_indices_t)
+            positions = self._actor_positions.index_select(0, actor_indices_t)
             cos_yaw = self._torch.cos(yaws).unsqueeze(1)
             sin_yaw = self._torch.sin(yaws).unsqueeze(1)
-            base_dirs = self._ray_dirs_local.unsqueeze(0).expand(actor_count, -1, -1)
-            dirs_world = self._ray_dirs_world[:actor_count]
+            base_dirs = self._ray_dirs_local.unsqueeze(0).expand(active_count, -1, -1)
+            dirs_world = self._ray_dirs_world[:active_count]
             dirs_world[..., 0] = base_dirs[..., 0] * cos_yaw + base_dirs[..., 2] * sin_yaw
             dirs_world[..., 1] = base_dirs[..., 1]
             dirs_world[..., 2] = -base_dirs[..., 0] * sin_yaw + base_dirs[..., 2] * cos_yaw
 
-            origins = self._ray_origins[:actor_count]
+            origins = self._ray_origins[:active_count]
             origins.copy_(positions.unsqueeze(1).expand(-1, self._n_rays, -1))
 
-            out_distances = self._out_distances[:actor_count]
-            out_semantics = self._out_semantics[:actor_count]
-            dag_tensor = self._require_dag_tensor()
+            out_distances = self._out_distances[:active_count]
+            out_semantics = self._out_semantics[:active_count]
             self._torch_sdf.cast_rays(
-                dag_tensor,
+                self._require_dag_tensor(),
                 origins,
                 dirs_world,
                 out_distances,
@@ -1164,88 +1181,26 @@ class SdfDagBackend(SimulatorBackend):
                 self._require_asset().resolution,
             )
 
-            distances = out_distances.clamp(min=0.0, max=self._max_distance)
-            valid_mask = out_distances <= self._max_distance
-            depth_batch = distances.div(self._max_distance).reshape(actor_count, self._az_bins, self._el_bins)
-            semantic_batch = out_semantics.reshape(actor_count, self._az_bins, self._el_bins)
-            valid_batch = valid_mask.reshape(actor_count, self._az_bins, self._el_bins)
-            
+            depth_batch = out_distances.clamp(0.0, self._max_distance).div_(self._max_distance).reshape(active_count, self._az_bins, self._el_bins)
+            semantic_batch = out_semantics.reshape(active_count, self._az_bins, self._el_bins)
+            valid_batch = (out_distances <= self._max_distance).reshape(active_count, self._az_bins, self._el_bins)
             min_distances_t = depth_batch.amin(dim=(1, 2)).mul(self._max_distance)
-            
-            # Vectorized ratio calculations
-            starvation_ratios_t = valid_batch.logical_not().to(dtype=self._torch.float32).mean(dim=(1, 2))
-            proximity_threshold = self._proximity_distance_threshold / self._max_distance if self._max_distance > 0 else 0.0
-            proximity_ratios_t = (
-                depth_batch.le(proximity_threshold)
-                .logical_and(valid_batch)
-                .to(dtype=self._torch.float32)
-                .mean(dim=(1, 2))
+            starvation_ratios_t, proximity_ratios_t, structure_band_ratios_t, forward_structure_ratios_t = self._compute_observation_ratios(
+                depth_batch=depth_batch,
+                valid_batch=valid_batch,
             )
-            metric_depth_batch = depth_batch.mul(self._max_distance)
-            structure_mask = (
-                metric_depth_batch.ge(self._structure_band_min_distance)
-                .logical_and(metric_depth_batch.le(self._structure_band_max_distance))
-                .logical_and(valid_batch)
-            )
-            structure_band_ratios_t = structure_mask.to(dtype=self._torch.float32).mean(dim=(1, 2))
-            forward_half_bins = max(1, self._az_bins // 6)
-            forward_sector = self._torch.cat(
-                (structure_mask[:, :forward_half_bins, :], structure_mask[:, -forward_half_bins:, :]),
-                dim=1,
-            )
-            forward_structure_ratios_t = forward_sector.to(dtype=self._torch.float32).mean(dim=(1, 2))
 
-            # Vectorized collision correction
             collisions_t = min_distances_t < _COLLISION_CLEARANCE
-            if collisions_t.any():
-                collision_indices = collisions_t.nonzero(as_tuple=False).flatten()
-                coll_actor_indices_t = actor_indices_t[collision_indices]
-                self._actor_positions[coll_actor_indices_t].copy_(previous_positions_t[collision_indices])
-                self._actor_yaws[coll_actor_indices_t].copy_(previous_yaws_t[collision_indices])
-                
-                # Re-cast ONLY the collided actors (vectorized re-cast)
-                coll_actor_count = int(collision_indices.shape[0])
-                
-                yaws_coll = self._actor_yaws[coll_actor_indices_t]
-                pos_coll = self._actor_positions[coll_actor_indices_t]
-                cos_coll = self._torch.cos(yaws_coll).unsqueeze(1)
-                sin_coll = self._torch.sin(yaws_coll).unsqueeze(1)
-                
-                dirs_coll = self._torch.empty((coll_actor_count, self._n_rays, 3), device=self._device, dtype=self._torch.float32)
-                base_coll = self._ray_dirs_local.unsqueeze(0).expand(coll_actor_count, -1, -1)
-                dirs_coll[..., 0] = base_coll[..., 0] * cos_coll + base_coll[..., 2] * sin_coll
-                dirs_coll[..., 1] = base_coll[..., 1]
-                dirs_coll[..., 2] = -base_coll[..., 0] * sin_coll + base_coll[..., 2] * cos_coll
-                
-                origins_coll = self._ray_origins[:coll_actor_count]
-                origins_coll.copy_(pos_coll.unsqueeze(1).expand(-1, self._n_rays, -1))
-                
-                out_dist_coll = self._out_distances[:coll_actor_count]
-                out_sem_coll = self._out_semantics[:coll_actor_count]
-                
-                self._torch_sdf.cast_rays(
-                    dag_tensor, origins_coll, dirs_coll, out_dist_coll, out_sem_coll,
-                    self._config.sdf_max_steps, self._max_distance, self._bbox_min, self._bbox_max,
-                    self._require_asset().resolution
-                )
-                
-                depth_coll = out_dist_coll.clamp(0.0, self._max_distance).div(self._max_distance).reshape(-1, self._az_bins, self._el_bins)
-                sem_coll = out_sem_coll.reshape(-1, self._az_bins, self._el_bins)
-                valid_coll = (out_dist_coll <= self._max_distance).reshape(-1, self._az_bins, self._el_bins)
-                
-                depth_batch[collision_indices].copy_(depth_coll)
-                semantic_batch[collision_indices].copy_(sem_coll)
-                valid_batch[collision_indices].copy_(valid_coll)
-                
-                min_distances_t = depth_batch.amin(dim=(1, 2)).mul(self._max_distance)
+            current_positions_t = self._torch.where(collisions_t.unsqueeze(1), previous_positions_t, positions)
+            current_yaws_t = self._torch.where(collisions_t, previous_yaws_t, yaws)
+            self._actor_positions[actor_indices_t] = current_positions_t
+            self._actor_yaws[actor_indices_t] = current_yaws_t
 
-            curr_positions_t = self._actor_positions[actor_indices_t]
-            prev_clearances_t = self._prev_min_distances[actor_indices_t]
-            
+            prev_clearances_t = self._prev_min_distances.index_select(0, actor_indices_t)
             rewards_t, components_t = self._compute_reward_batch(
-                actor_ids=tuple(active_actor_ids),
-                previous_positions=prev_positions_t,
-                current_positions=curr_positions_t,
+                actor_indices=actor_indices_t,
+                previous_positions=previous_positions_t,
+                current_positions=current_positions_t,
                 collisions=collisions_t,
                 previous_clearances=prev_clearances_t,
                 current_clearances=min_distances_t,
@@ -1256,18 +1211,18 @@ class SdfDagBackend(SimulatorBackend):
             )
 
             obs_batch_t, deltas_batch_t = self._consume_observation_batch(
-                actor_ids=tuple(active_actor_ids),
+                actor_indices=actor_indices_t,
                 depth_batch=depth_batch,
                 semantic_batch=semantic_batch,
                 valid_batch=valid_batch,
-                current_clearances=min_distances_t
+                current_clearances=min_distances_t,
             )
 
-            # Final state updates (Phase 5: Zero-copy hot path)
-            self._actor_steps[actor_indices_t] += 1
-            truncated_mask_t = self._actor_steps[actor_indices_t] >= self._max_steps_per_episode
+            next_steps_t = self._actor_steps.index_select(0, actor_indices_t) + 1
+            truncated_mask_t = next_steps_t >= self._max_steps_per_episode
+            self._actor_steps[actor_indices_t] = next_steps_t
             self._needs_reset_mask[actor_indices_t] = truncated_mask_t
-            self._episode_returns[actor_indices_t] += rewards_t
+            self._episode_returns[actor_indices_t] = self._episode_returns.index_select(0, actor_indices_t) + rewards_t
             self._prev_structure_band_ratios[actor_indices_t] = structure_band_ratios_t
             self._prev_forward_structure_ratios[actor_indices_t] = forward_structure_ratios_t
 
@@ -1276,14 +1231,14 @@ class SdfDagBackend(SimulatorBackend):
                 rewards=rewards_t,
                 truncated_mask=truncated_mask_t,
             )
+            reward_component_tensor[active_local_indices_t] = components_t
 
+            active_local_indices_cpu = active_local_indices_t.detach().cpu().tolist()
             publish_rows: list[int] = []
             publish_actor_ids_list: list[int] = []
-
-            for i, actor_id in enumerate(active_actor_ids):
-                observation_tensors_by_actor[actor_id] = obs_batch_t[i]
-                reward_components_by_actor[actor_id] = components_t[i]
-                results_by_actor[actor_id] = StepResult(
+            for i, actor_id in enumerate(active_local_indices_cpu):
+                ordered_observations[actor_id] = obs_batch_t[i]
+                ordered_results[actor_id] = StepResult(
                     step_id=step_id,
                     env_id=actor_id,
                     episode_id=episode_ids_cpu[i],
@@ -1293,7 +1248,6 @@ class SdfDagBackend(SimulatorBackend):
                     episode_return=float(episode_returns_cpu[i]),
                     timestamp=time.time(),
                 )
-
                 if actor_id in publish_actor_set:
                     publish_rows.append(i)
                     publish_actor_ids_list.append(actor_id)
@@ -1309,21 +1263,19 @@ class SdfDagBackend(SimulatorBackend):
                 published_observations=published_observations,
             )
 
-        ordered_observations = [observation_tensors_by_actor[actor_id] for actor_id in range(int(action_rows.shape[0]))]
-        ordered_results = [results_by_actor[actor_id] for actor_id in range(int(action_rows.shape[0]))]
+        finalized_observations = [observation for observation in ordered_observations if observation is not None]
+        finalized_results = [result for result in ordered_results if result is not None]
+        if len(finalized_observations) != actor_count or len(finalized_results) != actor_count:
+            msg = "tensor action step did not populate all actor outputs"
+            raise RuntimeError(msg)
 
-        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(ordered_results)
-        
-        # Reward component tensor packing
-        reward_component_tensor = self._torch.zeros((int(action_rows.shape[0]), 9), device=self._device, dtype=self._torch.float32)
-        for i, aid in enumerate(active_actor_ids):
-            reward_component_tensor[aid].copy_(components_t[i])
+        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(finalized_results)
 
         self._record_perf_sample(
             batch_seconds=time.perf_counter() - batch_started_at,
-            actor_count=int(action_rows.shape[0]),
+            actor_count=actor_count,
         )
-        obs_batch = self._torch.stack(ordered_observations, dim=0)
+        obs_batch = self._torch.stack(finalized_observations, dim=0)
         return (
             SdfDagTensorStepBatch(
                 observation_tensor=obs_batch,
@@ -1334,7 +1286,91 @@ class SdfDagBackend(SimulatorBackend):
                 reward_component_tensor=reward_component_tensor,
                 published_observations=published_observations,
             ),
-            tuple(ordered_results),
+            tuple(finalized_results),
+        )
+
+    def _advance_reset_bookkeeping(self, reset_count: int) -> None:
+        """Advance per-episode scene bookkeeping before batched reset state writes."""
+        for _ in range(reset_count):
+            is_natural = self._initial_resets_remaining <= 0
+            if not is_natural:
+                self._initial_resets_remaining -= 1
+            self._maybe_rotate_scene(is_natural=is_natural)
+
+    def _reset_tensor_actor_batch(
+        self,
+        *,
+        actor_indices: Any,
+        step_id: int,
+        publish_actor_set: set[int],
+        ordered_observations: list[Any | None],
+        ordered_results: list[StepResult | None],
+        published_observations: dict[int, DistanceMatrix],
+    ) -> None:
+        """Reset a selected actor batch entirely on-device and seed fresh observations once."""
+        if actor_indices.numel() == 0:
+            return
+
+        yaw_scale = (2.0 * math.pi) / max(self._n_actors, 1)
+        self._actor_positions[actor_indices] = self._spawn_positions.index_select(0, actor_indices)
+        self._actor_yaws[actor_indices] = actor_indices.to(dtype=self._torch.float32) * yaw_scale
+        self._episode_ids[actor_indices] = self._episode_ids.index_select(0, actor_indices) + 1
+        self._actor_steps[actor_indices] = 0
+        self._prev_depth_tensors[actor_indices] = 0.0
+        self._prev_min_distances[actor_indices] = 0.0
+        self._prev_structure_band_ratios[actor_indices] = 0.0
+        self._prev_forward_structure_ratios[actor_indices] = 0.0
+        self._episode_returns[actor_indices] = 0.0
+        self._visit_grid[actor_indices] = 0
+        self._prev_linear_vels[actor_indices] = 0.0
+        self._prev_angular_vels[actor_indices] = 0.0
+        self._needs_reset_mask[actor_indices] = False
+
+        depth_batch, semantic_batch, valid_batch = self._cast_actor_batch_indexed_tensors(actor_indices)
+        current_clearances = depth_batch.amin(dim=(1, 2)).mul(self._max_distance)
+        obs_batch_t, deltas_batch_t = self._consume_observation_batch(
+            actor_indices=actor_indices,
+            depth_batch=depth_batch,
+            semantic_batch=semantic_batch,
+            valid_batch=valid_batch,
+            current_clearances=current_clearances,
+        )
+        _starvation, _proximity, structure_band_ratios_t, forward_structure_ratios_t = self._compute_observation_ratios(
+            depth_batch=depth_batch,
+            valid_batch=valid_batch,
+        )
+        self._prev_structure_band_ratios[actor_indices] = structure_band_ratios_t
+        self._prev_forward_structure_ratios[actor_indices] = forward_structure_ratios_t
+
+        actor_ids = actor_indices.detach().cpu().tolist()
+        episode_ids_cpu = self._episode_ids.index_select(0, actor_indices).detach().cpu().tolist()
+        publish_rows: list[int] = []
+        publish_actor_ids_list: list[int] = []
+        for i, actor_id in enumerate(actor_ids):
+            ordered_observations[actor_id] = obs_batch_t[i]
+            ordered_results[actor_id] = StepResult(
+                step_id=step_id,
+                env_id=actor_id,
+                episode_id=episode_ids_cpu[i],
+                done=False,
+                truncated=False,
+                reward=0.0,
+                episode_return=0.0,
+                timestamp=time.time(),
+            )
+            if actor_id in publish_actor_set:
+                publish_rows.append(i)
+                publish_actor_ids_list.append(actor_id)
+
+        self._materialize_selected_observations(
+            actor_ids=publish_actor_ids_list,
+            row_indices=publish_rows,
+            step_id=step_id,
+            depth_batch=depth_batch,
+            delta_batch=deltas_batch_t,
+            semantic_batch=semantic_batch,
+            valid_batch=valid_batch,
+            published_observations=published_observations,
         )
 
     def _build_reward_component_tensor(self, ordered_components: list[np.ndarray]) -> Any | None:
@@ -1516,7 +1552,7 @@ class SdfDagBackend(SimulatorBackend):
     def _compute_reward_batch(
         self,
         *,
-        actor_ids: tuple[int, ...],
+        actor_indices: Any,
         previous_positions: Any,  # (B, 3)
         current_positions: Any,   # (B, 3)
         collisions: Any,          # (B,) bool
@@ -1528,15 +1564,13 @@ class SdfDagBackend(SimulatorBackend):
         current_forward_structure_ratios: Any, # (B,)
     ) -> tuple[Any, Any]:
         """Vectorized reward engine implementation (Phase 2)."""
-        B = len(actor_ids)
+        B = int(actor_indices.shape[0])
         # Exploration reward via grid lookup
         # cell = floor((pos - min) / res)
         grid_coords = ((current_positions[:, [0, 2]] - self._grid_min[[0, 2]]) / self._grid_res).floor().long()
         # Clamp to grid bounds to be safe
         grid_coords[:, 0] = grid_coords[:, 0].clamp(0, self._visit_grid.shape[1] - 1)
         grid_coords[:, 1] = grid_coords[:, 1].clamp(0, self._visit_grid.shape[2] - 1)
-        
-        actor_indices = self._torch.tensor(actor_ids, device=self._device, dtype=self._torch.long)
         
         # Check if already visited
         was_visited = self._visit_grid[actor_indices, grid_coords[:, 0], grid_coords[:, 1]] > 0
@@ -1602,6 +1636,54 @@ class SdfDagBackend(SimulatorBackend):
         
         total_rewards = components.sum(dim=-1)
         return total_rewards, components
+
+    def _step_kinematics_indexed(
+        self,
+        *,
+        actor_indices: Any,
+        actions_linear: Any,
+        actions_angular: Any,
+    ) -> None:
+        """Tensor-indexed kinematic integration for the canonical action-tensor path."""
+        prev_depths = self._prev_depth_tensors.index_select(0, actor_indices)
+        span = max(1, prev_depths.shape[1] // 8)
+        front_left = prev_depths[:, :span, :].reshape(int(actor_indices.shape[0]), -1).amin(dim=1)
+        front_right = prev_depths[:, -span:, :].reshape(int(actor_indices.shape[0]), -1).amin(dim=1)
+        min_front = self._torch.minimum(front_left, front_right)
+        speed_factors = (min_front * self._max_distance / 1.5).clamp(0.05, 1.0).unsqueeze(1)
+
+        linear_cmd = actions_linear.clone()
+        linear_cmd[:, 0] *= self._speed_fwd
+        linear_cmd[:, 1] *= self._speed_vert
+        linear_cmd[:, 2] *= self._speed_lat
+        linear_cmd *= speed_factors
+
+        angular_cmd = actions_angular.clone()
+        angular_cmd[:, 2] *= self._speed_yaw
+
+        a = self._smoothing
+        prev_linear = self._prev_linear_vels.index_select(0, actor_indices)
+        prev_angular = self._prev_angular_vels.index_select(0, actor_indices)
+        smooth_linear = (1.0 - a) * linear_cmd + a * prev_linear
+        smooth_angular = (1.0 - a) * angular_cmd + a * prev_angular
+        self._prev_linear_vels[actor_indices] = smooth_linear
+        self._prev_angular_vels[actor_indices] = smooth_angular
+
+        yaws = self._actor_yaws.index_select(0, actor_indices)
+        cos_yaw = self._torch.cos(yaws)
+        sin_yaw = self._torch.sin(yaws)
+        fwd = smooth_linear[:, 0]
+        lat = smooth_linear[:, 2]
+        dx = fwd * cos_yaw - lat * sin_yaw
+        dz = fwd * sin_yaw + lat * cos_yaw
+
+        positions = self._actor_positions.index_select(0, actor_indices)
+        positions[:, 0] += dx * self._dt
+        positions[:, 1] += smooth_linear[:, 1] * self._dt
+        positions[:, 2] += dz * self._dt
+        self._actor_positions[actor_indices] = positions
+        self._actor_yaws[actor_indices] = yaws + (smooth_angular[:, 2] * self._dt)
+    
 
     def _step_kinematics_batch(
         self,
@@ -1775,17 +1857,64 @@ class SdfDagBackend(SimulatorBackend):
         valid_2d = valid.reshape(actor_count, self._az_bins, self._el_bins)
         return depth_2d, semantic_2d, valid_2d
 
-    def _coerce_action_rows(self, action_tensor: Any) -> np.ndarray:
-        """Return a contiguous float32 command matrix with shape `(actors, 4)`."""
+    def _cast_actor_batch_indexed_tensors(
+        self,
+        actor_indices: Any,
+    ) -> tuple[Any, Any, Any]:
+        actor_count = int(actor_indices.shape[0])
+        yaws = self._actor_yaws.index_select(0, actor_indices)
+        positions = self._actor_positions.index_select(0, actor_indices)
+
+        cos_yaw = self._torch.cos(yaws).unsqueeze(1)
+        sin_yaw = self._torch.sin(yaws).unsqueeze(1)
+        base_dirs = self._ray_dirs_local.unsqueeze(0).expand(actor_count, -1, -1)
+        dirs_world = self._ray_dirs_world[:actor_count]
+        dirs_world[..., 0] = base_dirs[..., 0] * cos_yaw + base_dirs[..., 2] * sin_yaw
+        dirs_world[..., 1] = base_dirs[..., 1]
+        dirs_world[..., 2] = -base_dirs[..., 0] * sin_yaw + base_dirs[..., 2] * cos_yaw
+
+        origins = self._ray_origins[:actor_count]
+        origins.copy_(positions.unsqueeze(1).expand(-1, self._n_rays, -1))
+
+        out_distances = self._out_distances[:actor_count]
+        out_semantics = self._out_semantics[:actor_count]
+        dag_tensor = self._require_dag_tensor()
+        self._validate_cast_rays_inputs(dag_tensor, origins, dirs_world, out_distances, out_semantics)
+        self._torch_sdf.cast_rays(
+            dag_tensor,
+            origins,
+            dirs_world,
+            out_distances,
+            out_semantics,
+            self._config.sdf_max_steps,
+            self._max_distance,
+            self._bbox_min,
+            self._bbox_max,
+            self._require_asset().resolution,
+        )
+
+        distances = out_distances.clamp(min=0.0, max=self._max_distance)
+        valid = out_distances <= self._max_distance
+        depth_2d = distances.div(self._max_distance).reshape(actor_count, self._az_bins, self._el_bins)
+        semantic_2d = out_semantics.reshape(actor_count, self._az_bins, self._el_bins)
+        valid_2d = valid.reshape(actor_count, self._az_bins, self._el_bins)
+        return depth_2d, semantic_2d, valid_2d
+
+    def _coerce_action_tensor_rows(self, action_tensor: Any) -> Any:
+        """Return a contiguous float32 command matrix on the active device with shape `(actors, 4)`."""
         if hasattr(action_tensor, "detach"):
-            array = action_tensor.detach().cpu().numpy()
+            rows = action_tensor.detach()
+            if hasattr(rows, "to"):
+                rows = rows.to(device=self._device, dtype=self._torch.float32)
         else:
-            array = np.asarray(action_tensor)
-        rows = np.asarray(array, dtype=np.float32)
+            rows = self._torch.as_tensor(action_tensor, device=self._device, dtype=self._torch.float32)
         if rows.ndim != 2 or rows.shape[1] < 4:
             msg = "action_tensor must have shape (actors, 4)"
             raise ValueError(msg)
-        return rows[:, :4]
+        rows = rows[:, :4]
+        if not rows.is_contiguous():
+            rows = rows.contiguous()
+        return rows
 
     def _consume_actor_observation(
         self,
