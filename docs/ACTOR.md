@@ -1,3 +1,5 @@
+- keep PPO update attribution on the canonical learner path with explicit sub-stage means for minibatch fetch, minibatch prep, policy evaluation, backward, gradient clip, optimizer step, RND step, and progress-callback overhead
+- when diagnostic CUDA event profiling is enabled, canonical PPO learner stage timings must synchronize around eval, backward, clip, optimizer, and RND so device time is attributed truthfully rather than inferred from host dispatch latency
 # ACTOR.md - Canonical Cognitive Actor Architecture
 
 **Subsystem:** Brain Layer - Sacred Cognitive Engine

@@ -90,6 +90,7 @@ class ActorConfig(BaseSettings):
     dashboard_observation_hz: float = 10.0
     emit_training_telemetry: bool = True
     emit_perf_telemetry: bool = True
+    profile_cuda_events: bool = False
 
     # Diagnostic ablations on the canonical trainer surface
     enable_episodic_memory: bool = True

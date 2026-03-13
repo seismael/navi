@@ -1,3 +1,5 @@
+- attributing PPO update wall time on the canonical learner path into minibatch fetch, minibatch prep, policy evaluation, backward, gradient clip, optimizer step, RND step, and progress-callback means
+- using synchronized CUDA event timing for diagnostic PPO profiling runs when host timers leave large unattributed optimizer wall time, while keeping the default throughput path free of forced synchronization
 # PERFORMANCE.md — Throughput And Runtime Gates
 
 This document defines Navi's performance acceptance rules.
@@ -70,6 +72,7 @@ Current high-value work therefore includes:
 - stacking rollout tensors once per PPO update and reusing them across epochs
 - writing rollout ticks into reusable `(actors, time, ...)` device slabs instead of appending actor-by-actor into Python-managed buffers
 - passing cached BPTT sequence views directly into learner sequence evaluation instead of flattening and reshaping them again inside the PPO epoch loop
+- sampling each canonical BPTT minibatch with one device-side sequence gather per tensor family, then deriving flattened transition views from that selected sequence block instead of gathering both sequence and flat tensors separately
 - keeping shuffle indices on the same device as the sampled tensors
 - materializing PPO epoch summary metrics through one packed host transfer and reusing that mirror for debug logging and returned metrics
 - attributing PPO update wall time on the canonical learner path into minibatch prep, policy evaluation, backward, gradient clip, optimizer step, and RND step means

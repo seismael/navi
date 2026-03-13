@@ -384,7 +384,6 @@ class MultiTrajectoryBuffer:
             "advs": self._all_advantages_normalized[:, :usable_steps].reshape(total_seqs, seq_len),
             "rets": self._all_returns[:, :usable_steps].reshape(total_seqs, seq_len),
             "dones": self._all_dones[:, :usable_steps].reshape(total_seqs, seq_len),
-            "meta": torch.tensor((n_seqs_per_actor, total_seqs), device=self._all_obs.device, dtype=torch.int64),
         }
 
         if self._all_aux is not None:
@@ -424,7 +423,6 @@ class MultiTrajectoryBuffer:
             if n_seqs_per_actor == 0:
                 return
             seq_views = self._get_sequence_views(seq_len)
-            total_seqs = int(seq_views["meta"][1].item())
             obs_seqs = seq_views["obs"]
             acts_seqs = seq_views["acts"]
             lps_seqs = seq_views["lps"]
@@ -433,6 +431,7 @@ class MultiTrajectoryBuffer:
             rets_seqs = seq_views["rets"]
             dones_seqs = seq_views["dones"]
             aux_seqs = seq_views.get("aux")
+            total_seqs = obs_seqs.shape[0]
 
             # Shuffle sequences
             perm = torch.randperm(total_seqs, device=index_device)
@@ -440,23 +439,30 @@ class MultiTrajectoryBuffer:
             seqs_per_minibatch = max(1, batch_size // seq_len)
             for i in range(0, total_seqs, seqs_per_minibatch):
                 idx = perm[i : i + seqs_per_minibatch]
+                mb_obs_seqs = obs_seqs.index_select(0, idx)
+                mb_acts_seqs = acts_seqs.index_select(0, idx)
+                mb_lps_seqs = lps_seqs.index_select(0, idx)
+                mb_vals_seqs = vals_seqs.index_select(0, idx)
+                mb_advs_seqs = advs_seqs.index_select(0, idx)
+                mb_rets_seqs = rets_seqs.index_select(0, idx)
+                mb_dones_seqs = dones_seqs.index_select(0, idx)
+                mb_aux_seqs = aux_seqs.index_select(0, idx) if aux_seqs is not None else None
                 yield TrajectoryBuffer.MiniBatch(
-                    observations=obs_seqs[idx].reshape(-1, *obs_seqs.shape[2:]),
-                    actions=acts_seqs[idx].reshape(-1, acts_seqs.shape[-1]),
-                    old_log_probs=lps_seqs[idx].flatten(),
-                    old_values=vals_seqs[idx].flatten(),
-                    advantages=advs_seqs[idx].flatten(),
-                    returns=rets_seqs[idx].flatten(),
-                    dones=dones_seqs[idx], # (n_seqs, seq_len)
+                    observations=mb_obs_seqs.flatten(0, 1),
+                    actions=mb_acts_seqs.flatten(0, 1),
+                    old_log_probs=mb_lps_seqs.flatten(),
+                    old_values=mb_vals_seqs.flatten(),
+                    advantages=mb_advs_seqs.flatten(),
+                    returns=mb_rets_seqs.flatten(),
+                    dones=mb_dones_seqs,
                     aux_tensors=(
-                        aux_seqs[idx]
-                        .reshape(-1, all_aux.shape[-1])
-                        if aux_seqs is not None and all_aux is not None
+                        mb_aux_seqs.flatten(0, 1)
+                        if mb_aux_seqs is not None and all_aux is not None
                         else None
                     ),
-                    sequence_observations=obs_seqs[idx],
-                    sequence_actions=acts_seqs[idx],
-                    sequence_aux_tensors=aux_seqs[idx] if aux_seqs is not None else None,
+                    sequence_observations=mb_obs_seqs,
+                    sequence_actions=mb_acts_seqs,
+                    sequence_aux_tensors=mb_aux_seqs,
                 )
         else:
             # Flat random shuffle
@@ -983,28 +989,33 @@ class TrajectoryBuffer:
         if seq_len > 0 and n >= seq_len:
             # Sequential chunks for BPTT
             starts = list(range(0, n - seq_len + 1, seq_len))
-            perm = torch.randperm(len(starts), device=obs.device).tolist()
+            perm = torch.randperm(len(starts), device=obs.device)
+            start_tensor = torch.arange(0, n - seq_len + 1, seq_len, device=obs.device, dtype=torch.long)
+            offsets = torch.arange(seq_len, device=obs.device, dtype=torch.long)
             for i in range(0, len(perm), max(1, batch_size // seq_len)):
-                selected: list[int] = perm[
-                    i : i + max(1, batch_size // seq_len)
-                ]
-                start_indices = torch.tensor([starts[j] for j in selected], device=obs.device, dtype=torch.long)
-                offsets = torch.arange(seq_len, device=obs.device, dtype=torch.long)
+                seq_indices = perm[i : i + max(1, batch_size // seq_len)]
+                start_indices = start_tensor.index_select(0, seq_indices)
                 chunk_indices = start_indices.unsqueeze(1) + offsets.unsqueeze(0)
-                flat_idx = chunk_indices.reshape(-1)
+                seq_obs = obs[chunk_indices]
+                seq_acts = acts[chunk_indices]
+                seq_old_lp = old_lp[chunk_indices]
+                seq_old_v = old_v[chunk_indices]
+                seq_advs = advs[chunk_indices]
+                seq_rets = rets[chunk_indices]
+                seq_aux = aux_flat[chunk_indices] if aux_flat is not None else None
 
                 yield TrajectoryBuffer.MiniBatch(
-                    observations=obs[flat_idx],
-                    actions=acts[flat_idx],
-                    old_log_probs=old_lp[flat_idx],
-                    old_values=old_v[flat_idx],
-                    advantages=advs[flat_idx],
-                    returns=rets[flat_idx],
+                    observations=seq_obs.flatten(0, 1),
+                    actions=seq_acts.flatten(0, 1),
+                    old_log_probs=seq_old_lp.flatten(),
+                    old_values=seq_old_v.flatten(),
+                    advantages=seq_advs.flatten(),
+                    returns=seq_rets.flatten(),
                     dones=dones_flat[chunk_indices],  # (n_seqs, seq_len)
-                    aux_tensors=aux_flat[flat_idx] if aux_flat is not None else None,
-                    sequence_observations=obs[chunk_indices],
-                    sequence_actions=acts[chunk_indices],
-                    sequence_aux_tensors=aux_flat[chunk_indices] if aux_flat is not None else None,
+                    aux_tensors=seq_aux.flatten(0, 1) if seq_aux is not None else None,
+                    sequence_observations=seq_obs,
+                    sequence_actions=seq_acts,
+                    sequence_aux_tensors=seq_aux,
                 )
         else:
             # Random shuffle

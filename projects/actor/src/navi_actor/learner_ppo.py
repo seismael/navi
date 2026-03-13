@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 import torch
 from torch import Tensor
@@ -19,6 +20,30 @@ if TYPE_CHECKING:
 __all__: list[str] = ["PpoLearner", "PpoMetrics"]
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _stage_timer(*, device: torch.device, use_cuda_events: bool) -> Iterator[list[float]]:
+    """Measure a learner stage with either host wall-clock or synchronized CUDA events."""
+    elapsed_ms = [0.0]
+    if use_cuda_events and device.type == "cuda":
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize(device)
+        start_event.record()
+        try:
+            yield elapsed_ms
+        finally:
+            end_event.record()
+            torch.cuda.synchronize(device)
+            elapsed_ms[0] = start_event.elapsed_time(end_event)
+        return
+
+    t_start = time.perf_counter()
+    try:
+        yield elapsed_ms
+    finally:
+        elapsed_ms[0] = (time.perf_counter() - t_start) * 1000
 
 
 def _prepare_minibatch_tensor(tensor: Tensor, device: torch.device) -> Tensor:
@@ -52,12 +77,14 @@ class PpoMetrics:
     rnd_loss: float
     learning_rate: float
     rnd_learning_rate: float
+    minibatch_fetch_ms: float = 0.0
     minibatch_prep_ms: float = 0.0
     policy_eval_ms: float = 0.0
     backward_ms: float = 0.0
     grad_clip_ms: float = 0.0
     optimizer_step_ms: float = 0.0
     rnd_step_ms: float = 0.0
+    progress_callback_ms: float = 0.0
 
 
 def _materialize_metric_means(
@@ -101,6 +128,7 @@ class PpoLearner:
         max_grad_norm: float = 0.5,
         learning_rate: float = 3e-4,
         rnd_learning_rate: float = 3e-5,
+        profile_cuda_events: bool = False,
     ) -> None:
         self._gamma = gamma
         self._clip_ratio = clip_ratio
@@ -109,6 +137,7 @@ class PpoLearner:
         self._max_grad_norm = max_grad_norm
         self._learning_rate = learning_rate
         self._rnd_learning_rate = rnd_learning_rate
+        self._profile_cuda_events = profile_cuda_events
         self._optimizer: torch.optim.Adam | None = None
         self._rnd_optimizer: torch.optim.Adam | None = None
         self._policy_param_cache: tuple[Tensor, ...] | None = None
@@ -191,15 +220,24 @@ class PpoLearner:
         running_rnd_loss = torch.zeros((), device=metric_device)
         zero_metric = torch.zeros((), device=metric_device)
         n_updates = 0
+        fetch_ms_acc = 0.0
         prep_ms_acc = 0.0
         eval_ms_acc = 0.0
         backward_ms_acc = 0.0
         grad_clip_ms_acc = 0.0
         optimizer_step_ms_acc = 0.0
         rnd_step_ms_acc = 0.0
+        progress_callback_ms_acc = 0.0
 
         for _epoch in range(ppo_epochs):
-            for mb in buffer.sample_minibatches(minibatch_size, seq_len):
+            minibatch_iter = iter(buffer.sample_minibatches(minibatch_size, seq_len))
+            while True:
+                t_fetch_start = time.perf_counter()
+                try:
+                    mb = next(minibatch_iter)
+                except StopIteration:
+                    break
+                fetch_ms_acc += (time.perf_counter() - t_fetch_start) * 1000
                 t_prep_start = time.perf_counter()
                 old_lp = _prepare_minibatch_tensor(mb.old_log_probs, device)
                 adv = _prepare_minibatch_tensor(mb.advantages, device)
@@ -225,62 +263,59 @@ class PpoLearner:
                 prep_ms_acc += (time.perf_counter() - t_prep_start) * 1000
 
                 # Forward pass
-                t_eval_start = time.perf_counter()
-                if use_sequence_path:
-                    new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
-                        obs_seq_tensor, acts_seq_tensor, hidden=h0, dones=dones_mask, aux_seq=aux_seq_tensor,
-                    )
-                else:
-                    obs = _prepare_minibatch_tensor(mb.observations, device)
-                    acts = _prepare_minibatch_tensor(mb.actions, device)
-                    aux_tensor = (
-                        _prepare_minibatch_tensor(mb.aux_tensors, device)
-                        if mb.aux_tensors is not None
-                        else None
-                    )
-                    new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
-                eval_ms_acc += (time.perf_counter() - t_eval_start) * 1000
+                with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as eval_ms:
+                    if use_sequence_path:
+                        new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
+                            obs_seq_tensor, acts_seq_tensor, hidden=h0, dones=dones_mask, aux_seq=aux_seq_tensor,
+                        )
+                    else:
+                        obs = _prepare_minibatch_tensor(mb.observations, device)
+                        acts = _prepare_minibatch_tensor(mb.actions, device)
+                        aux_tensor = (
+                            _prepare_minibatch_tensor(mb.aux_tensors, device)
+                            if mb.aux_tensors is not None
+                            else None
+                        )
+                        new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
 
-                # Squeeze outputs from policy to ensure they are 1D (B,)
-                new_vals = new_vals.squeeze(-1)
+                    new_vals = new_vals.squeeze(-1)
+                    log_ratio = new_lp - old_lp
+                    ratio = log_ratio.exp()
+                    surr1 = ratio * adv
+                    surr2 = torch.clamp(ratio, 1.0 - self._clip_ratio, 1.0 + self._clip_ratio) * adv
+                    policy_loss = -torch.min(surr1, surr2).mean()
 
-                # PPO losses
-                log_ratio = new_lp - old_lp
-                ratio = log_ratio.exp()
-                surr1 = ratio * adv
-                surr2 = torch.clamp(ratio, 1.0 - self._clip_ratio, 1.0 + self._clip_ratio) * adv
-                policy_loss = -torch.min(surr1, surr2).mean()
+                    value_pred_clipped = old_vals + torch.clamp(new_vals - old_vals, -self._clip_ratio, self._clip_ratio)
+                    vf_loss = 0.5 * torch.max((new_vals - ret)**2, (value_pred_clipped - ret)**2).mean()
 
-                value_pred_clipped = old_vals + torch.clamp(new_vals - old_vals, -self._clip_ratio, self._clip_ratio)
-                vf_loss = 0.5 * torch.max((new_vals - ret)**2, (value_pred_clipped - ret)**2).mean()
-
-                total_loss = policy_loss + self._value_coeff * vf_loss - self._entropy_coeff * ent
+                    total_loss = policy_loss + self._value_coeff * vf_loss - self._entropy_coeff * ent
+                eval_ms_acc += eval_ms[0]
 
                 # Optimization step
-                optimizer.zero_grad(set_to_none=True)
-                t_backward_start = time.perf_counter()
-                total_loss.backward()
-                backward_ms_acc += (time.perf_counter() - t_backward_start) * 1000
+                with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as backward_ms:
+                    optimizer.zero_grad(set_to_none=True)
+                    total_loss.backward()
+                backward_ms_acc += backward_ms[0]
 
-                t_clip_start = time.perf_counter()
-                torch.nn.utils.clip_grad_norm_(params, self._max_grad_norm, foreach=(device.type == "cuda"))
-                grad_clip_ms_acc += (time.perf_counter() - t_clip_start) * 1000
+                with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as clip_ms:
+                    torch.nn.utils.clip_grad_norm_(params, self._max_grad_norm, foreach=(device.type == "cuda"))
+                grad_clip_ms_acc += clip_ms[0]
 
-                t_opt_step_start = time.perf_counter()
-                optimizer.step()
-                optimizer_step_ms_acc += (time.perf_counter() - t_opt_step_start) * 1000
+                with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as optimizer_ms:
+                    optimizer.step()
+                optimizer_step_ms_acc += optimizer_ms[0]
 
                 # RND distillation
                 rnd_loss_metric = zero_metric
                 if rnd is not None and rnd_optimizer is not None:
-                    t_rnd_start = time.perf_counter()
-                    z_rnd = z_mb.detach()
-                    rnd_loss = rnd.distillation_loss(z_rnd)
-                    rnd_optimizer.zero_grad(set_to_none=True)
-                    rnd_loss.backward()  # type: ignore[no-untyped-call]
-                    rnd_optimizer.step()
-                    rnd_loss_metric = rnd_loss.detach()
-                    rnd_step_ms_acc += (time.perf_counter() - t_rnd_start) * 1000
+                    with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as rnd_ms:
+                        z_rnd = z_mb.detach()
+                        rnd_loss = rnd.distillation_loss(z_rnd)
+                        rnd_optimizer.zero_grad(set_to_none=True)
+                        rnd_loss.backward()  # type: ignore[no-untyped-call]
+                        rnd_optimizer.step()
+                        rnd_loss_metric = rnd_loss.detach()
+                    rnd_step_ms_acc += rnd_ms[0]
 
                 with torch.no_grad():
                     approx_kl = (ratio - 1.0 - log_ratio).mean()
@@ -296,7 +331,9 @@ class PpoLearner:
                 n_updates += 1
 
                 if progress_callback is not None:
+                    t_callback_start = time.perf_counter()
                     progress_callback()
+                    progress_callback_ms_acc += (time.perf_counter() - t_callback_start) * 1000
 
         if n_updates == 0:
             return PpoMetrics(
@@ -333,10 +370,12 @@ class PpoLearner:
             rnd_loss=float(mean_metrics[6]),
             learning_rate=self._learning_rate,
             rnd_learning_rate=self._rnd_learning_rate,
+            minibatch_fetch_ms=(fetch_ms_acc / max(1, n_updates)),
             minibatch_prep_ms=(prep_ms_acc / max(1, n_updates)),
             policy_eval_ms=(eval_ms_acc / max(1, n_updates)),
             backward_ms=(backward_ms_acc / max(1, n_updates)),
             grad_clip_ms=(grad_clip_ms_acc / max(1, n_updates)),
             optimizer_step_ms=(optimizer_step_ms_acc / max(1, n_updates)),
             rnd_step_ms=(rnd_step_ms_acc / max(1, n_updates)),
+            progress_callback_ms=(progress_callback_ms_acc / max(1, n_updates)),
         )

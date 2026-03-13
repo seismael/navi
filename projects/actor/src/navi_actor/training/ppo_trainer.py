@@ -269,7 +269,13 @@ class PpoTrainer:
             entropy_coeff=config.entropy_coeff,
             value_coeff=config.value_coeff,
             learning_rate=config.learning_rate,
+            profile_cuda_events=config.profile_cuda_events,
         )
+
+        if config.profile_cuda_events:
+            _LOGGER.warning(
+                "CUDA event profiling is enabled: PPO learner stage timings are synchronized diagnostic timings and throughput will be reduced.",
+            )
 
         # Multi-Trajectory buffers
         self._multi_buffer_a = MultiTrajectoryBuffer(
@@ -383,17 +389,19 @@ class PpoTrainer:
             _LOGGER.info("Inline PPO optimization completed in %.2fms. Weights synced.", total_ms)
         else:
             _LOGGER.info(
-                "Inline PPO optimization completed in %.2fms (inf=%.2fms opt=%.2fms aux=%.2fms | prep=%.2fms eval=%.2fms bwd=%.2fms clip=%.2fms optim=%.2fms rnd=%.2fms). Weights synced.",
+                "Inline PPO optimization completed in %.2fms (inf=%.2fms opt=%.2fms aux=%.2fms | fetch=%.2fms prep=%.2fms eval=%.2fms bwd=%.2fms clip=%.2fms optim=%.2fms rnd=%.2fms cb=%.2fms). Weights synced.",
                 total_ms,
                 inf_ms,
                 opt_ms,
                 aux_ms,
+                self._last_opt_metrics.minibatch_fetch_ms,
                 self._last_opt_metrics.minibatch_prep_ms,
                 self._last_opt_metrics.policy_eval_ms,
                 self._last_opt_metrics.backward_ms,
                 self._last_opt_metrics.grad_clip_ms,
                 self._last_opt_metrics.optimizer_step_ms,
                 self._last_opt_metrics.rnd_step_ms,
+                self._last_opt_metrics.progress_callback_ms,
             )
         if total_ms > _SOFT_WARN_MAX_OPT_MS:
             _LOGGER.warning(

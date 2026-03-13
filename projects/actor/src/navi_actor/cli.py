@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random as _random
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -262,6 +263,10 @@ def train(
         True,
         help="Emit actor/environment performance telemetry events.",
     ),
+    profile_cuda_events: bool = typer.Option(
+        False,
+        help="Diagnostic-only: force CUDA event timing and synchronization around PPO learner stages.",
+    ),
     actor_pub: str = typer.Option(None, help="Actor PUB bind address"),
 ) -> None:
     """Single canonical PPO training surface with direct in-process sdfdag stepping."""
@@ -308,7 +313,14 @@ def train(
         dashboard_observation_hz=dashboard_observation_hz,
         emit_training_telemetry=emit_training_telemetry,
         emit_perf_telemetry=emit_perf_telemetry,
+        profile_cuda_events=profile_cuda_events,
     )
+
+    if profile_cuda_events:
+        warnings.warn(
+            "CUDA event profiling is diagnostic-only and will lower training throughput while timings synchronize.",
+            stacklevel=1,
+        )
 
     corpus = _load_training_scenes(
         scene=scene,
