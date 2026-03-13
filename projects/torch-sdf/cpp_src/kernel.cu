@@ -9,6 +9,7 @@ namespace cuda {
 // --- Device Helper: Stackless DAG Query ---
 __device__ inline void query_dag_stackless(
     const uint64_t* __restrict__ dag_memory,
+    const uint64_t* __restrict__ dag_cache,
     float px, float py, float pz,
     const float bbox_min[3], const float bbox_max[3], int resolution,
     float& out_dist, int32_t& out_semantic) 
@@ -27,7 +28,7 @@ __device__ inline void query_dag_stackless(
     
     // Iterative descent
     for (int depth = 0; depth < 32; ++depth) {
-        uint64_t node = dag_memory[current_ptr];
+        uint64_t node = (current_ptr < kDagCacheSize) ? dag_cache[current_ptr] : dag_memory[current_ptr];
         
         if ((node >> 63) == 1) {
             uint16_t dist_bits = static_cast<uint16_t>(node & 0xFFFF);
@@ -61,7 +62,9 @@ __device__ inline void query_dag_stackless(
         uint32_t offset = __popc(bitmask_prior);
 
         // Fetch the actual pointer to the child node from the pointer array
-        current_ptr = static_cast<uint32_t>(dag_memory[child_base + offset]);    }
+        uint32_t child_ptr_idx = child_base + offset;
+        current_ptr = static_cast<uint32_t>((child_ptr_idx < kDagCacheSize) ? dag_cache[child_ptr_idx] : dag_memory[child_ptr_idx]);
+    }
 }
 
 // --- The Primary Raycasting Kernel ---
@@ -76,6 +79,14 @@ __global__ void sphere_trace_kernel(
     float bmax_x, float bmax_y, float bmax_z,
     int resolution) 
 {
+    __shared__ uint64_t dag_cache[kDagCacheSize];
+
+    // Cooperative load of the DAG top-levels into shared memory
+    for (int i = threadIdx.x; i < kDagCacheSize; i += blockDim.x) {
+        dag_cache[i] = dag_memory[i];
+    }
+    __syncthreads();
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_rays) return;
 
@@ -99,7 +110,7 @@ __global__ void sphere_trace_kernel(
         float py = oy + current_t * dy;
         float pz = oz + current_t * dz;
 
-        query_dag_stackless(dag_memory, px, py, pz, float_bmin, float_bmax, resolution, dist, semantic);
+        query_dag_stackless(dag_memory, dag_cache, px, py, pz, float_bmin, float_bmax, resolution, dist, semantic);
 
         if (dist < kHitEpsilon) {
             out_distances[idx] = current_t;

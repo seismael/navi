@@ -7,6 +7,7 @@ namespace cuda {
 constexpr float kHitEpsilon = 0.01f;
 constexpr float kOutsideDomainDistance = 1000.0f;
 constexpr float kDirectionNormEpsilon = 1e-4f;
+constexpr int kDagCacheSize = 1024;
 
 /**
  * @brief Launches the CUDA grid for batched SDF sphere-tracing.

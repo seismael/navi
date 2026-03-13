@@ -375,10 +375,85 @@ def train(
     )
 
 
-def serve_shortcut() -> None:
-    """Shortcut for 'navi-actor serve' command."""
-    app(["serve"])
+@app.command("profile")
+def profile(
+    ctx: typer.Context,
+    scene: str = typer.Option("", help="Source .gmdag file"),
+    steps: int = typer.Option(512, help="Steps to profile"),
+    actors: int = typer.Option(4, help="Parallel actors"),
+    azimuth_bins: int = typer.Option(256),
+    elevation_bins: int = typer.Option(48),
+) -> None:
+    """Run a fixed-length rollout with CUDA profiling active (Phase 14)."""
+    import torch
+    from navi_actor.training.ppo_trainer import PpoTrainer
+    from navi_environment.backends.sdfdag_backend import SdfDagBackend
+    from navi_environment.config import EnvironmentConfig
+
+    config = ActorConfig(
+        n_actors=actors,
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+    )
+    env_cfg = EnvironmentConfig(
+        gmdag_file=scene,
+        n_actors=actors,
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+    )
+    runtime = SdfDagBackend(env_cfg)
+    trainer = PpoTrainer(config, runtime=runtime, gmdag_file=scene)
+    
+    trainer.start()
+    typer.echo(f"Starting CUDA profile for {steps} steps...")
+    
+    # Warmup
+    trainer.train(n_actors * 2)
+    
+    torch.cuda.profiler.start()
+    trainer.train(steps)
+    torch.cuda.profiler.stop()
+    
+    trainer.stop()
+    typer.echo("Profiling complete.")
 
 
-if __name__ == "__main__":
+@app.command("brain")
+def brain(
+    ctx: typer.Context,
+    mode: str = typer.Argument(..., help="Operation mode: train, serve, audit, or profile"),
+    scene: str = typer.Option("", help="[train/audit/profile] Explicit scene name or path override"),
+    checkpoint: str = typer.Option("", help="[train/serve] Checkpoint path (.pt) to load"),
+    actors: int = typer.Option(4, help="[train/audit/profile] Number of parallel actors"),
+    azimuth_bins: int = typer.Option(256, help="Azimuth resolution"),
+    elevation_bins: int = typer.Option(48, help="Elevation resolution"),
+) -> None:
+    """Unified Brain service entry point (Phase 10/14)."""
+    if mode == "train":
+        # Delegate to train() with relevant subset of ctx.params
+        train_args = ["train", "--azimuth-bins", str(azimuth_bins), "--elevation-bins", str(elevation_bins), "--actors", str(actors)]
+        if scene: train_args.extend(["--scene", scene])
+        if checkpoint: train_args.extend(["--checkpoint", checkpoint])
+        app(train_args)
+    elif mode == "serve":
+        serve_args = ["serve", "--azimuth-bins", str(azimuth_bins), "--elevation-bins", str(elevation_bins)]
+        if checkpoint: serve_args.extend(["--policy-checkpoint", checkpoint])
+        app(serve_args)
+    elif mode == "audit":
+        import subprocess
+        audit_cmd = ["uv", "run", "navi-auditor", "dataset-audit", "--actors", str(actors), "--azimuth-bins", str(azimuth_bins), "--elevation-bins", str(elevation_bins)]
+        if scene: audit_cmd.extend(["--gmdag-file", scene])
+        typer.echo(f"Delegating to auditor: {' '.join(audit_cmd)}")
+        subprocess.run(audit_cmd, check=True)
+    elif mode == "profile":
+        profile_args = ["profile", "--azimuth-bins", str(azimuth_bins), "--elevation-bins", str(elevation_bins), "--actors", str(actors)]
+        if scene: profile_args.extend(["--scene", scene])
+        app(profile_args)
+    else:
+        typer.echo(f"Unknown brain mode: {mode}", err=True)
+        raise typer.Exit(1)
+
+
+def brain_main() -> None:
+    """Entry point for the 'brain' console script."""
     app()

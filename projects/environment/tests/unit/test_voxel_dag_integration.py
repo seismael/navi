@@ -21,9 +21,13 @@ _HEADER = struct.Struct("<4sIIffffI")
 _RUNNER = CliRunner()
 
 
+def _leaf_node(distance_bits: int = 1, semantic: int = 0) -> np.uint64:
+    return np.uint64((1 << 63) | ((semantic & 0xFFFF) << 16) | distance_bits)
+
+
 def test_load_gmdag_asset_reads_header_and_nodes(tmp_path: Path) -> None:
     asset_path = tmp_path / "mini_scene.gmdag"
-    nodes = np.array([1, 2, 3], dtype=np.uint64)
+    nodes = np.array([_leaf_node(distance_bits=1, semantic=7)], dtype=np.uint64)
     header = _HEADER.pack(
         b"GDAG",
         1,
@@ -159,6 +163,84 @@ def test_load_gmdag_asset_rejects_trailing_bytes(tmp_path: Path) -> None:
         load_gmdag_asset(asset_path)
 
 
+def test_load_gmdag_asset_rejects_nonfinite_bbox_values(tmp_path: Path) -> None:
+    asset_path = tmp_path / "bad_bbox.gmdag"
+    nodes = np.array([(1 << 63) | 1], dtype=np.uint64)
+    header = _HEADER.pack(
+        b"GDAG",
+        1,
+        32,
+        float("nan"),
+        0.0,
+        0.0,
+        1.0,
+        nodes.shape[0],
+    )
+    asset_path.write_bytes(header + nodes.tobytes())
+
+    with pytest.raises(RuntimeError, match="non-finite bbox_min values"):
+        load_gmdag_asset(asset_path)
+
+
+def test_load_gmdag_asset_rejects_empty_internal_child_mask(tmp_path: Path) -> None:
+    asset_path = tmp_path / "empty_mask.gmdag"
+    nodes = np.array([0], dtype=np.uint64)
+    header = _HEADER.pack(
+        b"GDAG",
+        1,
+        32,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        nodes.shape[0],
+    )
+    asset_path.write_bytes(header + nodes.tobytes())
+
+    with pytest.raises(RuntimeError, match="empty child mask"):
+        load_gmdag_asset(asset_path)
+
+
+def test_load_gmdag_asset_rejects_out_of_range_child_reference(tmp_path: Path) -> None:
+    asset_path = tmp_path / "bad_child_ref.gmdag"
+    internal_word = np.uint64((1 << 55) | 1)
+    nodes = np.array([internal_word, 99], dtype=np.uint64)
+    header = _HEADER.pack(
+        b"GDAG",
+        1,
+        32,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        nodes.shape[0],
+    )
+    asset_path.write_bytes(header + nodes.tobytes())
+
+    with pytest.raises(RuntimeError, match="child reference out of range"):
+        load_gmdag_asset(asset_path)
+
+
+def test_load_gmdag_asset_rejects_child_pointer_table_past_payload(tmp_path: Path) -> None:
+    asset_path = tmp_path / "bad_child_table.gmdag"
+    internal_word = np.uint64((1 << 55) | 5)
+    nodes = np.array([internal_word], dtype=np.uint64)
+    header = _HEADER.pack(
+        b"GDAG",
+        1,
+        32,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        nodes.shape[0],
+    )
+    asset_path.write_bytes(header + nodes.tobytes())
+
+    with pytest.raises(RuntimeError, match="child pointer table starts beyond payload"):
+        load_gmdag_asset(asset_path)
+
+
 def test_probe_sdfdag_runtime_reports_missing_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_import_module(name: str) -> object:
         if name == "torch":
@@ -189,7 +271,7 @@ def test_probe_sdfdag_runtime_loads_asset_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asset_path = tmp_path / "mini_scene.gmdag"
-    nodes = np.array([7, 8], dtype=np.uint64)
+    nodes = np.array([_leaf_node(distance_bits=2, semantic=8)], dtype=np.uint64)
     header = _HEADER.pack(
         b"GDAG",
         1,
@@ -225,7 +307,7 @@ def test_probe_sdfdag_runtime_loads_asset_metadata(
     assert status.torch_sdf_ready is True
     assert status.asset_loaded is True
     assert status.resolution == 32
-    assert status.node_count == 2
+    assert status.node_count == 1
     assert status.bbox_min == (1.0, 2.0, 3.0)
     assert status.bbox_max == (17.0, 18.0, 19.0)
     assert status.issues == ()
@@ -317,6 +399,7 @@ def test_check_sdfdag_cli_can_emit_json_summary(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_check_sdfdag_cli_exits_nonzero_on_issues(monkeypatch: pytest.MonkeyPatch) -> None:
+    from navi_environment.integration.corpus import CompiledCorpusValidation
     from navi_environment.integration.voxel_dag import GmDagRuntimeStatus
 
     monkeypatch.setattr(
@@ -334,6 +417,17 @@ def test_check_sdfdag_cli_exits_nonzero_on_issues(monkeypatch: pytest.MonkeyPatc
             bbox_min=None,
             bbox_max=None,
             issues=("torch import failed: missing",),
+        ),
+    )
+    monkeypatch.setattr(
+        "navi_environment.cli.validate_compiled_scene_corpus",
+        lambda *_args, **_kwargs: CompiledCorpusValidation(
+            gmdag_root=Path("C:/repo/artifacts/gmdag/corpus"),
+            manifest_path=Path("C:/repo/artifacts/gmdag/corpus/gmdag_manifest.json"),
+            manifest_present=True,
+            scene_count=0,
+            compiled_resolutions=(),
+            issues=(),
         ),
     )
 

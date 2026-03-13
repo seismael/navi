@@ -36,7 +36,7 @@ Optional duration override:
 1. bootstrap artifact root and run manifest
 2. reclaim ports and stop stale Navi processes
 3. runtime preflight via `check-sdfdag` and `dataset-audit`
-4. focused actor, environment, and auditor regression suites
+4. focused actor, environment, voxel-dag, torch-sdf, and auditor regression suites
 5. bounded canonical qualification via `qualify-canonical-stack.ps1`
 6. bounded shared-model training plus checkpoint summary
 7. bounded checkpoint resume proof
@@ -50,6 +50,7 @@ The nightly must stop immediately when any of the following occurs:
 
 - runtime preflight reports `ok: false`
 - focused regression suites fail
+- direct `voxel-dag` or `torch-sdf` focused regression suites fail
 - bounded canonical qualification fails
 - bounded shared-model training does not emit checkpoints or produces non-finite metrics
 - bounded resume proof cannot produce a fresh checkpoint
@@ -73,5 +74,12 @@ The top-level artifacts to inspect are:
 - `reports/nightly_summary.json`
 - `reports/nightly_summary.md`
 - `reports/nightly_diff_vs_baseline.json`
+- `validation/check-sdfdag-corpus.json`
+- `validation/check-sdfdag-asset.json`
+- `validation/bench-sdfdag-sample.json`
 
 Those reports should be enough to decide whether the night was healthy before opening raw logs.
+
+## 8. Windows Launch Note
+
+On Windows, the machine-readable preflight and benchmark JSON commands are resolved to the project-local Python interpreters and routed through `scripts/run-structured-surface.py` under the wrapper's native .NET process capture path. This avoids PowerShell's native-command stderr promotion and the observed nested CLI-hosting stall while preserving explicit timeout, stdout, and stderr artifacts.

@@ -65,6 +65,14 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Soft Warning Policy:** Throughput drift, attach instability, and other non-fatal regressions MAY emit warnings, but hard failures must stop the nightly and produce machine-readable artifacts.
 - **Artifact Rule:** Every nightly run MUST emit one timestamped artifact root containing raw phase outputs plus a top-level summary JSON for morning review.
 
+### 2.4.2 SDF/DAG Validation Standard
+- **Layered Proof Required:** `projects/voxel-dag` and `projects/torch-sdf` MUST be validated at compiler, binary-format, runtime, corpus-promotion, and qualification levels rather than by one smoke test.
+- **Mathematical Oracle Rule:** Small canonical fixtures MUST be checked against independent or analytic geometry expectations, not only implementation-to-implementation self-comparison.
+- **Determinism Rule:** Repeated compilation of the same fixture with the same inputs MUST produce byte-identical `.gmdag` output unless the documented format contract is intentionally revised in the same change.
+- **Binary Integrity Rule:** The `.gmdag` loader MUST reject malformed headers, non-finite bounds, impossible pointer layouts, out-of-range child references, cycles, and trailing or truncated payloads.
+- **Real Corpus Rule:** Canonical promoted-corpus validation MUST prove that real compiled assets from approved datasets load, match manifest metadata, and remain benchmark-viable at the canonical compile resolution.
+- **Benchmark Drift Rule:** Compiler/runtime validation MUST track both correctness and throughput so a faster but geometrically wrong transform, or a correct but throughput-regressing transform, cannot silently ship.
+
 ### 2.5 Non-Negotiables
 1. **Wire Contracts:** v2 only (`RobotPose`, `DistanceMatrix`, `Action`, etc.).
 2. **Sacred Brain:** The cognitive pipeline (`RayViTEncoder` → `TemporalCore` → `EpisodicMemory` → `ActorCriticHeads`) is **immutable**.

@@ -151,6 +151,18 @@ Additional canonical validation targets for this refactor include:
 - deterministic output checks for golden fixtures
 - child-mask and node-ordering invariant tests
 
+### 8.1 Compiler Acceptance Criteria
+
+The compiler layer is accepted only when all of the following are true for the active implementation:
+
+- fixed-fixture analytic tests prove the generated dense field stays within documented voxel-scale error bounds for supported fixture classes
+- repeated runs over the same fixture yield byte-identical `.gmdag` bytes and the same node-count summary
+- deduplication tests prove that a hash collision cannot merge structurally distinct nodes
+- serialization tests prove that non-finite bounds and nonpositive voxel sizes are rejected before file emission
+- environment-side loading proves malformed child-pointer layouts are rejected before CUDA traversal begins
+
+This means the compiler contract is both geometric and binary. Passing only one of those categories is insufficient.
+
 ## 9. Related Docs
 
 - `docs/ARCHITECTURE.md`

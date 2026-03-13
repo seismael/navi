@@ -2,12 +2,35 @@ from pathlib import Path
 
 import numpy as np
 import os
+import subprocess
 import struct
 import time
 
 import pytest
 
 from voxel_dag.compiler import MeshIngestor, compute_dense_sdf, compress_to_dag, write_gmdag
+
+
+_HEADER = struct.Struct("<4sIIffffI")
+
+
+def _resolve_native_compiler() -> Path | None:
+    project_root = Path(__file__).resolve().parents[1]
+    candidates = (
+        project_root / "build" / "Release" / "voxel-dag.exe",
+        project_root / "build-local" / "Release" / "voxel-dag.exe",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _read_gmdag_header(path: Path) -> tuple[bytes, int, int, tuple[float, float, float], float, int]:
+    with path.open("rb") as handle:
+        raw = handle.read(_HEADER.size)
+    magic, version, resolution, bmin_x, bmin_y, bmin_z, voxel_size, node_count = _HEADER.unpack(raw)
+    return magic, version, resolution, (bmin_x, bmin_y, bmin_z), voxel_size, node_count
 
 # --- Test Utilities ---
 
@@ -90,6 +113,29 @@ def test_dag_compression_efficiency() -> None:
     assert len(dag) < 100
     print(f"Compression Ratio: {(res**3) / len(dag):.1f}x")
 
+
+def test_box_distance_matches_nearest_face_at_voxel_centers() -> None:
+    create_test_obj("test_cube.obj", "cube")
+    vertices, indices, bbox_min, bbox_max = MeshIngestor.load_obj("test_cube.obj")
+    resolution = 32
+    grid, voxel_size, cube_min = compute_dense_sdf(vertices, indices, bbox_min, bbox_max, resolution, padding=0.0)
+
+    x_index = 7
+    y_index = 10
+    z_index = 21
+    sample_point = cube_min + (np.array([x_index, y_index, z_index], dtype=np.float32) + 0.5) * voxel_size
+    expected_distance = min(
+        sample_point[0] - bbox_min[0],
+        bbox_max[0] - sample_point[0],
+        sample_point[1] - bbox_min[1],
+        bbox_max[1] - sample_point[1],
+        sample_point[2] - bbox_min[2],
+        bbox_max[2] - sample_point[2],
+    )
+
+    assert np.isclose(grid[z_index, y_index, x_index], expected_distance, atol=voxel_size)
+    os.remove("test_cube.obj")
+
 # --- 2. Edge Case Tests ---
 
 def test_degenerate_mesh() -> None:
@@ -160,6 +206,19 @@ def test_write_gmdag_rejects_nonpositive_voxel_size(tmp_path: Path) -> None:
         write_gmdag(target, np.array([1], dtype=np.uint64), 16, np.zeros(3, dtype=np.float32), 0.0)
 
 
+def test_write_gmdag_rejects_nonfinite_bbox_min(tmp_path: Path) -> None:
+    target = tmp_path / "bad_bbox.gmdag"
+
+    with pytest.raises(ValueError, match="bbox_min must contain only finite values"):
+        write_gmdag(
+            target,
+            np.array([1], dtype=np.uint64),
+            16,
+            np.array([0.0, np.nan, 1.0], dtype=np.float32),
+            0.25,
+        )
+
+
 def test_write_gmdag_is_deterministic(tmp_path: Path) -> None:
     dag = np.array([1, 2, 3], dtype=np.uint64)
     bmin = np.array([1.0, 2.0, 3.0], dtype=np.float32)
@@ -170,6 +229,96 @@ def test_write_gmdag_is_deterministic(tmp_path: Path) -> None:
     write_gmdag(second, dag, 16, bmin, 0.25)
 
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_native_compiler_is_deterministic_for_fixed_fixture(tmp_path: Path) -> None:
+    compiler = _resolve_native_compiler()
+    if compiler is None:
+        pytest.skip("Native voxel-dag compiler executable is not available")
+
+    source = tmp_path / "cube.obj"
+    create_test_obj(source, "cube")
+    first = tmp_path / "native_first.gmdag"
+    second = tmp_path / "native_second.gmdag"
+
+    env = os.environ.copy()
+    path_entries = [str(compiler.parent)]
+    sibling_release = compiler.parents[1] / "Release"
+    if sibling_release.exists():
+        path_entries.append(str(sibling_release))
+    existing_path = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(path_entries + ([existing_path] if existing_path else []))
+
+    first_run = subprocess.run(
+        [str(compiler), "--input", str(source), "--output", str(first), "--resolution", "32"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert first_run.returncode == 0, first_run.stderr or first_run.stdout
+
+    second_run = subprocess.run(
+        [str(compiler), "--input", str(source), "--output", str(second), "--resolution", "32"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert second_run.returncode == 0, second_run.stderr or second_run.stdout
+
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_native_compiler_matches_python_header_contract_for_cube_fixture(tmp_path: Path) -> None:
+    compiler = _resolve_native_compiler()
+    if compiler is None:
+        pytest.skip("Native voxel-dag compiler executable is not available")
+
+    source = tmp_path / "cube.obj"
+    create_test_obj(source, "cube")
+    native_output = tmp_path / "native.gmdag"
+    python_output = tmp_path / "python.gmdag"
+    resolution = 32
+
+    env = os.environ.copy()
+    path_entries = [str(compiler.parent)]
+    sibling_release = compiler.parents[1] / "Release"
+    if sibling_release.exists():
+        path_entries.append(str(sibling_release))
+    existing_path = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(path_entries + ([existing_path] if existing_path else []))
+
+    native_run = subprocess.run(
+        [str(compiler), "--input", str(source), "--output", str(native_output), "--resolution", str(resolution)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert native_run.returncode == 0, native_run.stderr or native_run.stdout
+
+    vertices, indices, bbox_min, bbox_max = MeshIngestor.load_obj(source)
+    grid, voxel_size, cube_min = compute_dense_sdf(
+        vertices,
+        indices,
+        bbox_min,
+        bbox_max,
+        resolution,
+        padding=1.0,
+    )
+    write_gmdag(python_output, compress_to_dag(grid, resolution), resolution, cube_min, voxel_size)
+
+    native_header = _read_gmdag_header(native_output)
+    python_header = _read_gmdag_header(python_output)
+
+    assert native_header[0] == python_header[0] == b"GDAG"
+    assert native_header[1] == python_header[1] == 1
+    assert native_header[2] == python_header[2] == resolution
+    assert native_header[3] == pytest.approx(python_header[3], rel=0.0, abs=1e-6)
+    assert native_header[4] == pytest.approx(python_header[4], rel=0.0, abs=1e-6)
+    assert native_header[5] > 0
+    assert python_header[5] > 0
 
 if __name__ == "__main__":
     print("Running TopoNav Voxel-DAG Comprehensive Test Suite...")

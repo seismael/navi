@@ -23,6 +23,58 @@ __all__ = [
 _HEADER_STRUCT = struct.Struct("<4sIIffffI")
 
 
+def _validate_gmdag_dag_layout(nodes: np.ndarray) -> None:
+    node_count = int(nodes.shape[0])
+    visited: set[int] = set()
+    active_stack: set[int] = set()
+
+    def visit(node_index: int) -> None:
+        if node_index in visited:
+            return
+        if node_index in active_stack:
+            msg = f"Invalid gmdag DAG layout: cycle detected at node index {node_index}"
+            raise RuntimeError(msg)
+        if node_index < 0 or node_index >= node_count:
+            msg = f"Invalid gmdag DAG layout: node index out of range: {node_index}"
+            raise RuntimeError(msg)
+
+        active_stack.add(node_index)
+        node_word = int(nodes[node_index])
+        if (node_word >> 63) == 0:
+            mask = (node_word >> 55) & 0xFF
+            if mask == 0:
+                msg = f"Invalid gmdag DAG layout: internal node {node_index} has empty child mask"
+                raise RuntimeError(msg)
+            child_base = node_word & 0xFFFFFFFF
+            child_count = int(mask.bit_count())
+            if child_base >= node_count:
+                msg = (
+                    "Invalid gmdag DAG layout: child pointer table starts beyond payload "
+                    f"at index {child_base}"
+                )
+                raise RuntimeError(msg)
+            if child_base + child_count > node_count:
+                msg = (
+                    "Invalid gmdag DAG layout: child pointer table exceeds payload bounds "
+                    f"for node {node_index}"
+                )
+                raise RuntimeError(msg)
+            for offset in range(child_count):
+                child_index = int(nodes[child_base + offset])
+                if child_index < 0 or child_index >= node_count:
+                    msg = (
+                        "Invalid gmdag DAG layout: child reference out of range "
+                        f"({child_index}) from node {node_index}"
+                    )
+                    raise RuntimeError(msg)
+                visit(child_index)
+
+        active_stack.remove(node_index)
+        visited.add(node_index)
+
+    visit(0)
+
+
 @dataclass(frozen=True, slots=True)
 class GmDagAsset:
     """Loaded `.gmdag` asset metadata and node payload."""
@@ -156,11 +208,15 @@ def load_gmdag_asset(path: Path) -> GmDagAsset:
         if resolution <= 0:
             msg = f"Invalid gmdag resolution in {path}: {resolution}"
             raise RuntimeError(msg)
-        if voxel_size <= 0.0:
+        if not np.isfinite(voxel_size) or voxel_size <= 0.0:
             msg = f"Invalid gmdag voxel size in {path}: {voxel_size}"
             raise RuntimeError(msg)
         if node_count <= 0:
             msg = f"Invalid gmdag node count in {path}: {node_count}"
+            raise RuntimeError(msg)
+        bbox_values = (bmin_x, bmin_y, bmin_z)
+        if not all(np.isfinite(value) for value in bbox_values):
+            msg = f"Invalid gmdag bounds in {path}: non-finite bbox_min values detected"
             raise RuntimeError(msg)
 
         nodes = np.fromfile(handle, dtype=np.uint64, count=node_count)
@@ -174,6 +230,8 @@ def load_gmdag_asset(path: Path) -> GmDagAsset:
         if trailing_bytes:
             msg = f"Invalid gmdag payload in {path}: trailing bytes detected"
             raise RuntimeError(msg)
+
+    _validate_gmdag_dag_layout(nodes)
 
     bbox_min = (float(bmin_x), float(bmin_y), float(bmin_z))
     extent = float(voxel_size) * int(resolution)

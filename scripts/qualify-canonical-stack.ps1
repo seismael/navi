@@ -54,6 +54,68 @@ function Get-PowerShellExecutable {
     throw "Neither pwsh nor powershell is available on PATH"
 }
 
+function Get-ProjectPythonExecutable {
+    param([string]$ProjectPath)
+
+    $candidate = Join-Path $ProjectPath ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+    }
+    throw "Project-local Python interpreter not found: $candidate"
+}
+
+function Resolve-JsonCommandInvocation {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList
+    )
+
+    if ($FilePath -ieq "uv" -and $ArgumentList.Count -ge 4 -and $ArgumentList[0] -eq "run") {
+        $index = 1
+        if ($index + 1 -lt $ArgumentList.Count -and $ArgumentList[$index] -eq "--python") {
+            $index += 2
+        }
+        if ($index + 1 -lt $ArgumentList.Count -and $ArgumentList[$index] -eq "--project") {
+            $projectPath = $ArgumentList[$index + 1]
+            $index += 2
+            if ($index -lt $ArgumentList.Count) {
+                $cliName = $ArgumentList[$index]
+                $remaining = @()
+                if ($index + 1 -lt $ArgumentList.Count) {
+                    $remaining = $ArgumentList[($index + 1)..($ArgumentList.Count - 1)]
+                }
+                if ($cliName -eq "navi-environment") {
+                    return [pscustomobject]@{
+                        file_path = Get-ProjectPythonExecutable -ProjectPath $projectPath
+                        argument_list = @("-m", "navi_environment.cli") + $remaining
+                    }
+                }
+                if ($cliName -eq "navi-auditor") {
+                    return [pscustomobject]@{
+                        file_path = Get-ProjectPythonExecutable -ProjectPath $projectPath
+                        argument_list = @("-m", "navi_auditor.cli") + $remaining
+                    }
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        file_path = $FilePath
+        argument_list = $ArgumentList
+    }
+}
+
+function Get-StructuredSurfaceRunnerPython {
+    param([string]$ModuleName)
+
+    if ($ModuleName -eq "navi_auditor.cli") {
+        return $script:StructuredSurfaceRunnerPythonByModule[$ModuleName]
+    }
+
+    return $script:StructuredSurfaceRunnerPythonByModule["default"]
+}
+
 function Stop-ProcessTreeById {
     param([int]$ProcessId)
 
@@ -97,8 +159,11 @@ function Stop-ListenersOnPorts {
 function Stop-NaviProcesses {
     $patterns = @(
         "*navi-environment*",
+        "*navi_environment.cli*",
         "*navi-actor*",
         "*navi-auditor*",
+        "*navi_auditor.cli*",
+        "*run-structured-surface.py*",
         "*run-ghost-stack.ps1*"
     )
     $targets = Get-CimInstance Win32_Process | Where-Object {
@@ -148,37 +213,207 @@ function Convert-StructuredJson {
     return $trimmed.Substring($rootStart) | ConvertFrom-Json
 }
 
+function Quote-ProcessArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return '""'
+    }
+    if ($Value.Length -eq 0) {
+        return '""'
+    }
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Join-ProcessArguments {
+    param([string[]]$ArgumentList)
+
+    if ($null -eq $ArgumentList -or $ArgumentList.Count -eq 0) {
+        return ""
+    }
+    return (($ArgumentList | ForEach-Object { Quote-ProcessArgument -Value ([string]$_) }) -join ' ')
+}
+
+function ConvertTo-PowerShellSingleQuotedLiteral {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return "''"
+    }
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Invoke-NativeProcessCapture {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [int]$TimeoutSeconds = 300
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = Join-ProcessArguments -ArgumentList $ArgumentList
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+
+    $stdoutBuilder = New-Object System.Text.StringBuilder
+    $stderrBuilder = New-Object System.Text.StringBuilder
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+
+    $stdoutHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $eventArgs)
+        if ($null -ne $eventArgs.Data) {
+            [void]$stdoutBuilder.AppendLine($eventArgs.Data)
+        }
+    }
+    $stderrHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $eventArgs)
+        if ($null -ne $eventArgs.Data) {
+            [void]$stderrBuilder.AppendLine($eventArgs.Data)
+        }
+    }
+
+    $process.add_OutputDataReceived($stdoutHandler)
+    $process.add_ErrorDataReceived($stderrHandler)
+    try {
+        if (-not $process.Start()) {
+            throw "Failed to start command: $FilePath $($ArgumentList -join ' ')"
+        }
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+
+        if ($TimeoutSeconds -gt 0) {
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                Stop-ProcessTreeById -ProcessId $process.Id
+                throw "Command timed out after ${TimeoutSeconds}s: $FilePath $($ArgumentList -join ' ')"
+            }
+        }
+        else {
+            $process.WaitForExit()
+        }
+        $process.WaitForExit()
+
+        return [pscustomobject]@{
+            exit_code = [int]$process.ExitCode
+            stdout = $stdoutBuilder.ToString().TrimEnd("`r", "`n")
+            stderr = $stderrBuilder.ToString().TrimEnd("`r", "`n")
+        }
+    }
+    finally {
+        try {
+            $process.remove_OutputDataReceived($stdoutHandler)
+            $process.remove_ErrorDataReceived($stderrHandler)
+        }
+        catch {
+        }
+        $process.Dispose()
+    }
+}
+
 function Invoke-JsonCommand {
     param(
         [string]$FilePath,
         [string[]]$ArgumentList,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [string]$OutputPath,
+        [string]$ErrorPath,
+        [int]$TimeoutSeconds = 300
     )
 
-    $stdoutPath = [System.IO.Path]::GetTempFileName()
-    $stderrPath = [System.IO.Path]::GetTempFileName()
-    try {
-        $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -Wait -PassThru
-        $output = Read-TextFile -Path $stdoutPath
-        $stderr = Read-TextFile -Path $stderrPath
+    if (Test-Path -LiteralPath $OutputPath) {
+        Remove-Item -LiteralPath $OutputPath -Force
     }
-    finally {
-        Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $ErrorPath) {
+        Remove-Item -LiteralPath $ErrorPath -Force
     }
 
-    if ($process.ExitCode -ne 0) {
+    $resolvedInvocation = Resolve-JsonCommandInvocation -FilePath $FilePath -ArgumentList $ArgumentList
+    $resolvedFilePath = [string]$resolvedInvocation.file_path
+    $resolvedArgumentList = [string[]]$resolvedInvocation.argument_list
+
+    $structuredRunnerUsed = $false
+    $captureFilePath = $resolvedFilePath
+    $captureArgumentList = $resolvedArgumentList
+    if ($resolvedArgumentList.Count -ge 3 -and $resolvedArgumentList[0] -eq "-m") {
+        $structuredRunnerUsed = $true
+        $moduleName = [string]$resolvedArgumentList[1]
+        $captureFilePath = Get-StructuredSurfaceRunnerPython -ModuleName $moduleName
+        $captureArgumentList = @(
+            $script:StructuredSurfaceRunnerScript,
+            "--module", $moduleName,
+            "--output-path", $OutputPath,
+            "--error-path", $ErrorPath,
+            "--"
+        ) + $resolvedArgumentList[2..($resolvedArgumentList.Count - 1)]
+    }
+
+    if ($structuredRunnerUsed) {
+        $tempScriptPath = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".ps1")
+        try {
+            $quotedRunner = ConvertTo-PowerShellSingleQuotedLiteral -Value $captureFilePath
+            $quotedArgs = if ($captureArgumentList.Count -gt 0) {
+                ($captureArgumentList | ForEach-Object { ConvertTo-PowerShellSingleQuotedLiteral -Value ([string]$_) }) -join ", "
+            }
+            else {
+                ""
+            }
+            $scriptText = @(
+                '$ErrorActionPreference = "Continue"',
+                'if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }',
+                ('$runner = ' + $quotedRunner),
+                ('$runnerArgs = @(' + $quotedArgs + ')'),
+                '& $runner @runnerArgs',
+                'exit $LASTEXITCODE'
+            ) -join [Environment]::NewLine
+            Set-Content -Encoding UTF8 -Path $tempScriptPath -Value $scriptText
+
+            $proc = Start-Process -FilePath $powerShellExe -ArgumentList @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-File', $tempScriptPath
+            ) -WorkingDirectory $WorkingDirectory -PassThru -Wait
+            $exitCode = [int]$proc.ExitCode
+        }
+        finally {
+            Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
+        }
+
+        $stdout = if (Test-Path -LiteralPath $OutputPath) { Get-Content -LiteralPath $OutputPath -Raw } else { "" }
+        $stderr = if (Test-Path -LiteralPath $ErrorPath) { Get-Content -LiteralPath $ErrorPath -Raw } else { "" }
+        $result = [pscustomobject]@{ exit_code = $exitCode; stdout = $stdout; stderr = $stderr }
+    }
+    else {
+        $result = Invoke-NativeProcessCapture -FilePath $captureFilePath -ArgumentList $captureArgumentList -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds
+        $stdout = $result.stdout
+        $stderr = $result.stderr
+        Set-Content -Encoding UTF8 -Path $OutputPath -Value $stdout
+        Set-Content -Encoding UTF8 -Path $ErrorPath -Value $stderr
+    }
+
+    if ([int]$result.exit_code -ne 0) {
         $message = [string]::Format(
             "Command failed with exit code {0}; {1} {2}{3}{4}",
-            $process.ExitCode,
-            $FilePath,
-            ($ArgumentList -join ' '),
+            $result.exit_code,
+            $resolvedFilePath,
+            ($resolvedArgumentList -join ' '),
             [Environment]::NewLine,
-            ($output + [Environment]::NewLine + $stderr).Trim()
+            ($stdout + [Environment]::NewLine + $stderr).Trim()
         )
         throw $message
     }
-    return Convert-StructuredJson -Text $output
+
+    return Convert-StructuredJson -Text $stdout
 }
 
 function Start-BackgroundProcess {
@@ -191,7 +426,7 @@ function Start-BackgroundProcess {
     )
 
     $logDir = Split-Path $StdOutFile -Parent
-    if (-not (Test-Path $logDir)) {
+    if (-not [string]::IsNullOrWhiteSpace($logDir) -and -not (Test-Path -LiteralPath $logDir)) {
         New-Item -ItemType Directory -Path $logDir | Out-Null
     }
 
@@ -373,8 +608,48 @@ function Resolve-RefreshTrainingScene {
     throw "Corpus refresh qualification scene '$RequestedScene' could not be mapped to a refreshed compiled asset"
 }
 
+function Resolve-CompiledManifestPath {
+    param([string]$CompiledRoot)
+
+    if ([string]::IsNullOrWhiteSpace($CompiledRoot)) {
+        return ""
+    }
+
+    $manifestPath = Join-Path $CompiledRoot "gmdag_manifest.json"
+    if (Test-Path $manifestPath) {
+        return $manifestPath
+    }
+    return ""
+}
+
+function Resolve-RepresentativeCompiledAsset {
+    param(
+        [string]$CompiledRoot,
+        [string]$PreferredAsset = ""
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($PreferredAsset) -and (Test-Path $PreferredAsset)) {
+        return (Resolve-Path $PreferredAsset).Path
+    }
+
+    if ([string]::IsNullOrWhiteSpace($CompiledRoot) -or -not (Test-Path $CompiledRoot)) {
+        return ""
+    }
+
+    $assets = @(Get-ChildItem -Path $CompiledRoot -Recurse -File -Filter "*.gmdag" | Sort-Object FullName)
+    if ($assets.Count -eq 0) {
+        return ""
+    }
+    return $assets[0].FullName
+}
+
 $repoRoot = Get-RepoRoot
 $powerShellExe = Get-PowerShellExecutable
+$script:StructuredSurfaceRunnerPythonByModule = @{
+    default = Join-Path $repoRoot "projects\environment\.venv\Scripts\python.exe"
+    "navi_auditor.cli" = Join-Path $repoRoot "projects\auditor\.venv\Scripts\python.exe"
+}
+$script:StructuredSurfaceRunnerScript = Join-Path $repoRoot "scripts\run-structured-surface.py"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $runDir = Join-Path $repoRoot (Join-Path $RunRoot $timestamp)
 $logsDir = Join-Path $runDir "logs"
@@ -382,6 +657,7 @@ $checkpointDir = Join-Path $runDir "checkpoints"
 $refreshSandboxRoot = Join-Path $runDir "refresh"
 $refreshScratchRoot = Join-Path $refreshSandboxRoot "scratch"
 $refreshCompiledRoot = Join-Path $refreshSandboxRoot "gmdag_corpus"
+$validationDir = Join-Path $runDir "validation"
 $sharedTrainOutLog = Join-Path $repoRoot "scripts\logs\train.out.log"
 $sharedTrainErrLog = Join-Path $repoRoot "scripts\logs\train.err.log"
 $recordingPath = Join-Path $runDir "training_session.zarr"
@@ -390,6 +666,7 @@ $refreshTrainingScene = ""
 
 New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
+New-Item -ItemType Directory -Path $validationDir -Force | Out-Null
 
 $summary = [ordered]@{
     profile = "canonical-stack-qualification"
@@ -401,6 +678,7 @@ $summary = [ordered]@{
     replay_speed = $ReplaySpeed
     dataset_audit = $null
     corpus_refresh = $null
+    validation = $null
     live_attach = $null
     resume = $null
     replay_attach = $null
@@ -413,6 +691,10 @@ $summary = [ordered]@{
         refresh_compiled_root = $null
         refresh_manifest = $null
         refresh_transcript = $null
+        validation_dir = $validationDir
+        corpus_check_json = $null
+        asset_check_json = $null
+        benchmark_json = $null
         resume_source_checkpoint = $null
         resume_checkpoint_dir = $null
         resume_final_checkpoint = $null
@@ -531,6 +813,84 @@ try {
         $summary.artifacts.refresh_manifest = $refreshManifestPath
         $summary.artifacts.refresh_transcript = $refreshTranscript
     }
+
+    $activeCompiledRoot = if ($EnableCorpusRefreshQualification) { $refreshCompiledRoot } else { Join-Path $repoRoot "artifacts\gmdag\corpus" }
+    $activeManifestPath = if ($EnableCorpusRefreshQualification) { $summary.artifacts.refresh_manifest } else { Resolve-CompiledManifestPath -CompiledRoot $activeCompiledRoot }
+    $preferredValidationAsset = if (-not [string]::IsNullOrWhiteSpace($refreshTrainingScene) -and (Test-Path $refreshTrainingScene)) { $refreshTrainingScene } else { "" }
+    $validationAsset = Resolve-RepresentativeCompiledAsset -CompiledRoot $activeCompiledRoot -PreferredAsset $preferredValidationAsset
+
+    if (-not (Test-Path $activeCompiledRoot)) {
+        throw "Qualification validation root not found: $activeCompiledRoot"
+    }
+    if ([string]::IsNullOrWhiteSpace($validationAsset)) {
+        throw "Qualification could not resolve a representative compiled asset under $activeCompiledRoot"
+    }
+
+    $expectedValidationResolution = if ($EnableCorpusRefreshQualification) { $RefreshResolution } else { 512 }
+    $corpusCheckArgs = @(
+        "run",
+        "--python", $PythonVersion,
+        "--project", (Join-Path $repoRoot "projects\environment"),
+        "navi-environment",
+        "check-sdfdag",
+        "--gmdag-root", $activeCompiledRoot,
+        "--expected-resolution", "$expectedValidationResolution"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($activeManifestPath)) {
+        $corpusCheckArgs += @("--manifest", $activeManifestPath)
+    }
+    $corpusCheckArgs += "--json"
+    $corpusCheckJson = Invoke-JsonCommand -FilePath "uv" -WorkingDirectory $repoRoot -ArgumentList $corpusCheckArgs -TimeoutSeconds 300
+    if (-not $corpusCheckJson.ok) {
+        throw "Qualification active-corpus check-sdfdag validation failed"
+    }
+    $corpusCheckPath = Join-Path $validationDir "check-sdfdag-corpus.json"
+    $corpusCheckJson | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $corpusCheckPath
+
+    $assetCheckJson = Invoke-JsonCommand -FilePath "uv" -WorkingDirectory $repoRoot -ArgumentList @(
+        "run",
+        "--python", $PythonVersion,
+        "--project", (Join-Path $repoRoot "projects\environment"),
+        "navi-environment",
+        "check-sdfdag",
+        "--gmdag-file", $validationAsset,
+        "--json"
+    ) -TimeoutSeconds 300
+    if (-not $assetCheckJson.ok) {
+        throw "Qualification representative-asset check-sdfdag validation failed"
+    }
+    $assetCheckPath = Join-Path $validationDir "check-sdfdag-asset.json"
+    $assetCheckJson | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $assetCheckPath
+
+    $benchJson = Invoke-JsonCommand -FilePath "uv" -WorkingDirectory $repoRoot -ArgumentList @(
+        "run",
+        "--python", $PythonVersion,
+        "--project", (Join-Path $repoRoot "projects\environment"),
+        "navi-environment",
+        "bench-sdfdag",
+        "--gmdag-file", $validationAsset,
+        "--actors", "4",
+        "--steps", "100",
+        "--warmup-steps", "20",
+        "--azimuth-bins", "256",
+        "--elevation-bins", "48",
+        "--json"
+    ) -TimeoutSeconds 300
+    $benchPath = Join-Path $validationDir "bench-sdfdag-sample.json"
+    $benchJson | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $benchPath
+
+    $summary.validation = [ordered]@{
+        ok = $true
+        compiled_root = $activeCompiledRoot
+        manifest = $activeManifestPath
+        representative_asset = $validationAsset
+        corpus_check = $corpusCheckJson
+        asset_check = $assetCheckJson
+        benchmark = $benchJson
+    }
+    $summary.artifacts.corpus_check_json = $corpusCheckPath
+    $summary.artifacts.asset_check_json = $assetCheckPath
+    $summary.artifacts.benchmark_json = $benchPath
 
     $trainOut = Join-Path $logsDir "train_wrapper.out.log"
     $trainErr = Join-Path $logsDir "train_wrapper.err.log"

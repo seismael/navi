@@ -112,6 +112,18 @@ Environment-level expectations:
    not a promise of globally correct analytic SDF continuation beyond the
    compiled asset domain
 
+### 7.1 Runtime Correctness Targets
+
+The runtime validation target is not “kernel launches without crashing.”
+Canonical tests must continue to expand around these behaviors:
+
+- direct hits, grazing hits, and bounded misses against small analytic fixtures
+- exact or tolerance-bounded behavior for `max_steps`, hit epsilon, and outside-domain miss semantics
+- rejection of non-finite bounds and malformed tensor inputs before kernel launch
+- repeated batched execution with preallocated tensors to guard against silent shape or buffer-regression bugs
+
+Where a test can use an analytic reference or an independent small-scene evaluator, that oracle should be preferred over matching one Navi implementation against another.
+
 ## 8. What Is Stable vs. What Is Not
 
 Stable architectural expectations:

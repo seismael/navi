@@ -137,13 +137,15 @@ def test_scene_rotation_waits_for_configured_episode_budget() -> None:
     backend._episodes_in_scene = 15
     backend._scene_episodes_per_scene = 16
     backend._n_actors = 2
-    backend._actors = {
-        0: type("ActorState", (), {"spawn_position": (0.0, 0.0, 0.0)})(),
-        1: type("ActorState", (), {"spawn_position": (0.0, 0.0, 0.0)})(),
-    }
+    backend._device = torch.device("cpu")
+    backend._torch = torch
+    backend._spawn_positions = torch.zeros((2, 3), dtype=torch.float32)
 
     def _load_scene(_scene_path: str) -> list[tuple[float, float, float]]:
-        return [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
+        spawns = [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
+        for i, spawn in enumerate(spawns):
+            backend._spawn_positions[i].copy_(torch.tensor(spawn))
+        return spawns
 
     backend._load_scene = _load_scene  # type: ignore[assignment]
 
@@ -151,8 +153,8 @@ def test_scene_rotation_waits_for_configured_episode_budget() -> None:
 
     assert backend._scene_pool_idx == 1
     assert backend._episodes_in_scene == 0
-    assert backend._actors[0].spawn_position == (1.0, 2.0, 3.0)
-    assert backend._actors[1].spawn_position == (4.0, 5.0, 6.0)
+    assert torch.allclose(backend._spawn_positions[0], torch.tensor([1.0, 2.0, 3.0]))
+    assert torch.allclose(backend._spawn_positions[1], torch.tensor([4.0, 5.0, 6.0]))
 
 
 def test_cast_actor_batch_tensors_passes_environment_horizon() -> None:
@@ -185,7 +187,8 @@ def test_cast_actor_batch_tensors_passes_environment_horizon() -> None:
     backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
     backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
     backend._out_semantics = torch.empty((1, 1), dtype=torch.int32)
-    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._actor_yaws = torch.zeros((1,), dtype=torch.float32)
+    backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
@@ -220,7 +223,8 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
     backend._ray_dirs_world = torch.empty((1, 2, 3), dtype=torch.float32)
     backend._out_distances = torch.empty((1, 2), dtype=torch.float32)
     backend._out_semantics = torch.empty((1, 2), dtype=torch.int32)
-    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._actor_yaws = torch.zeros((1,), dtype=torch.float32)
+    backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
@@ -258,7 +262,8 @@ def test_cast_actor_batch_tensors_treats_exact_horizon_as_valid() -> None:
     backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
     backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
     backend._out_semantics = torch.empty((1, 1), dtype=torch.int32)
-    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._actor_yaws = torch.zeros((1,), dtype=torch.float32)
+    backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
@@ -294,7 +299,8 @@ def test_cast_actor_batch_tensors_clamps_negative_inside_solid_distances_to_zero
     backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
     backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
     backend._out_semantics = torch.empty((1, 1), dtype=torch.int32)
-    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._actor_yaws = torch.zeros((1,), dtype=torch.float32)
+    backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
@@ -327,7 +333,8 @@ def test_cast_actor_batch_tensors_rejects_wrong_output_dtype() -> None:
     backend._ray_dirs_world = torch.empty((1, 1, 3), dtype=torch.float32)
     backend._out_distances = torch.empty((1, 1), dtype=torch.float32)
     backend._out_semantics = torch.empty((1, 1), dtype=torch.int64)
-    backend._actors = {0: type("ActorState", (), {"pose": type("Pose", (), {"yaw": 0.0, "x": 0.0, "y": 0.0, "z": 0.0})()})()}
+    backend._actor_yaws = torch.zeros((1,), dtype=torch.float32)
+    backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 

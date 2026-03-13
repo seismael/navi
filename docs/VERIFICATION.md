@@ -61,6 +61,13 @@ stream, proves checkpoint resume from a produced periodic checkpoint, replays
 the captured session, proves passive attach on the replay PUB, and emits one
 JSON artifact under `artifacts/qualification/canonical_stack/`.
 
+Qualification is also expected to archive explicit SDF/DAG validation evidence
+for the active training corpus:
+
+- one `check-sdfdag --json` corpus-level proof for the active compiled root
+- one `check-sdfdag --json` representative-asset proof for the training corpus
+- one `bench-sdfdag --json` representative benchmark artifact at the canonical observation contract
+
 When invoked with `-EnableCorpusRefreshQualification`, the same script first
 runs `scripts/refresh-scene-corpus.ps1` into a sandboxed compiled corpus root
 under the run artifact and then trains against that refreshed corpus without
@@ -92,6 +99,13 @@ Important coverage includes:
 - child-mask and node-ordering invariants
 - documented payload precision checks against the actual stored format
 
+Required acceptance style for the canonical compiler surface:
+
+- analytic plane and axis-aligned box fixtures must assert distance error against explicit voxel-scale tolerances rather than only checking for nonzero output
+- repeated fixture compilation must assert byte-identical `.gmdag` output and stable node counts
+- malformed `.gmdag` assets must fail before runtime traversal with errors attributable to header, bounds, or pointer-layout corruption
+- integrity tests must be able to localize a failure to compiler generation versus loader validation instead of returning one generic corruption failure
+
 ### 3.5 Dataset And Transform Validation
 
 Dataset-adapter behavior must be verified explicitly rather than described only
@@ -116,6 +130,21 @@ Required proof style:
 - compare against current baselines and current bottleneck interpretation
 - report end-to-end impact, not just isolated kernel numbers
 - prefer structured `bench-sdfdag --json` summaries when capturing benchmark artifacts for comparison
+
+### 3.6.1 Validation Matrix
+
+Canonical SDF/DAG validation should be tracked in five explicit lanes:
+
+1. compiler correctness: analytic fixtures, determinism, hash/dedup invariants
+2. binary integrity: header validation, non-finite bounds rejection, pointer-layout rejection, trailing/truncated payload rejection
+3. runtime correctness: hit/miss/epsilon/max-step/origin-boundary behavior against analytic or independent reference expectations
+4. promoted-corpus proof: manifest parity, real-dataset-only validation, representative load and bench viability
+5. regression automation: qualification and nightly artifacts that preserve machine-readable evidence for the prior four lanes
+
+Each lane must emit pass/fail evidence that can be archived independently. The objective is not merely a green test run, but failure localization.
+
+Nightly automation should therefore preserve at least one artifact per lane when
+the canonical overnight flow runs.
 
 ## 4. Current Gaps Worth Closing
 
@@ -149,4 +178,3 @@ Use these rules instead:
 - `docs/PERFORMANCE.md`
 - `docs/SDFDAG_RUNTIME.md`
 - `docs/SIMULATION.md`
-- `PLAN.md`

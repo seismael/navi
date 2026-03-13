@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import queue
+import threading
 from dataclasses import dataclass, replace
 import logging
 import time
@@ -65,20 +67,22 @@ _SOFT_WARN_MAX_ZERO_WAIT: float = 0.20
 _SOFT_WARN_MAX_OPT_MS: float = 30_000.0
 
 
-def _safe_pub_send(
-    pub_socket: zmq.Socket[bytes] | None,
+def _enqueue_telemetry(
+    telemetry_queue: queue.Queue[tuple[str, bytes, str] | None] | None,
     *,
     topic: str,
     payload: bytes,
     label: str,
 ) -> None:
-    """Best-effort telemetry publish for attribution-only diagnostics."""
-    if pub_socket is None:
+    """Best-effort async telemetry enqueue."""
+    if telemetry_queue is None:
         return
     try:
-        pub_socket.send_multipart([topic.encode("utf-8"), payload])
-    except Exception as exc:  # pragma: no cover - transport/runtime defensive path
-        _LOGGER.warning("Skipping %s publish after send failure: %s", label, exc)
+        telemetry_queue.put_nowait((topic, payload, label))
+    except queue.Full:
+        _LOGGER.warning("Dropping %s publish: telemetry queue full", label)
+    except Exception as exc:  # pragma: no cover
+        _LOGGER.warning("Failed to enqueue %s: %s", label, exc)
 
 
 def _should_save_checkpoint(step_id: int, last_checkpoint_step: int, checkpoint_every: int) -> bool:
@@ -120,6 +124,9 @@ class PpoTrainingMetrics:
     telemetry_publish_ms_mean: float = 0.0
     tick_total_ms_mean: float = 0.0
     ppo_update_ms_mean: float = 0.0
+    ppo_inference_ms_mean: float = 0.0
+    ppo_optimization_ms_mean: float = 0.0
+    ppo_aux_ms_mean: float = 0.0
     wall_clock_seconds: float = 0.0
 
 
@@ -174,7 +181,6 @@ class PpoTrainer:
     ) -> None:
         self._config = config
         self._ctx: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
-        self._pub_socket: zmq.Socket[bytes] | None = None
         self._runtime = runtime
         self._gmdag_file = gmdag_file
         self._scene_pool = scene_pool
@@ -279,7 +285,43 @@ class PpoTrainer:
         self._last_opt_duration_ms: float = 0.0
         self._opt_duration_acc: float = 0.0
         self._opt_duration_count: int = 0
+        self._opt_inference_acc: float = 0.0
+        self._opt_optimization_acc: float = 0.0
+        self._opt_aux_acc: float = 0.0
         self._last_opt_metrics: PpoMetrics | None = None
+
+        # Phase 11: Async Telemetry
+        self._telemetry_queue: queue.Queue[tuple[str, bytes, str] | None] = queue.Queue(maxsize=1024)
+        self._telemetry_thread: threading.Thread | None = None
+
+    def _telemetry_worker(self) -> None:
+        """Background thread for non-blocking ZMQ telemetry emission (Phase 11)."""
+        import zmq
+        # Create a dedicated context and socket for this thread
+        ctx = zmq.Context()
+        pub = ctx.socket(zmq.PUB)
+        pub.bind(self._config.pub_address)
+        
+        _LOGGER.info("Async telemetry worker started on %s", self._config.pub_address)
+        
+        while True:
+            item = self._telemetry_queue.get()
+            if item is None: # Sentinel for shutdown
+                break
+            
+            topic, payload, label = item
+            try:
+                # Use NOBLOCK to ensure we never stall the queue consumer 
+                # (though here the consumer IS the thread, so we're protecting the queue)
+                pub.send_multipart([topic.encode("utf-8"), payload], flags=zmq.NOBLOCK)
+            except Exception as exc:
+                _LOGGER.warning("Telemetry send failure (%s): %s", label, exc)
+            finally:
+                self._telemetry_queue.task_done()
+        
+        pub.close(linger=0)
+        ctx.term()
+        _LOGGER.info("Async telemetry worker stopped")
 
     def _sync_rollout_policy(self) -> None:
         """Copy weights from learner_policy to rollout_policy with thread safety."""
@@ -296,7 +338,10 @@ class PpoTrainer:
         minibatch_size: int,
         seq_len: int,
     ) -> None:
-        t_opt = time.perf_counter()
+        t_opt_start = time.perf_counter()
+        
+        # PPO Inference sub-stage (GAE + advantage calculation)
+        t_inf_start = time.perf_counter()
         with torch.no_grad():
             b_obs = obs_batch.to(self._device)
             b_aux = aux_batch.to(self._device)
@@ -304,7 +349,11 @@ class PpoTrainer:
             self._learner_policy.eval()
             _, _, b_val, _, _ = self._learner_policy.forward(b_obs, None, aux_tensor=b_aux)
             multi_buffer.compute_returns_and_advantages(last_values=b_val)
+        inf_ms = (time.perf_counter() - t_inf_start) * 1000
+        self._opt_inference_acc += inf_ms
 
+        # PPO Optimization sub-stage (The actual loss.backward() and optimizer.step() loop)
+        t_train_start = time.perf_counter()
         self._learner_policy.train()
         self._last_opt_metrics = self._learner.train_ppo_epoch(
             self._learner_policy,
@@ -315,18 +364,30 @@ class PpoTrainer:
             rnd=self._rnd,
             progress_callback=lambda: self._maybe_publish_dashboard_heartbeat(step_id=self._total_sim_steps),
         )
-        self._sync_rollout_policy()
+        opt_ms = (time.perf_counter() - t_train_start) * 1000
+        self._opt_optimization_acc += opt_ms
 
-        ms = (time.perf_counter() - t_opt) * 1000
-        self._last_opt_duration_ms = ms
-        self._opt_duration_acc += ms
+        # PPO Aux sub-stage (Metrics, logging, and checkpointing overhead)
+        t_aux_start = time.perf_counter()
+        self._sync_rollout_policy()
+        multi_buffer.clear()
+        aux_ms = (time.perf_counter() - t_aux_start) * 1000
+        self._opt_aux_acc += aux_ms
+
+        total_ms = (time.perf_counter() - t_opt_start) * 1000
+        self._last_opt_duration_ms = total_ms
+        self._opt_duration_acc += total_ms
         self._opt_duration_count += 1
+        
         if self._last_opt_metrics is None:
-            _LOGGER.info("Inline PPO optimization completed in %.2fms. Weights synced.", ms)
+            _LOGGER.info("Inline PPO optimization completed in %.2fms. Weights synced.", total_ms)
         else:
             _LOGGER.info(
-                "Inline PPO optimization completed in %.2fms (prep=%.2fms eval=%.2fms bwd=%.2fms clip=%.2fms opt=%.2fms rnd=%.2fms). Weights synced.",
-                ms,
+                "Inline PPO optimization completed in %.2fms (inf=%.2fms opt=%.2fms aux=%.2fms | prep=%.2fms eval=%.2fms bwd=%.2fms clip=%.2fms optim=%.2fms rnd=%.2fms). Weights synced.",
+                total_ms,
+                inf_ms,
+                opt_ms,
+                aux_ms,
                 self._last_opt_metrics.minibatch_prep_ms,
                 self._last_opt_metrics.policy_eval_ms,
                 self._last_opt_metrics.backward_ms,
@@ -334,25 +395,24 @@ class PpoTrainer:
                 self._last_opt_metrics.optimizer_step_ms,
                 self._last_opt_metrics.rnd_step_ms,
             )
-        if ms > _SOFT_WARN_MAX_OPT_MS:
+        if total_ms > _SOFT_WARN_MAX_OPT_MS:
             _LOGGER.warning(
                 "Soft stall monitor: optimizer wall-time high (%.1fms > %.1fms)",
-                ms,
+                total_ms,
                 _SOFT_WARN_MAX_OPT_MS,
             )
-        multi_buffer.clear()
 
     def start(self) -> None:
         """Initialize trainer resources for the canonical runtime."""
-        pub = self._ctx.socket(zmq.PUB)
-        pub.bind(self._config.pub_address)
-        self._pub_socket = pub
-
         if self._runtime is None:
             raise RuntimeError("Canonical sdfdag runtime is not configured")
 
+        # Start background telemetry thread
+        self._telemetry_thread = threading.Thread(target=self._telemetry_worker, daemon=True)
+        self._telemetry_thread.start()
+
         _LOGGER.info(
-            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s",
+            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s (async)",
             self._n_actors,
             self._gmdag_file or "<state-only>",
             self._config.pub_address,
@@ -360,15 +420,17 @@ class PpoTrainer:
 
     def stop(self) -> None:
         """Close trainer transport resources."""
+        # Stop telemetry thread first
+        if self._telemetry_thread:
+            self._telemetry_queue.put(None)
+            self._telemetry_thread.join(timeout=2.0)
+            self._telemetry_thread = None
+
         if self._runtime is not None:
             with contextlib.suppress(Exception):
                 self._runtime.close()
         self._runtime = None
-        for sock in (self._pub_socket,):
-            if sock:
-                with contextlib.suppress(Exception):
-                    sock.close()
-        self._pub_socket = None
+        
         with contextlib.suppress(Exception):
             self._ctx.term()
 
@@ -453,13 +515,12 @@ class PpoTrainer:
             return
         self._last_dashboard_observation = observation
         self._last_dashboard_heartbeat_at = time.perf_counter()
-        if self._pub_socket:
-            _safe_pub_send(
-                self._pub_socket,
-                topic=TOPIC_DISTANCE_MATRIX,
-                payload=serialize(observation),
-                label="observation",
-            )
+        _enqueue_telemetry(
+            self._telemetry_queue,
+            topic=TOPIC_DISTANCE_MATRIX,
+            payload=serialize(observation),
+            label="observation",
+        )
 
     def _publish_dashboard_observations(self, observations: dict[int, DistanceMatrix]) -> None:
         """Publish selector-visible observations without reusing telemetry sparsity rules."""
@@ -478,8 +539,6 @@ class PpoTrainer:
         """Re-publish the last observation while PPO optimization is running."""
         if not self._config.emit_observation_stream:
             return
-        if not self._pub_socket:
-            return
         observation = self._last_dashboard_observation
         if observation is None:
             return
@@ -494,8 +553,8 @@ class PpoTrainer:
         )
         self._last_dashboard_observation = heartbeat
         self._last_dashboard_heartbeat_at = now_perf
-        _safe_pub_send(
-            self._pub_socket,
+        _enqueue_telemetry(
+            self._telemetry_queue,
             topic=TOPIC_DISTANCE_MATRIX,
             payload=serialize(heartbeat),
             label="dashboard heartbeat",
@@ -519,8 +578,6 @@ class PpoTrainer:
     def _publish_step_telemetry(self, *, step_id: int, episode_id: int, actor_id: int, **kwargs: Any) -> None:
         if not self._config.emit_training_telemetry:
             return
-        if not self._pub_socket:
-            return
         if not self._should_publish_actor_telemetry(actor_id):
             return
         p = np.array([kwargs.get(k, 0.0) for k in [
@@ -531,8 +588,8 @@ class PpoTrainer:
                      "collision_reward"]], dtype=np.float32)
         event = TelemetryEvent(event_type="actor.training.ppo.step", episode_id=episode_id, env_id=actor_id,
                                step_id=step_id, payload=p, timestamp=time.time())
-        _safe_pub_send(
-            self._pub_socket,
+        _enqueue_telemetry(
+            self._telemetry_queue,
             topic=TOPIC_TELEMETRY_EVENT,
             payload=serialize(event),
             label="step telemetry",
@@ -540,8 +597,6 @@ class PpoTrainer:
 
     def _publish_update_telemetry(self, step_id: int, reward_ema: float, metrics: PpoMetrics) -> None:
         if not self._config.emit_training_telemetry:
-            return
-        if not self._pub_socket:
             return
         p = np.array([reward_ema, metrics.policy_loss, metrics.value_loss, metrics.entropy, metrics.approx_kl,
                      metrics.clip_fraction, metrics.total_loss, metrics.rnd_loss, self._reward_shaper.beta], dtype=np.float32)
@@ -553,8 +608,8 @@ class PpoTrainer:
             payload=p,
             timestamp=time.time(),
         )
-        _safe_pub_send(
-            self._pub_socket,
+        _enqueue_telemetry(
+            self._telemetry_queue,
             topic=TOPIC_TELEMETRY_EVENT,
             payload=serialize(event),
             label="update telemetry",
@@ -563,15 +618,13 @@ class PpoTrainer:
     def _publish_episode_telemetry(self, *, step_id: int, episode_id: int, actor_id: int, **kwargs: Any) -> None:
         if not self._config.emit_training_telemetry:
             return
-        if not self._pub_socket:
-            return
         if not self._should_publish_actor_telemetry(actor_id):
             return
         p = np.array([kwargs["episode_return"], float(kwargs["episode_length"])], dtype=np.float32)
         event = TelemetryEvent(event_type="actor.training.ppo.episode", episode_id=episode_id, env_id=actor_id,
                                step_id=step_id, payload=p, timestamp=time.time())
-        _safe_pub_send(
-            self._pub_socket,
+        _enqueue_telemetry(
+            self._telemetry_queue,
             topic=TOPIC_TELEMETRY_EVENT,
             payload=serialize(event),
             label="episode telemetry",
@@ -580,15 +633,14 @@ class PpoTrainer:
     def _publish_perf_telemetry(self, *, step_id: int, **kwargs: Any) -> None:
         if not self._config.emit_perf_telemetry:
             return
-        if not self._pub_socket:
-            return
-        p = np.array([kwargs[k] for k in ["sps", "forward_pass_ms", "batch_step_ms", "memory_query_ms",
+        p = np.array([kwargs.get(k, 0.0) for k in ["sps", "forward_pass_ms", "batch_step_ms", "memory_query_ms",
                      "transition_ms", "tick_total_ms", "zero_wait_ratio", "ppo_update_ms",
-                     "host_extract_ms", "telemetry_publish_ms"]], dtype=np.float32)
+                     "host_extract_ms", "telemetry_publish_ms", "ppo_inference_ms",
+                     "ppo_optimization_ms", "ppo_aux_ms"]], dtype=np.float32)
         event = TelemetryEvent(event_type="actor.training.ppo.perf", episode_id=0, env_id=int(self._config.telemetry_actor_id), step_id=step_id,
                                payload=p, timestamp=time.time())
-        _safe_pub_send(
-            self._pub_socket,
+        _enqueue_telemetry(
+            self._telemetry_queue,
             topic=TOPIC_TELEMETRY_EVENT,
             payload=serialize(event),
             label="perf telemetry",
@@ -597,8 +649,6 @@ class PpoTrainer:
     def _publish_runtime_perf(self, *, step_id: int) -> None:
         """Publish coarse runtime perf from the canonical sdfdag backend."""
         if not self._config.emit_perf_telemetry:
-            return
-        if not self._pub_socket:
             return
 
         try:
@@ -626,8 +676,8 @@ class PpoTrainer:
             payload=payload,
             timestamp=time.time(),
         )
-        _safe_pub_send(
-            self._pub_socket,
+        _enqueue_telemetry(
+            self._telemetry_queue,
             topic=TOPIC_TELEMETRY_EVENT,
             payload=serialize(event),
             label="runtime perf telemetry",
@@ -756,8 +806,6 @@ class PpoTrainer:
     def _selected_episode_telemetry_actor_indices(self, done_indices: torch.Tensor) -> torch.Tensor:
         """Return only the done actors whose episode telemetry will be published."""
         if not self._config.emit_training_telemetry:
-            return done_indices[:0]
-        if self._pub_socket is None:
             return done_indices[:0]
         if self._config.telemetry_all_actors:
             return done_indices
@@ -1089,4 +1137,7 @@ class PpoTrainer:
                                   telemetry_publish_ms_mean=(acc_tel / max(1, t_cnt)),
                                   tick_total_ms_mean=(acc_tick / max(1, t_cnt)),
                                   ppo_update_ms_mean=(self._opt_duration_acc / max(1, self._opt_duration_count)),
+                                  ppo_inference_ms_mean=(self._opt_inference_acc / max(1, self._opt_duration_count)),
+                                  ppo_optimization_ms_mean=(self._opt_optimization_acc / max(1, self._opt_duration_count)),
+                                  ppo_aux_ms_mean=(self._opt_aux_acc / max(1, self._opt_duration_count)),
                                   wall_clock_seconds=(time.perf_counter() - t_start))

@@ -456,6 +456,12 @@ def write_gmdag(path: str | Path, dag: np.ndarray, resolution: int, bbox_min: np
     if bbox.shape != (3,):
         msg = "bbox_min must be a length-3 vector"
         raise ValueError(msg)
+    if not bool(np.isfinite(float(voxel_size))):
+        msg = "voxel_size must be finite"
+        raise ValueError(msg)
+    if not bool(np.all(np.isfinite(bbox))):
+        msg = "bbox_min must contain only finite values"
+        raise ValueError(msg)
 
     header = struct.pack(
         "<4sIIffffI",
