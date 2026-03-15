@@ -150,6 +150,7 @@ Additional canonical validation targets for this refactor include:
 - corrupted header and payload rejection tests
 - deterministic output checks for golden fixtures
 - child-mask and node-ordering invariant tests
+- reusable oracle fixture compilation checks so one known source mesh can be reused across compiler, runtime, actor-seam, and auditor validation
 
 ### 8.1 Compiler Acceptance Criteria
 
@@ -160,6 +161,7 @@ The compiler layer is accepted only when all of the following are true for the a
 - deduplication tests prove that a hash collision cannot merge structurally distinct nodes
 - serialization tests prove that non-finite bounds and nonpositive voxel sizes are rejected before file emission
 - environment-side loading proves malformed child-pointer layouts are rejected before CUDA traversal begins
+- small source fixtures with known openings or view structure must publish expected bounds and deterministic compile metadata even when higher-fidelity geometric oracle checks also exist downstream
 
 This means the compiler contract is both geometric and binary. Passing only one of those categories is insufficient.
 

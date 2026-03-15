@@ -19,7 +19,9 @@
 param(
     [string]$CudaTag = "cu121",
   [string]$TorchVersion = "2.5.1",
-  [switch]$SkipActorSync
+  [switch]$SkipActorSync,
+  [switch]$InstallFusedTemporal,
+  [string]$FusedWheelPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,9 +98,32 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipActorSync) {
-    Write-Host "Syncing actor project dependencies (canonical mambapy runtime)..."
+  Write-Host "Syncing actor project dependencies (canonical Windows-friendly Mamba runtime metadata)..."
     uv sync --project $actorProject --python 3.12
     if ($LASTEXITCODE -ne 0) {
         throw "Actor dependency sync failed with exit code $LASTEXITCODE"
     }
+}
+
+if ($InstallFusedTemporal) {
+  $causalPath = Join-Path $repoRoot "third_party/mamba-for-windows/causal-conv1d-1.4.0"
+  $mambaPath = Join-Path $repoRoot "third_party/mamba-for-windows/mamba-2.2.2"
+  if (-not [string]::IsNullOrWhiteSpace($FusedWheelPath)) {
+    if (-not (Test-Path $FusedWheelPath)) {
+      throw "Fused wheel not found: $FusedWheelPath"
+    }
+    Write-Host "Installing optional future fused temporal runtime from wheel: $FusedWheelPath"
+    uv pip install --python $py --force-reinstall $FusedWheelPath
+  }
+  elseif ($env:OS -eq "Windows_NT") {
+    Write-Host "Installing optional future fused temporal runtime from vendored Windows sources..."
+    uv pip install --python $py --no-build-isolation $causalPath $mambaPath
+  }
+  else {
+    Write-Host "Installing optional future fused temporal runtime from published wheels..."
+    uv pip install --python $py --upgrade "causal-conv1d>=1.4.0" "mamba-ssm>=2.2.2"
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "Fused temporal dependency install failed with exit code $LASTEXITCODE"
+  }
 }

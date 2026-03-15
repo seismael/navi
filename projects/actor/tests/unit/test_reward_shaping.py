@@ -124,6 +124,39 @@ def test_shape_batch() -> None:
     assert (totals > 0).all()
 
 
+def test_shape_batch_matches_disabled_compile_path() -> None:
+    """Disabling torch.compile should preserve batch reward semantics."""
+    shaper = _make_shaper(
+        collision_penalty=-3.0,
+        existential_tax=-0.02,
+        velocity_weight=0.25,
+        intrinsic_coeff_init=0.5,
+        loop_penalty_coeff=0.75,
+        loop_threshold=0.8,
+        torch_compile=False,
+    )
+    totals = shaper.shape_batch(
+        raw_rewards=torch.tensor([1.0, 2.0]),
+        dones=torch.tensor([False, True]),
+        forward_velocities=torch.tensor([2.0, -1.0]),
+        angular_velocities=torch.tensor([0.0, 3.0]),
+        intrinsic_rewards=torch.tensor([0.4, 0.2]),
+        loop_similarities=torch.tensor([0.7, 0.95]),
+    )
+    expected = torch.tensor([
+        1.0 - 0.02 + (0.25 * 2.0) + (0.5 * 0.4),
+        2.0 - 3.0 - 0.02 + 0.0 + (0.5 * 0.2) - (0.75 * (0.95 - 0.8)),
+    ])
+    assert torch.allclose(totals, expected)
+
+
+def test_compile_status_reports_disabled_request() -> None:
+    """The shaper should expose requested vs active compile state for attribution."""
+    shaper = _make_shaper(torch_compile=False)
+    assert shaper.torch_compile_requested is False
+    assert shaper.torch_compile_enabled is False
+
+
 def test_step_batch_matches_repeated_single_steps() -> None:
     """Batch step advancement should match repeated scalar step() calls."""
     shaper_a = _make_shaper(

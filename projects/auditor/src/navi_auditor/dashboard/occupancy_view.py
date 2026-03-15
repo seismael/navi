@@ -292,7 +292,7 @@ class OccupancyMap:
             rgx_m = rgx[rm]
             rgz_m = rgz[rm]
             free_cells = self._occ[rgz_m, rgx_m] == 0
-            self._occ[rgz_m[free_cells], rgz_m[free_cells]] = 1
+            self._occ[rgz_m[free_cells], rgx_m[free_cells]] = 1
 
     # ── rendering ────────────────────────────────────────────────────
 

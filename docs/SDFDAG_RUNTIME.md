@@ -121,6 +121,7 @@ Canonical tests must continue to expand around these behaviors:
 - exact or tolerance-bounded behavior for `max_steps`, hit epsilon, and outside-domain miss semantics
 - rejection of non-finite bounds and malformed tensor inputs before kernel launch
 - repeated batched execution with preallocated tensors to guard against silent shape or buffer-regression bugs
+- shared oracle-view fixtures that pin known spherical depth profiles to named poses so environment, actor, and auditor layers consume the same expected ray truth
 
 Where a test can use an analytic reference or an independent small-scene evaluator, that oracle should be preferred over matching one Navi implementation against another.
 
@@ -146,12 +147,24 @@ Those remain benchmark-gated experiments.
 Performance work on this stack should assume:
 
 - reusable buffers are preferred over per-step allocation
+- `torch_sdf.cast_rays()` is the CUDA boundary; tensor-only direction prep, output normalization, kinematics, and reward helper graphs around that boundary are valid `torch.compile` targets on the canonical path
 - canonical action-tensor stepping must keep command rows on device rather than bouncing CUDA actions through NumPy
 - reset handling should batch state reinitialization and initial observation seeding for all selected actors instead of walking the CUDA reset mask actor-by-actor
 - collision rollback on the canonical tensor path should restore the previous safe pose without launching a second collided-subset ray cast in the same tick
 - materialization for dashboards and telemetry should be selective
 - host extraction should be batched and coarse when unavoidable
 - any optimization that helps only the kernel but regresses trainer dataflow is incomplete
+
+Important limit:
+
+- `torch.compile` does not optimize the internal DAG traversal inside `projects/torch-sdf/cpp_src/kernel.cu`; deeper traversal caching remains a separate CUDA/runtime project with its own correctness and benchmark gates
+- the compiled tensor-helper path also depends on the active GPU/compiler stack; on unsupported devices such as the current `sm_61` MX150 surface, Navi now warns and keeps the eager tensor helper path active
+
+Current traversal reuse notes:
+
+- the CUDA kernel now checks a cached resolved leaf cell before any DAG descent so repeated march samples that stay inside one deep leaf can return the same packed distance and semantic payload immediately
+- when the next sample leaves that leaf cell, the kernel still falls back to the existing fixed-depth internal-prefix cache before resuming full descent from the root
+- these reuse layers are runtime-only hot-path optimizations; they do not change the `.gmdag` binary contract or Python binding surface
 
 ## 10. Related Docs
 

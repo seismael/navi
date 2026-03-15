@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
 __all__: list[str] = ["RewardShaper", "ShapedReward"]
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _shape_batch_impl(
+    raw_rewards: Tensor,
+    dones: Tensor,
+    forward_velocities: Tensor,
+    intrinsic_rewards: Tensor,
+    loop_similarities: Tensor,
+    collision_penalty: float,
+    existential_tax: float,
+    velocity_weight: float,
+    beta: float,
+    loop_penalty_coeff: float,
+    loop_threshold: float,
+) -> Tensor:
+    col_penalties = torch.where(
+        dones.bool(),
+        torch.full_like(raw_rewards, collision_penalty),
+        torch.zeros_like(raw_rewards),
+    )
+    vel_bonus = velocity_weight * forward_velocities.clamp(min=0.0)
+    intrinsic = beta * intrinsic_rewards
+    loop_pen = loop_penalty_coeff * (loop_similarities - loop_threshold).clamp(min=0.0)
+    return raw_rewards + col_penalties + existential_tax + vel_bonus + intrinsic - loop_pen
 
 
 @dataclass(frozen=True)
@@ -58,6 +85,7 @@ class RewardShaper:
         intrinsic_anneal_steps: int = 500_000,
         loop_penalty_coeff: float = 0.5,
         loop_threshold: float = 0.85,
+        torch_compile: bool = True,
     ) -> None:
         self._collision_penalty = collision_penalty
         self._existential_tax = existential_tax
@@ -68,6 +96,45 @@ class RewardShaper:
         self._lambda_loop = loop_penalty_coeff
         self._tau = loop_threshold
         self._global_step = 0
+        self._torch_compile_requested = bool(torch_compile)
+        self._torch_compile_enabled = False
+        self._shape_batch_fn = _shape_batch_impl
+        if self._torch_compile_requested:
+            compile_fn = getattr(torch, "compile", None)
+            if compile_fn is None:
+                _LOGGER.warning(
+                    "RewardShaper: torch.compile requested but unavailable; using eager batch shaping path",
+                )
+            elif not torch.cuda.is_available():
+                _LOGGER.info(
+                    "RewardShaper: torch.compile requested but CUDA is unavailable; using eager batch shaping path",
+                )
+            else:
+                capability = tuple(int(value) for value in torch.cuda.get_device_capability())
+                if capability < (7, 0):
+                    _LOGGER.warning(
+                        "RewardShaper: torch.compile requested but disabled on %s (sm_%d%d); using eager batch shaping path",
+                        torch.cuda.get_device_name(),
+                        capability[0],
+                        capability[1],
+                    )
+                else:
+                    self._shape_batch_fn = compile_fn(
+                        _shape_batch_impl,
+                        fullgraph=False,
+                        dynamic=False,
+                        mode="reduce-overhead",
+                    )
+                    self._torch_compile_enabled = True
+                    _LOGGER.info("RewardShaper: torch.compile enabled for tensor-only batch shaping path")
+
+    @property
+    def torch_compile_requested(self) -> bool:
+        return self._torch_compile_requested
+
+    @property
+    def torch_compile_enabled(self) -> bool:
+        return self._torch_compile_enabled
 
     @property
     def beta(self) -> float:
@@ -160,22 +227,18 @@ class RewardShaper:
             (B,) tensor of total shaped rewards.
 
         """
-        col_penalties = torch.where(
-            dones.bool(),
-            torch.full_like(raw_rewards, self._collision_penalty),
-            torch.zeros_like(raw_rewards),
-        )
-
-        tax = self._existential_tax
         del angular_velocities
-        vel_bonus = self._velocity_weight * forward_velocities.clamp(min=0.0)
-
-        beta = self.beta
-        intrinsic = beta * intrinsic_rewards
-
-        loop_pen = self._lambda_loop * (loop_similarities - self._tau).clamp(min=0.0)
-
-        total: Tensor = (
-            raw_rewards + col_penalties + tax + vel_bonus + intrinsic - loop_pen
+        total: Tensor = self._shape_batch_fn(
+            raw_rewards,
+            dones,
+            forward_velocities,
+            intrinsic_rewards,
+            loop_similarities,
+            self._collision_penalty,
+            self._existential_tax,
+            self._velocity_weight,
+            self.beta,
+            self._lambda_loop,
+            self._tau,
         )
         return total

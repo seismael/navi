@@ -29,6 +29,7 @@ uv run navi-environment compile-gmdag --source ../../data/scenes/hssd/102343992.
 # Runtime checks
 uv run navi-environment check-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/apartment_1.gmdag
 uv run navi-environment bench-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/apartment_1.gmdag --actors 4 --steps 200
+uv run navi-environment bench-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/apartment_1.gmdag --actors 4 --steps 200 --no-torch-compile
 ```
 
 ## Windows Wrapper
@@ -43,6 +44,8 @@ uv run navi-environment bench-sdfdag --gmdag-file ../../artifacts/gmdag/corpus/a
 - `5560` REP: `step_request_v2` / `step_result_v2`
 
 ## Validation
+
+Canonical environment hot-path fusion is enabled by default through `NAVI_SDFDAG_TORCH_COMPILE=1`. Use `--no-torch-compile` on `bench-sdfdag` or set `NAVI_SDFDAG_TORCH_COMPILE=0` only for A/B attribution runs. On GPUs that current inductor/triton cannot compile for, Navi logs a warning and continues on the eager tensor path.
 
 ```bash
 uv run ruff check .

@@ -176,7 +176,7 @@ def test_multi_trajectory_sampling_normalizes_advantages_once() -> None:
     flat_batches = list(buffer.sample_minibatches(batch_size=4, seq_len=0))
     seq_batches = list(buffer.sample_minibatches(batch_size=4, seq_len=2))
 
-    normalized = cast(torch.Tensor, buffer._all_advantages_normalized)
+    normalized = cast("torch.Tensor", buffer._all_advantages_normalized)
     flat_advs = torch.cat([mb.advantages for mb in flat_batches]).sort().values
     seq_advs = torch.cat([mb.advantages for mb in seq_batches]).sort().values
     expected = normalized.flatten().sort().values
@@ -332,8 +332,7 @@ def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
     assert first.sequence_observations.shape == (2, 2, 3, 16, 8)
     assert first.sequence_actions is not None
     assert first.sequence_actions.shape == (2, 2, 4)
-    assert first.dones is not None
-    assert first.dones.shape == (2, 2)
+    assert first.dones is None
     assert first.sequence_aux_tensors is not None
     assert first.sequence_aux_tensors.shape == (2, 2, 3)
 

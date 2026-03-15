@@ -210,9 +210,9 @@ The current production direction for trainer-side throughput is:
 - keep PPO update attribution on the canonical learner path with explicit sub-stage means for minibatch prep, policy evaluation, backward, gradient clip, optimizer step, and RND step
 - when `seq_len > 0`, canonical PPO minibatches must already carry sequence-native observation, action, and auxiliary views rather than asking the learner to rebuild them from flat tensors
 - canonical rollout buffers must normalize advantages once per finalized rollout and reuse that cached tensor across PPO epochs rather than re-normalizing during each sampling pass or leaving the batched path raw
-- the active `Mamba2TemporalCore` ignores hidden state, so canonical PPO learner minibatch prep must not rebuild or copy hidden-state batches on the update path
-- the active `Mamba2TemporalCore` also ignores rollout hidden state, so the canonical trainer must not carry, reset, store, or bootstrap `hidden_batch` tensors on the rollout/update hot path
-- because the canonical temporal core does not consume hidden starts, batched rollout buffers and minibatches must not allocate hidden-state slabs or emit hidden-state minibatch fields on the canonical PPO path
+- canonical PPO learner minibatch prep must not rebuild or copy hidden-state batches on the update path while the production trainer keeps one hidden-free sequence seam across supported temporal backends
+- canonical trainer rollout code should keep hidden-state storage out of the hot path unless a benchmark-proven production path requires it for correctness
+- batched rollout buffers and minibatches should avoid hidden-state slabs on the canonical path while still preserving the recurrent API seam for supported alternate backends and future promotions
 - when `MultiTrajectoryBuffer` is running in its canonical batched mode (`capacity` set), it must not also allocate per-actor fallback `TrajectoryBuffer` wrappers; the production rollout store is the batched slab itself
 - completed-episode host extraction must happen only for actors whose sparse episode telemetry will actually be published; canonical reset bookkeeping for done actors stays on-device
 - initial tensor resets and live runtime steps must materialize `DistanceMatrix` observations only for actors whose dashboard observation stream will actually publish; when observation streaming is disabled, canonical training must request no published observations at all
@@ -222,16 +222,68 @@ orchestration above the already-batched CUDA environment step.
 
 ## 10. Temporal Core
 
-**Module:** `mamba_core.py`
+**Module:** `cognitive_policy.py`
 
-Current canonical runtime uses `mambapy` Mamba on the active Windows CUDA
-profile.
+Canonical runtime now exposes one controlled selector on the same sacred actor topology: `gru` is the default backend and `mambapy` remains the supported comparison backend.
 
 Current architectural status:
 
-- one canonical temporal backend in production
-- benchmark-gated comparison tooling is allowed outside the production path
-- no runtime fallback branch on the production trainer
+- one canonical actor topology and one canonical trainer surface in production
+- all production training and inference surfaces share the same temporal-core selector contract
+- `gru` is the default backend on the active Windows machine
+- `mambapy` is a supported alternate backend for controlled comparisons on that same surface
+- fused Mamba-2 remains a future re-promotion target, not the current production dependency
+
+### 10.1 Why GRU Is Canonical Right Now
+
+The temporal core now sits directly on the actor's hottest remaining wall-clock
+path: `CognitiveMambaPolicy.evaluate_sequence()` during PPO BPTT updates.
+
+Recent profiling established three facts:
+
+- the environment hot path is already fast enough to sustain roughly `~110 SPS`
+- rollout-buffer sequence materialization is no longer the dominant PPO cost
+- a large fraction of PPO optimizer wall time remains on the host even after
+  CUDA-event timing isolates true device execution
+
+The current repository decision is to promote native cuDNN GRU on the active
+Windows machine because repeated bounded trainer runs now show a real
+end-to-end throughput win over `mambapy` on the same canonical surface, while
+still requiring no extra native build or fused-wheel dependency.
+
+This decision does not imply that the temporal core is free. The remaining
+throughput ceiling must still be investigated through real trainer attribution,
+because the optimizer path, rollout cadence, telemetry cadence, and scene-level
+environment variance all continue to contribute wall-clock cost on top of the
+active Mamba sequence path.
+
+That is why the cuDNN GRU path is the active canonical runtime now. It keeps
+one production temporal path, improves trainer throughput on the machine we
+actually use, and preserves the same selector contract for continued bounded
+comparisons against `mambapy` and future fused candidates.
+
+### 10.2 Canonical Enforcement
+
+The selector contract is now the architecture policy, not ad hoc tuning.
+
+- canonical actor environments must expose one temporal-core selector across config, CLI, and wrappers
+- `gru` remains the default backend on the active Windows machine and must continue to work with no extra extension build requirement
+- `mambapy` is supported only through that same selector on the same canonical trainer and serve surfaces
+- fused `mamba-ssm` remains a migration target and may be benchmarked, but it is not part of the current supported production selector set
+
+### 10.3 How To Switch Back Later
+
+When the proper environment and hardware are available, restoring fused Mamba-2
+should be done deliberately, not ad hoc.
+
+The future upgrade checklist is:
+
+- install a compatible fused `mamba-ssm` + `causal-conv1d` stack or wheel for the actor environment
+- verify import and runtime on the actual training machine
+- swap the active temporal-core implementation in `cognitive_policy.py` from `MambapyTemporalCore` to the fused runtime
+- rerun the temporal bakeoff on CUDA, including the active Mamba path and fused candidates
+- rerun the bounded 4-actor canonical training surface and PPO attribution pass
+- promote fused Mamba-2 back into the documentation only after the real trainer proves the win on the supported environment
 
 The temporal core remains critical because it gives the actor memory across
 partial observability without reopening transformer-scale quadratic costs.

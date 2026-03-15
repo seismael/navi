@@ -46,6 +46,24 @@ def test_ppo_epoch_returns_metrics() -> None:
     assert metrics.grad_clip_ms >= 0.0
     assert metrics.optimizer_step_ms >= 0.0
     assert metrics.rnd_step_ms >= 0.0
+    assert metrics.post_update_stats_ms >= 0.0
+    assert metrics.update_loop_overhead_ms >= 0.0
+    assert metrics.epoch_finalize_ms >= 0.0
+    assert metrics.epoch_setup_ms >= 0.0
+    assert metrics.policy_optimizer_init_ms >= 0.0
+    assert metrics.rnd_optimizer_init_ms >= 0.0
+    assert metrics.policy_train_mode_ms >= 0.0
+    assert metrics.policy_param_cache_ms >= 0.0
+    assert metrics.setup_overhead_ms >= 0.0
+    assert metrics.epoch_total_ms >= metrics.epoch_finalize_ms
+    assert metrics.policy_eval_device_ms_total == 0.0
+    assert metrics.backward_device_ms_total == 0.0
+    assert metrics.optimizer_step_device_ms_total == 0.0
+    assert metrics.n_updates > 0
+    assert metrics.policy_eval_ms_total >= metrics.policy_eval_ms
+    assert metrics.optimizer_step_ms_total >= metrics.optimizer_step_ms
+    assert metrics.post_update_stats_ms_total >= metrics.post_update_stats_ms
+    assert metrics.update_loop_overhead_ms_total >= metrics.update_loop_overhead_ms
 
 
 def test_materialize_metric_means_packs_epoch_metrics_once() -> None:
@@ -94,6 +112,28 @@ def test_ppo_clip_fraction_bounded() -> None:
     assert 0.0 <= metrics.clip_fraction <= 1.0
 
 
+def test_ppo_epoch_can_skip_summary_scalar_materialization() -> None:
+    """Canonical trainer may skip epoch-end scalar host sync when update telemetry is off."""
+    policy = CognitiveMambaPolicy(embedding_dim=128)
+    learner = PpoLearner(learning_rate=1e-3)
+    buf = _fill_buffer(64)
+
+    metrics = learner.train_ppo_epoch(
+        policy,
+        buf,
+        ppo_epochs=1,
+        minibatch_size=32,
+        seq_len=0,
+        materialize_summary_scalars=False,
+    )
+
+    assert metrics.n_updates > 0
+    assert metrics.epoch_finalize_ms == 0.0
+    assert metrics.policy_loss == 0.0
+    assert metrics.value_loss == 0.0
+    assert metrics.total_loss == 0.0
+
+
 def test_empty_buffer_returns_zeros() -> None:
     """An empty buffer should return zero metrics."""
     policy = CognitiveMambaPolicy(embedding_dim=128)
@@ -108,6 +148,24 @@ def test_empty_buffer_returns_zeros() -> None:
     assert metrics.grad_clip_ms == 0.0
     assert metrics.optimizer_step_ms == 0.0
     assert metrics.rnd_step_ms == 0.0
+    assert metrics.post_update_stats_ms == 0.0
+    assert metrics.update_loop_overhead_ms == 0.0
+    assert metrics.n_updates == 0
+    assert metrics.epoch_setup_ms == 0.0
+    assert metrics.policy_optimizer_init_ms == 0.0
+    assert metrics.rnd_optimizer_init_ms == 0.0
+    assert metrics.policy_train_mode_ms == 0.0
+    assert metrics.policy_param_cache_ms == 0.0
+    assert metrics.setup_overhead_ms == 0.0
+    assert metrics.policy_eval_ms_total == 0.0
+    assert metrics.optimizer_step_ms_total == 0.0
+    assert metrics.post_update_stats_ms_total == 0.0
+    assert metrics.update_loop_overhead_ms_total == 0.0
+    assert metrics.epoch_finalize_ms == 0.0
+    assert metrics.epoch_total_ms == 0.0
+    assert metrics.policy_eval_device_ms_total == 0.0
+    assert metrics.backward_device_ms_total == 0.0
+    assert metrics.optimizer_step_device_ms_total == 0.0
 
 
 def test_default_value_coeff_is_low() -> None:
@@ -139,6 +197,45 @@ def test_optimizer_covers_full_policy() -> None:
     assert critic_param_ids.issubset(optimizer_param_ids), (
         "Unified PPO optimizer must include critic head parameters"
     )
+
+
+def test_prime_update_runtime_eagerly_populates_optimizer_and_param_cache() -> None:
+    policy = CognitiveMambaPolicy(embedding_dim=128)
+    learner = PpoLearner(learning_rate=1e-3)
+
+    learner.prime_update_runtime(policy)
+
+    assert learner._optimizer is not None
+    assert learner._policy_param_cache is not None
+    assert len(learner._policy_param_cache) > 0
+
+
+def test_create_adam_optimizer_falls_back_to_foreach_when_fused_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    learner = PpoLearner(learning_rate=1e-3)
+    parameter = torch.nn.Parameter(torch.zeros(1))
+    calls: list[dict[str, object]] = []
+
+    def fake_adam(params: object, **kwargs: object) -> torch.optim.Optimizer:
+        del params
+        calls.append(dict(kwargs))
+        if kwargs.get("fused"):
+            raise RuntimeError("fused unsupported")
+        return cast("torch.optim.Optimizer", object())
+
+    monkeypatch.setattr(torch.optim, "Adam", fake_adam)
+
+    optimizer = learner._create_adam_optimizer(
+        (parameter,),
+        learning_rate=1e-3,
+        use_cuda=True,
+        label="policy",
+    )
+
+    assert optimizer is not None
+    assert calls == [
+        {"lr": 1e-3, "fused": True},
+        {"lr": 1e-3, "foreach": True},
+    ]
 
 
 def test_gradient_isolation_policy_updates_actor() -> None:

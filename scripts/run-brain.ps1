@@ -5,6 +5,8 @@ param(
     [int]$ElevationBins = 48,
     [ValidateSet("step", "async")]
     [string]$Mode = "",
+    [ValidateSet("mambapy", "gru")]
+    [string]$TemporalCore = "gru",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ForwardArgs
 )
@@ -13,8 +15,11 @@ $repoRoot = Resolve-Path "$PSScriptRoot\.."
 $uvArgs = @(
     "run",
     "--project", "$repoRoot\projects\actor",
-    "navi-actor",
+    "python",
+    "-m",
+    "navi_actor.cli",
     "serve",
+    "--temporal-core", "$TemporalCore",
     "--azimuth-bins", "$AzimuthBins",
     "--elevation-bins", "$ElevationBins"
 )

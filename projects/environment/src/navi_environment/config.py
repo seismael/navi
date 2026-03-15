@@ -99,6 +99,10 @@ class EnvironmentConfig(BaseSettings):
     backend: str = "sdfdag"
     gmdag_file: str = str(find_default_gmdag())
     sdf_max_steps: int = Field(default=256, gt=0)
+    sdfdag_torch_compile: bool = Field(
+        default=True,
+        validation_alias="NAVI_SDFDAG_TORCH_COMPILE",
+    )
     gmdag_resolution: int = Field(
         default=derive_default_gmdag_resolution(),
         validation_alias="NAVI_GMDAG_RESOLUTION",

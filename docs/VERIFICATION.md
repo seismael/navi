@@ -143,6 +143,12 @@ Canonical SDF/DAG validation should be tracked in five explicit lanes:
 
 Each lane must emit pass/fail evidence that can be archived independently. The objective is not merely a green test run, but failure localization.
 
+Fixture-level oracle policy:
+
+- one small reusable fixture family should carry the known-result geometry truth across compiler, environment, actor, and auditor tests
+- fixture-level proofs do not replace promoted-corpus validation; they localize math and contract failures while real-corpus checks prove canonical operational readiness
+- expected spherical views, movement deltas, and projection-region checks should be defined once and reused across test layers so failures stay attributable
+
 Nightly automation should therefore preserve at least one artifact per lane when
 the canonical overnight flow runs.
 

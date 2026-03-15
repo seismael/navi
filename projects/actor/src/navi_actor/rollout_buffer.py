@@ -383,7 +383,6 @@ class MultiTrajectoryBuffer:
             "vals": self._all_values[:, :usable_steps].reshape(total_seqs, seq_len),
             "advs": self._all_advantages_normalized[:, :usable_steps].reshape(total_seqs, seq_len),
             "rets": self._all_returns[:, :usable_steps].reshape(total_seqs, seq_len),
-            "dones": self._all_dones[:, :usable_steps].reshape(total_seqs, seq_len),
         }
 
         if self._all_aux is not None:
@@ -429,24 +428,31 @@ class MultiTrajectoryBuffer:
             vals_seqs = seq_views["vals"]
             advs_seqs = seq_views["advs"]
             rets_seqs = seq_views["rets"]
-            dones_seqs = seq_views["dones"]
             aux_seqs = seq_views.get("aux")
             total_seqs = obs_seqs.shape[0]
 
-            # Shuffle sequences
+            # Shuffle sequence tensors once per epoch, then slice contiguous
+            # minibatches to avoid repeated per-tensor index_select kernels.
             perm = torch.randperm(total_seqs, device=index_device)
+            obs_seqs = obs_seqs.index_select(0, perm)
+            acts_seqs = acts_seqs.index_select(0, perm)
+            lps_seqs = lps_seqs.index_select(0, perm)
+            vals_seqs = vals_seqs.index_select(0, perm)
+            advs_seqs = advs_seqs.index_select(0, perm)
+            rets_seqs = rets_seqs.index_select(0, perm)
+            if aux_seqs is not None:
+                aux_seqs = aux_seqs.index_select(0, perm)
 
             seqs_per_minibatch = max(1, batch_size // seq_len)
             for i in range(0, total_seqs, seqs_per_minibatch):
-                idx = perm[i : i + seqs_per_minibatch]
-                mb_obs_seqs = obs_seqs.index_select(0, idx)
-                mb_acts_seqs = acts_seqs.index_select(0, idx)
-                mb_lps_seqs = lps_seqs.index_select(0, idx)
-                mb_vals_seqs = vals_seqs.index_select(0, idx)
-                mb_advs_seqs = advs_seqs.index_select(0, idx)
-                mb_rets_seqs = rets_seqs.index_select(0, idx)
-                mb_dones_seqs = dones_seqs.index_select(0, idx)
-                mb_aux_seqs = aux_seqs.index_select(0, idx) if aux_seqs is not None else None
+                batch_slice = slice(i, i + seqs_per_minibatch)
+                mb_obs_seqs = obs_seqs[batch_slice]
+                mb_acts_seqs = acts_seqs[batch_slice]
+                mb_lps_seqs = lps_seqs[batch_slice]
+                mb_vals_seqs = vals_seqs[batch_slice]
+                mb_advs_seqs = advs_seqs[batch_slice]
+                mb_rets_seqs = rets_seqs[batch_slice]
+                mb_aux_seqs = aux_seqs[batch_slice] if aux_seqs is not None else None
                 yield TrajectoryBuffer.MiniBatch(
                     observations=mb_obs_seqs.flatten(0, 1),
                     actions=mb_acts_seqs.flatten(0, 1),
@@ -454,7 +460,6 @@ class MultiTrajectoryBuffer:
                     old_values=mb_vals_seqs.flatten(),
                     advantages=mb_advs_seqs.flatten(),
                     returns=mb_rets_seqs.flatten(),
-                    dones=mb_dones_seqs,
                     aux_tensors=(
                         mb_aux_seqs.flatten(0, 1)
                         if mb_aux_seqs is not None and all_aux is not None

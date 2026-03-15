@@ -24,7 +24,7 @@ _RUNNER = CliRunner()
 
 
 def _option_default(func: object, name: str) -> object:
-    default = inspect.signature(cast(object, func)).parameters[name].default
+    default = inspect.signature(cast("object", func)).parameters[name].default
     assert isinstance(default, OptionInfo)
     return default.default
 
@@ -69,6 +69,7 @@ def test_train_defaults_match_canonical_perf_profile() -> None:
     assert _option_default(train, "emit_observation_stream") is True
     assert _option_default(train, "dashboard_observation_hz") == 10.0
     assert _option_default(train, "emit_training_telemetry") is True
+    assert _option_default(train, "emit_update_loss_telemetry") is False
     assert _option_default(train, "emit_perf_telemetry") is True
 
 
@@ -185,6 +186,7 @@ def test_train_uses_single_canonical_trainer(
     assert config.emit_observation_stream is False
     assert config.dashboard_observation_hz == 10.0
     assert config.emit_training_telemetry is False
+    assert config.emit_update_loss_telemetry is False
     assert config.emit_perf_telemetry is False
 
 
@@ -301,7 +303,7 @@ def test_train_defaults_to_prepared_canonical_corpus(
         "force_recompile": False,
     }
     assert captured["gmdag_file"] in {str(compiled_one), str(compiled_two)}
-    assert set(cast(tuple[str, ...], captured["scene_pool"])) == {str(compiled_one), str(compiled_two)}
+    assert set(cast("tuple[str, ...]", captured["scene_pool"])) == {str(compiled_one), str(compiled_two)}
     assert captured["total_steps"] == 0
     assert captured["started"] is True
     assert captured["stopped"] is True

@@ -17,6 +17,7 @@ from navi_auditor.dashboard.renderers import (
     render_forward_polar,
     zoom_overhead,
 )
+from navi_contracts.testing.oracle_house import house_observation
 
 
 class TestDepthToViridis:
@@ -90,6 +91,24 @@ class TestRenderFirstPerson:
         assert img.shape == (240, 320, 3)
         assert dist >= 9.0
 
+    def test_oracle_house_doorway_changes_center_projection_against_closed_baseline(self) -> None:
+        oracle = house_observation()
+        closed_valid = np.ones_like(oracle.valid)
+        img, _dist = render_first_person(oracle.depth, oracle.semantic, oracle.valid, 320, 240)
+        closed_img, _dist_closed = render_first_person(oracle.depth, oracle.semantic, closed_valid, 320, 240)
+        center_patch = img[140:220, 130:190]
+        closed_patch = closed_img[140:220, 130:190]
+        assert np.mean(np.abs(center_patch.astype(np.int16) - closed_patch.astype(np.int16))) > 5.0
+
+    def test_oracle_house_window_changes_right_upper_projection_against_closed_baseline(self) -> None:
+        oracle = house_observation()
+        closed_valid = np.ones_like(oracle.valid)
+        img, _dist = render_first_person(oracle.depth, oracle.semantic, oracle.valid, 320, 240)
+        closed_img, _dist_closed = render_first_person(oracle.depth, oracle.semantic, closed_valid, 320, 240)
+        right_upper_patch = img[70:120, 220:285]
+        closed_patch = closed_img[70:120, 220:285]
+        assert np.mean(np.abs(right_upper_patch.astype(np.int16) - closed_patch.astype(np.int16))) > 3.0
+
 
 class TestRenderForwardPolar:
     """Tests for polar scan rendering."""
@@ -122,6 +141,15 @@ class TestPanoramaAlignment:
         assert fov_valid.shape == (4, 1)
         assert fov_depth[:, 0].tolist() == [10.0, 11.0, 0.0, 1.0]
 
+    def test_oracle_house_forward_fov_preserves_door_opening_at_centered_seam(self) -> None:
+        oracle = house_observation()
+
+        fov_depth, fov_valid = extract_forward_fov(oracle.depth, oracle.valid, fov_degrees=120.0)
+
+        assert fov_depth.shape[0] == 4
+        assert np.count_nonzero(~fov_valid[:, 1:]) >= 2
+        assert np.count_nonzero(~fov_valid[:2, :2]) >= 1
+
 
 class TestRenderBevOccupancy:
     """Tests for bird's-eye view rendering."""
@@ -149,6 +177,17 @@ class TestComputeNavMetrics:
         valid = np.zeros((0, 0), dtype=bool)
         fwd, _left, _right = compute_nav_metrics(depth, valid)
         assert fwd == 1.0
+
+    def test_compute_nav_metrics_prefers_farther_forward_sector_when_depth_is_explicitly_larger(self) -> None:
+        depth = np.full((24, 2), 0.2, dtype=np.float32)
+        valid = np.ones((24, 2), dtype=bool)
+        center = depth.shape[0] // 2
+        depth[center - 2:center + 2, :] = 0.7
+
+        fwd, left, right = compute_nav_metrics(depth, valid)
+
+        assert fwd > left
+        assert fwd > right
 
 
 class TestDistanceColor:

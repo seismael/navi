@@ -14,6 +14,15 @@ from navi_contracts.models import (
     TelemetryEvent,
 )
 from navi_contracts.serialization import deserialize, serialize
+from navi_contracts.testing.oracle_house import (
+    OracleObservation,
+    canonical_house_bbox,
+    house_metric_distances,
+    house_observation,
+    house_observation_after_forward_motion,
+    house_observation_delta,
+    write_square_house_obj,
+)
 from navi_contracts.topics import (
     TOPIC_ACTION,
     TOPIC_DISTANCE_MATRIX,
@@ -42,6 +51,7 @@ __all__: list[str] = [
     "Action",
     "BatchStepRequest",
     "BatchStepResult",
+    "OracleObservation",
     "DeltaDepthMatrix",
     "DepthMatrix",
     "DistanceMatrix",
@@ -57,8 +67,14 @@ __all__: list[str] = [
     "TelemetryPayload",
     "ValidMask",
     "VelocityMatrix",
+    "canonical_house_bbox",
     "deserialize",
+    "house_metric_distances",
+    "house_observation",
+    "house_observation_after_forward_motion",
+    "house_observation_delta",
     # Serialization
     "serialize",
     "setup_logging",
+    "write_square_house_obj",
 ]

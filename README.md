@@ -6,8 +6,16 @@ runtime path:
 - transient source-scene staging during corpus refresh
 - staged overwrite-first corpus refresh into compiled `.gmdag` assets
 - batched CUDA `sdfdag` environment execution
-- one sacred actor training engine
+- one sacred actor training engine with a selectable temporal core
 - passive auditor observability
+
+Canonical training and inference now assume a precompiled actor temporal-core
+path that works on the active Windows hardware with no extra extension build.
+The environment hot path is already sufficiently optimized that unfused Python
+temporal implementations simply move the bottleneck into host-side PPO sequence
+execution. For the current environment, the Windows-friendly Mamba path is the
+default canonical production path, with GRU available as an explicit
+comparison backend on the same trainer and serve surfaces.
 
 ## Canonical Workflow
 
@@ -18,8 +26,17 @@ runtime path:
 # 2. Start canonical continuous training
 ./scripts/train.ps1
 
+# 2b. Compare the same run with GRU on the same trainer surface
+./scripts/train.ps1 -TemporalCore gru
+
+# 2c. Run a bounded side-by-side comparison for mambapy and GRU
+./scripts/run-temporal-compare.ps1
+
 # 3. Or launch the full training stack
 ./scripts/run-ghost-stack.ps1 -Train
+
+# 4. If actor telemetry 5557 is occupied later, move it explicitly
+./scripts/train.ps1 -ActorTelemetryPort 5565
 ```
 
 When no scene, manifest, or step limit is supplied, Navi now:
@@ -28,6 +45,7 @@ When no scene, manifest, or step limit is supplied, Navi now:
 - recompiles corpus assets when explicitly requested
 - removes transient source downloads after a successful staged refresh
 - trains continuously until stopped
+- defaults the actor temporal core to `mambapy`, with `gru` available through an explicit selector on the same canonical surface
 
 ## Project Layout
 
@@ -68,11 +86,17 @@ uv run dashboard
 # Canonical actor service
 ./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
 
+# Canonical actor service with GRU selected explicitly
+./scripts/run-brain.ps1 -TemporalCore gru --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
+
 # Canonical full inference stack
 ./scripts/run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
 
 # Canonical full training stack
 ./scripts/run-ghost-stack.ps1 -Train
+
+# Canonical full training stack with GRU selected explicitly
+./scripts/run-ghost-stack.ps1 -Train -TemporalCore gru
 ```
 
 ## Corpus Tooling
@@ -100,6 +124,9 @@ uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-fi
 
 # Canonical long-duration training wrapper
 ./scripts/train-all-night.ps1
+
+# Canonical continuous training with an alternate actor telemetry port
+./scripts/train.ps1 -ActorTelemetryPort 5565
 
 # Refresh the default public bootstrap corpus (Habitat test scenes + ReplicaCAD stages)
 ./scripts/refresh-scene-corpus.ps1

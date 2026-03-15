@@ -22,6 +22,7 @@ def test_environment_config_defaults_to_canonical_sdfdag() -> None:
 
     assert config.backend == "sdfdag"
     assert isinstance(config.gmdag_file, str)
+    assert config.sdfdag_torch_compile is True
 
 
 def test_build_backend_rejects_unknown_backend() -> None:

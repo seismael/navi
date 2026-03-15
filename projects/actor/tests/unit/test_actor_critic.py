@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
+from torch import nn
 
 from navi_actor.actor_critic import ActorCriticHeads
 
@@ -43,6 +45,31 @@ def test_log_prob_shape() -> None:
     assert lp.shape == (8,)
 
 
+def test_log_prob_skips_critic_evaluation() -> None:
+    """Policy log-prob evaluation should not execute the critic head."""
+    heads = ActorCriticHeads(input_dim=128)
+    features = torch.randn(8, 128)
+    actions = torch.randn(8, 4)
+
+    class _CountingCritic(nn.Module):
+        def __init__(self, wrapped: nn.Module) -> None:
+            super().__init__()
+            self.wrapped = wrapped
+            self.calls = 0
+
+        def forward(self, value_features: torch.Tensor) -> torch.Tensor:
+            self.calls += 1
+            return self.wrapped(value_features)
+
+    counting_critic = _CountingCritic(heads.critic)
+    heads.critic = counting_critic
+
+    lp = heads.log_prob(features, actions)
+
+    assert lp.shape == (8,)
+    assert counting_critic.calls == 0
+
+
 def test_entropy_scalar() -> None:
     """Entropy should be a scalar."""
     heads = ActorCriticHeads(input_dim=128)
@@ -70,3 +97,17 @@ def test_gradient_flow() -> None:
     loss.backward()  # type: ignore[no-untyped-call]
     for p in heads.parameters():
         assert p.grad is not None
+
+
+def test_action_scales_follow_module_device() -> None:
+    """Action-scale buffer should move with the module without entering checkpoints."""
+    heads = ActorCriticHeads(input_dim=128)
+
+    assert heads.action_scales.device.type == "cpu"
+    assert "action_scales" not in heads.state_dict()
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+
+    heads = heads.to(torch.device("cuda"))
+    assert heads.action_scales.device.type == "cuda"

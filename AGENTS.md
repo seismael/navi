@@ -68,6 +68,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 ### 2.4.2 SDF/DAG Validation Standard
 - **Layered Proof Required:** `projects/voxel-dag` and `projects/torch-sdf` MUST be validated at compiler, binary-format, runtime, corpus-promotion, and qualification levels rather than by one smoke test.
 - **Mathematical Oracle Rule:** Small canonical fixtures MUST be checked against independent or analytic geometry expectations, not only implementation-to-implementation self-comparison.
+- **Oracle Fixture Family Rule:** Canonical correctness work MUST maintain one reusable small-fixture family with known expected observations so compiler, environment, actor-seam, and auditor tests share the same geometry truth instead of duplicating ad hoc literals.
 - **Determinism Rule:** Repeated compilation of the same fixture with the same inputs MUST produce byte-identical `.gmdag` output unless the documented format contract is intentionally revised in the same change.
 - **Binary Integrity Rule:** The `.gmdag` loader MUST reject malformed headers, non-finite bounds, impossible pointer layouts, out-of-range child references, cycles, and trailing or truncated payloads.
 - **Real Corpus Rule:** Canonical promoted-corpus validation MUST prove that real compiled assets from approved datasets load, match manifest metadata, and remain benchmark-viable at the canonical compile resolution.
@@ -107,18 +108,19 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Default Scene Rule:** Scripts, examples, and CLI defaults for production training must advertise the full discovered canonical corpus as the default training dataset. Single-scene examples must be framed as explicit overrides.
 
 ### 2.7 Temporal Core Migration Standard (Mar 2026)
-- **Cross-Platform Canonical Target:** The actor temporal core canonical runtime must be first-class on native Windows, Linux, and WSL2.
-- **CUDA-Native Requirement:** Canonical actor training/inference must be supported with CUDA acceleration on native Windows and native Linux using officially supported package stacks.
-- **Benchmark-Gated Selection:** Canonical temporal core selection is decided by measured bake-off results under actor interface parity `(B,T,D)->(B,T,D)` and rollout constraints.
-- **Benchmark Device Rule:** Final backend selection benchmarks must run on CUDA (not CPU-only diagnostics) on both Windows and Linux.
-- **Performance Floor:** Migration is accepted only if 4-actor throughput remains `>= 60 SPS`; otherwise selection re-opens.
-- **Single Canonical Runtime:** Candidate comparison tooling is allowed during migration, but production runtime must keep one canonical temporal backend with no fallback branch.
+- **Canonical Runtime:** The actor temporal core canonical runtime on the active Windows training machine is the native cuDNN `gru` path because repeated bounded trainer runs proved a real end-to-end throughput win over `mambapy` on the canonical surface.
+- **No-Build Rule:** The canonical temporal runtime must work from the standard PyTorch CUDA install with no custom C++ extension build step on the active Windows training machine.
+- **Controlled Selector Rule:** Production scripts, wrappers, defaults, and docs MUST expose one temporal-core selector contract on the one canonical trainer surface. The active Windows machine supports `gru` as the default runtime and `mambapy` as an explicit comparison backend; alternate trainer architectures and parallel production surfaces are forbidden.
+- **Update-Frequency Rule:** PPO cadence tuning MAY reduce how often optimizer updates run, but must happen on the one canonical trainer surface rather than by introducing alternate temporal-runtime branches.
+- **Future Promotion Rule:** Hardware-fused `mamba-ssm` remains a future upgrade target. It may replace the active GRU path only after a supported environment exists and the real bounded trainer proves the upgrade.
+- **Promotion Rule:** Benchmark-proven end-to-end training throughput wins MAY replace the current temporal-core default or other canonical performance defaults, but only when config defaults, wrappers, tests, and docs are updated together in the same change so the repository has one coherent source of truth.
 
 ## 3) Performance Mandates
 
 ### 3.1 Batched Sphere Tracing (SDF/DAG Canonical Path)
 - The high-performance target runtime is `.gmdag` compilation via `projects/voxel-dag` followed by batched `torch_sdf.cast_rays()` execution from `projects/torch-sdf`.
 - The SDF/DAG backend MUST keep DAG data and ray buffers GPU-resident across steps.
+- Canonical `SdfDagBackend` tensor-only post-cast, reward, and kinematics helper graphs SHOULD use `torch.compile` when they stay on the PyTorch side of the `torch_sdf.cast_rays()` boundary so eager micro-kernel dispatch does not become the next environment bottleneck. When the active GPU/compiler stack cannot support that path, the runtime MUST warn and remain on the eager tensor path rather than fail startup.
 - Observation adaptation back to `(1, Az, El)` `DistanceMatrix` format MUST be vectorized and must not introduce avoidable CPU copies in the hot path.
 - The SDF/DAG backend MUST expose one canonical rolling perf snapshot surface consumed by both runtime telemetry and direct benchmarking; duplicate timing paths are forbidden.
 - `uv run navi-environment bench-sdfdag --gmdag-file ...` is the canonical environment-layer throughput command for the compiled path.
@@ -148,7 +150,9 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Episodic-memory eviction MUST NOT trigger full-index rebuilds on every post-capacity insert.
 - Canonical rollout loops MUST minimize avoidable CUDA-to-CPU synchronization (`.item()`, `.cpu()`, `.numpy()`) inside per-step per-actor sections.
 - Canonical rollout loops MUST not convert batched CUDA ray outputs into CPU `numpy`/Python observation objects and then back into CUDA tensors during training; tensor-native runtime seams are mandatory once the backend is already GPU-resident.
+- Tensor-only actor helper graphs such as reward shaping SHOULD use `torch.compile` on supported GPU/compiler stacks when they remain on the PyTorch side of the rollout hot path; unsupported stacks MUST fall back cleanly to eager execution with explicit attribution visibility.
 - Canonical PPO update code MUST avoid redundant tensor device copies, allocator churn, and repeated optimizer-side host sync when minibatch tensors already reside on CUDA.
+- Canonical PPO update code MUST keep the temporal-core sequence path inside precompiled backend operators such as cuDNN GRU on the active path; Python-level sequence unrolling, dispatcher-heavy scan decomposition, and large autograd-graph construction are forbidden on the production hot path.
 - Canonical PPO update work SHOULD prefer optimizer/runtime improvements on the existing learner path before changing training hyperparameter defaults.
 - Actor-side performance telemetry SHOULD expose enough sub-metrics to distinguish memory, transport, reward shaping, and buffer-append overhead when investigating stalls.
 - Canonical throughput investigation MUST add attribution on the existing `navi-actor train` surface rather than creating alternate trainer modes or shadow benchmarking entrypoints.

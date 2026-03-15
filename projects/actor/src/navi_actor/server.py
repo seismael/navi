@@ -82,6 +82,7 @@ class ActorServer:
 
             self._policy = CognitiveMambaPolicy(
                 embedding_dim=config.embedding_dim,
+                temporal_core=config.temporal_core,
                 azimuth_bins=config.azimuth_bins,
                 elevation_bins=config.elevation_bins,
                 max_forward=config.max_forward,

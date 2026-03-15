@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import queue
 import threading
-from dataclasses import dataclass, replace
-import logging
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -65,6 +66,37 @@ _LOGGER = logging.getLogger(__name__)
 _SOFT_WARN_MIN_SPS: float = 15.0
 _SOFT_WARN_MAX_ZERO_WAIT: float = 0.20
 _SOFT_WARN_MAX_OPT_MS: float = 30_000.0
+
+
+def _explained_learner_stage_ms_total(metrics: PpoMetrics) -> float:
+    """Return the summed learner-side stage time across all PPO minibatch updates."""
+    return (
+        metrics.epoch_setup_ms
+        + metrics.iterator_setup_ms_total
+        + metrics.minibatch_fetch_ms_total
+        + metrics.minibatch_prep_ms_total
+        + metrics.policy_eval_ms_total
+        + metrics.backward_ms_total
+        + metrics.grad_clip_ms_total
+        + metrics.optimizer_step_ms_total
+        + metrics.rnd_step_ms_total
+        + metrics.post_update_stats_ms_total
+        + metrics.update_loop_overhead_ms_total
+        + metrics.progress_callback_ms_total
+        + metrics.epoch_finalize_ms
+    )
+
+
+def _explained_learner_device_stage_ms_total(metrics: PpoMetrics) -> float:
+    """Return the summed GPU execution time for diagnostic CUDA-profiled learner stages."""
+    return (
+        metrics.policy_eval_device_ms_total
+        + metrics.backward_device_ms_total
+        + metrics.grad_clip_device_ms_total
+        + metrics.optimizer_step_device_ms_total
+        + metrics.rnd_step_device_ms_total
+        + metrics.post_update_stats_device_ms_total
+    )
 
 
 def _enqueue_telemetry(
@@ -132,7 +164,7 @@ class PpoTrainingMetrics:
 
 @dataclass(frozen=True)
 class _RolloutHostBatch:
-    """CPU mirrors for one rollout tick after a single packed device transfer."""
+    """Detached rollout tensors plus optional sparse CPU action mirrors."""
 
     embedding_tensor: torch.Tensor
     action_tensor: torch.Tensor
@@ -216,6 +248,7 @@ class PpoTrainer:
         # rollout boundaries and never mutate the inference model mid-step.
         self._learner_policy = CognitiveMambaPolicy(
             embedding_dim=config.embedding_dim,
+            temporal_core=config.temporal_core,
             azimuth_bins=config.azimuth_bins,
             elevation_bins=config.elevation_bins,
             max_forward=config.max_forward,
@@ -226,6 +259,7 @@ class PpoTrainer:
 
         self._rollout_policy = CognitiveMambaPolicy(
             embedding_dim=config.embedding_dim,
+            temporal_core=config.temporal_core,
             azimuth_bins=config.azimuth_bins,
             elevation_bins=config.elevation_bins,
             max_forward=config.max_forward,
@@ -260,6 +294,12 @@ class PpoTrainer:
             intrinsic_anneal_steps=config.intrinsic_anneal_steps,
             loop_penalty_coeff=config.loop_penalty_coeff,
             loop_threshold=config.loop_threshold,
+            torch_compile=config.reward_shaping_torch_compile,
+        )
+        _LOGGER.info(
+            "RewardShaper compile status: requested=%s active=%s",
+            self._reward_shaper.torch_compile_requested,
+            self._reward_shaper.torch_compile_enabled,
         )
 
         # Shared learner
@@ -271,6 +311,7 @@ class PpoTrainer:
             learning_rate=config.learning_rate,
             profile_cuda_events=config.profile_cuda_events,
         )
+        self._learner.prime_update_runtime(self._learner_policy, rnd=self._rnd)
 
         if config.profile_cuda_events:
             _LOGGER.warning(
@@ -307,24 +348,24 @@ class PpoTrainer:
         ctx = zmq.Context()
         pub = ctx.socket(zmq.PUB)
         pub.bind(self._config.pub_address)
-        
+
         _LOGGER.info("Async telemetry worker started on %s", self._config.pub_address)
-        
+
         while True:
             item = self._telemetry_queue.get()
-            if item is None: # Sentinel for shutdown
+            if item is None:  # Sentinel for shutdown
                 break
-            
+
             topic, payload, label = item
             try:
-                # Use NOBLOCK to ensure we never stall the queue consumer 
+                # Use NOBLOCK to ensure we never stall the queue consumer
                 # (though here the consumer IS the thread, so we're protecting the queue)
                 pub.send_multipart([topic.encode("utf-8"), payload], flags=zmq.NOBLOCK)
             except Exception as exc:
                 _LOGGER.warning("Telemetry send failure (%s): %s", label, exc)
             finally:
                 self._telemetry_queue.task_done()
-        
+
         pub.close(linger=0)
         ctx.term()
         _LOGGER.info("Async telemetry worker stopped")
@@ -345,7 +386,7 @@ class PpoTrainer:
         seq_len: int,
     ) -> None:
         t_opt_start = time.perf_counter()
-        
+
         # PPO Inference sub-stage (GAE + advantage calculation)
         t_inf_start = time.perf_counter()
         with torch.no_grad():
@@ -361,6 +402,13 @@ class PpoTrainer:
         # PPO Optimization sub-stage (The actual loss.backward() and optimizer.step() loop)
         t_train_start = time.perf_counter()
         self._learner_policy.train()
+        progress_callback: Callable[[], None] | None = None
+        if self._config.emit_observation_stream and self._last_dashboard_observation is not None:
+            def emit_progress_callback() -> None:
+                self._maybe_publish_dashboard_heartbeat(step_id=self._total_sim_steps)
+
+            progress_callback = emit_progress_callback
+
         self._last_opt_metrics = self._learner.train_ppo_epoch(
             self._learner_policy,
             multi_buffer,
@@ -368,7 +416,11 @@ class PpoTrainer:
             minibatch_size=minibatch_size,
             seq_len=seq_len,
             rnd=self._rnd,
-            progress_callback=lambda: self._maybe_publish_dashboard_heartbeat(step_id=self._total_sim_steps),
+            progress_callback=progress_callback,
+            materialize_summary_scalars=(
+                (self._config.emit_training_telemetry and self._config.emit_update_loss_telemetry)
+                or _LOGGER.isEnabledFor(logging.DEBUG)
+            ),
         )
         opt_ms = (time.perf_counter() - t_train_start) * 1000
         self._opt_optimization_acc += opt_ms
@@ -384,16 +436,70 @@ class PpoTrainer:
         self._last_opt_duration_ms = total_ms
         self._opt_duration_acc += total_ms
         self._opt_duration_count += 1
-        
+
         if self._last_opt_metrics is None:
             _LOGGER.info("Inline PPO optimization completed in %.2fms. Weights synced.", total_ms)
         else:
+            explained_ms_total = _explained_learner_stage_ms_total(self._last_opt_metrics)
+            learner_gap_ms = max(0.0, self._last_opt_metrics.epoch_total_ms - explained_ms_total)
+            trainer_gap_ms = max(0.0, opt_ms - self._last_opt_metrics.epoch_total_ms)
+            gap_ms = max(0.0, opt_ms - explained_ms_total)
+            gap_pct = (gap_ms / opt_ms * 100.0) if opt_ms > 0.0 else 0.0
+            diagnostic_suffix = ""
+            if self._config.profile_cuda_events:
+                gpu_explained_ms_total = _explained_learner_device_stage_ms_total(self._last_opt_metrics)
+                eval_host_gap = max(
+                    0.0,
+                    self._last_opt_metrics.policy_eval_ms_total
+                    - self._last_opt_metrics.policy_eval_device_ms_total,
+                )
+                backward_host_gap = max(
+                    0.0,
+                    self._last_opt_metrics.backward_ms_total
+                    - self._last_opt_metrics.backward_device_ms_total,
+                )
+                clip_host_gap = max(
+                    0.0,
+                    self._last_opt_metrics.grad_clip_ms_total
+                    - self._last_opt_metrics.grad_clip_device_ms_total,
+                )
+                optimizer_host_gap = max(
+                    0.0,
+                    self._last_opt_metrics.optimizer_step_ms_total
+                    - self._last_opt_metrics.optimizer_step_device_ms_total,
+                )
+                rnd_host_gap = max(
+                    0.0,
+                    self._last_opt_metrics.rnd_step_ms_total
+                    - self._last_opt_metrics.rnd_step_device_ms_total,
+                )
+                stats_host_gap = max(
+                    0.0,
+                    self._last_opt_metrics.post_update_stats_ms_total
+                    - self._last_opt_metrics.post_update_stats_device_ms_total,
+                )
+                diagnostic_suffix = (
+                    f" diag(gpu_eval={self._last_opt_metrics.policy_eval_device_ms_total:.2f}ms "
+                    f"gpu_bwd={self._last_opt_metrics.backward_device_ms_total:.2f}ms "
+                    f"gpu_clip={self._last_opt_metrics.grad_clip_device_ms_total:.2f}ms "
+                    f"gpu_optim={self._last_opt_metrics.optimizer_step_device_ms_total:.2f}ms "
+                    f"gpu_rnd={self._last_opt_metrics.rnd_step_device_ms_total:.2f}ms "
+                    f"gpu_stats={self._last_opt_metrics.post_update_stats_device_ms_total:.2f}ms "
+                    f"gpu_explained={gpu_explained_ms_total:.2f}ms "
+                    f"eval_host_gap={eval_host_gap:.2f}ms "
+                    f"bwd_host_gap={backward_host_gap:.2f}ms "
+                    f"clip_host_gap={clip_host_gap:.2f}ms "
+                    f"optim_host_gap={optimizer_host_gap:.2f}ms "
+                    f"rnd_host_gap={rnd_host_gap:.2f}ms "
+                    f"stats_host_gap={stats_host_gap:.2f}ms)"
+                )
             _LOGGER.info(
-                "Inline PPO optimization completed in %.2fms (inf=%.2fms opt=%.2fms aux=%.2fms | fetch=%.2fms prep=%.2fms eval=%.2fms bwd=%.2fms clip=%.2fms optim=%.2fms rnd=%.2fms cb=%.2fms). Weights synced.",
+                "Inline PPO optimization completed in %.2fms (inf=%.2fms opt=%.2fms aux=%.2fms | updates=%d avg(fetch=%.2fms prep=%.2fms eval=%.2fms bwd=%.2fms clip=%.2fms optim=%.2fms rnd=%.2fms stats=%.2fms loop=%.2fms cb=%.2fms setup=%.2fms finalize=%.2fms) total(iter=%.2fms fetch=%.2fms prep=%.2fms eval=%.2fms bwd=%.2fms clip=%.2fms optim=%.2fms rnd=%.2fms stats=%.2fms loop=%.2fms cb=%.2fms learner=%.2fms explained=%.2fms learner_gap=%.2fms trainer_gap=%.2fms gap=%.2fms %.1f%% setup(policy=%.2fms rnd=%.2fms mode=%.2fms params=%.2fms other=%.2fms)%s). Weights synced.",
                 total_ms,
                 inf_ms,
                 opt_ms,
                 aux_ms,
+                self._last_opt_metrics.n_updates,
                 self._last_opt_metrics.minibatch_fetch_ms,
                 self._last_opt_metrics.minibatch_prep_ms,
                 self._last_opt_metrics.policy_eval_ms,
@@ -401,7 +507,34 @@ class PpoTrainer:
                 self._last_opt_metrics.grad_clip_ms,
                 self._last_opt_metrics.optimizer_step_ms,
                 self._last_opt_metrics.rnd_step_ms,
+                self._last_opt_metrics.post_update_stats_ms,
+                self._last_opt_metrics.update_loop_overhead_ms,
                 self._last_opt_metrics.progress_callback_ms,
+                self._last_opt_metrics.epoch_setup_ms,
+                self._last_opt_metrics.epoch_finalize_ms,
+                self._last_opt_metrics.iterator_setup_ms_total,
+                self._last_opt_metrics.minibatch_fetch_ms_total,
+                self._last_opt_metrics.minibatch_prep_ms_total,
+                self._last_opt_metrics.policy_eval_ms_total,
+                self._last_opt_metrics.backward_ms_total,
+                self._last_opt_metrics.grad_clip_ms_total,
+                self._last_opt_metrics.optimizer_step_ms_total,
+                self._last_opt_metrics.rnd_step_ms_total,
+                self._last_opt_metrics.post_update_stats_ms_total,
+                self._last_opt_metrics.update_loop_overhead_ms_total,
+                self._last_opt_metrics.progress_callback_ms_total,
+                self._last_opt_metrics.epoch_total_ms,
+                explained_ms_total,
+                learner_gap_ms,
+                trainer_gap_ms,
+                gap_ms,
+                gap_pct,
+                self._last_opt_metrics.policy_optimizer_init_ms,
+                self._last_opt_metrics.rnd_optimizer_init_ms,
+                self._last_opt_metrics.policy_train_mode_ms,
+                self._last_opt_metrics.policy_param_cache_ms,
+                self._last_opt_metrics.setup_overhead_ms,
+                diagnostic_suffix,
             )
         if total_ms > _SOFT_WARN_MAX_OPT_MS:
             _LOGGER.warning(
@@ -420,10 +553,11 @@ class PpoTrainer:
         self._telemetry_thread.start()
 
         _LOGGER.info(
-            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s (async)",
+            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s temporal=%s (async)",
             self._n_actors,
             self._gmdag_file or "<state-only>",
             self._config.pub_address,
+            self._config.temporal_core,
         )
 
     def stop(self) -> None:
@@ -438,7 +572,7 @@ class PpoTrainer:
             with contextlib.suppress(Exception):
                 self._runtime.close()
         self._runtime = None
-        
+
         with contextlib.suppress(Exception):
             self._ctx.term()
 
@@ -576,7 +710,9 @@ class PpoTrainer:
         """Return the actor ids whose DistanceMatrix observations may be published."""
         if not self._config.emit_observation_stream:
             return ()
-        return tuple(range(self._n_actors))
+        if self._config.telemetry_all_actors:
+            return tuple(range(self._n_actors))
+        return (int(self._config.telemetry_actor_id),)
 
     def _should_publish_actor_telemetry(self, actor_id: int) -> bool:
         if self._config.telemetry_all_actors:
@@ -705,8 +841,8 @@ class PpoTrainer:
             )
         return runtime
 
-    def _update_reward_ema(self, reward_ema: float, batch_rewards: torch.Tensor) -> float:
-        """Apply the per-actor EMA update order without a Python loop over actors."""
+    def _update_reward_ema(self, reward_ema: torch.Tensor, batch_rewards: torch.Tensor) -> torch.Tensor:
+        """Apply the per-actor EMA update order without synchronizing rollout GPU state to host."""
         rewards = batch_rewards.detach().to(device=self._device, dtype=torch.float32).reshape(-1)
         count = int(rewards.shape[0])
         if count == 0:
@@ -715,8 +851,8 @@ class PpoTrainer:
         alpha = 0.01
         exponents = torch.arange(count - 1, -1, -1, device=rewards.device, dtype=torch.float32)
         weights = alpha * torch.pow(torch.full((count,), decay, device=rewards.device), exponents)
-        updated = (decay ** count) * reward_ema + float((weights * rewards).sum().item())
-        return updated
+        decay_tensor = torch.tensor(decay ** count, dtype=torch.float32, device=rewards.device)
+        return decay_tensor * reward_ema + (weights * rewards).sum()
 
     def _pack_rollout_host_batch(
         self,
@@ -727,23 +863,23 @@ class PpoTrainer:
         values: torch.Tensor,
         intrinsic_rewards: torch.Tensor,
         aux_batch: torch.Tensor,
-        materialize_action_cpu: bool,
+        action_cpu_actor_indices: torch.Tensor | None,
     ) -> _RolloutHostBatch:
-        """Snapshot rollout tensors while keeping canonical training data on-device."""
-        action_tensor = actions.detach().clone()
-        embedding_tensor = embeddings.detach().clone()
-        aux_tensor = aux_batch.detach().clone()
+        """Detach rollout tensors while mirroring only sparse telemetry actions to CPU."""
+        action_tensor = actions.detach()
+        embedding_tensor = embeddings.detach()
+        aux_tensor = aux_batch.detach()
         action_cpu_tensor = None
-        if materialize_action_cpu:
-            action_cpu_tensor = action_tensor.detach().to(device="cpu", dtype=torch.float32)
+        if action_cpu_actor_indices is not None and int(action_cpu_actor_indices.numel()) > 0:
+            action_cpu_tensor = action_tensor.index_select(0, action_cpu_actor_indices).to(device="cpu", dtype=torch.float32)
 
         return _RolloutHostBatch(
             embedding_tensor=embedding_tensor,
             action_tensor=action_tensor,
             aux_tensor=aux_tensor,
-            log_prob_tensor=log_probs.detach().clone(),
-            value_tensor=values.detach().clone(),
-            intrinsic_reward_tensor=intrinsic_rewards.detach().clone(),
+            log_prob_tensor=log_probs.detach(),
+            value_tensor=values.detach(),
+            intrinsic_reward_tensor=intrinsic_rewards.detach(),
             action_cpu_tensor=action_cpu_tensor,
         )
 
@@ -755,17 +891,17 @@ class PpoTrainer:
         intrinsic_rewards: torch.Tensor,
         loop_similarities: torch.Tensor,
         done_flags: torch.Tensor,
-        include_telemetry_scalars: bool,
+        actor_indices: torch.Tensor | None,
     ) -> _RolloutHostScalarBatch:
         """Batch the unavoidable device-to-host scalar transfer for one rollout tick."""
-        if include_telemetry_scalars:
+        if actor_indices is not None and int(actor_indices.numel()) > 0:
             packed = torch.stack(
                 (
-                    raw_rewards,
-                    shaped_rewards,
-                    intrinsic_rewards,
-                    loop_similarities,
-                    done_flags.to(dtype=torch.float32),
+                    raw_rewards.index_select(0, actor_indices),
+                    shaped_rewards.index_select(0, actor_indices),
+                    intrinsic_rewards.index_select(0, actor_indices),
+                    loop_similarities.index_select(0, actor_indices),
+                    done_flags.index_select(0, actor_indices).to(dtype=torch.float32),
                 ),
                 dim=1,
             ).detach().to(device="cpu", dtype=torch.float32)
@@ -820,10 +956,19 @@ class PpoTrainer:
         telemetry_actor = int(self._config.telemetry_actor_id)
         return done_indices[done_indices == telemetry_actor]
 
+    def _selected_step_telemetry_actor_indices(self) -> torch.Tensor:
+        """Return only the actors whose per-step telemetry will be mirrored to CPU."""
+        if not self._config.emit_training_telemetry:
+            return torch.empty((0,), dtype=torch.int64, device=self._device)
+        if self._config.telemetry_all_actors:
+            return torch.arange(self._n_actors, dtype=torch.int64, device=self._device)
+        return torch.tensor([int(self._config.telemetry_actor_id)], dtype=torch.int64, device=self._device)
+
     def train(self, total_steps: int, *, log_every: int = 100, checkpoint_every: int = 0, checkpoint_dir: str = "checkpoints") -> PpoTrainingMetrics:
         n = self._n_actors
         rl, ep, mb, sl = self._config.rollout_length, self._config.ppo_epochs, self._config.minibatch_size, self._config.bptt_len
-        r_ema, ep_cnt, step_id = 0.0, 0, 0
+        r_ema = torch.zeros((), dtype=torch.float32, device=self._device)
+        ep_cnt, step_id = 0, 0
         unbounded = total_steps <= 0
         reward_sum_tensor = torch.zeros((), dtype=torch.float32, device=self._device)
         episode_returns = torch.zeros((n,), dtype=torch.float32, device=self._device)
@@ -852,6 +997,7 @@ class PpoTrainer:
         last_checkpoint_step = 0
 
         while unbounded or step_id < total_steps:
+            rollout_actor_steps = 0
             # Rollout Phase
             for _ in range(rl):
                 if (not unbounded) and step_id >= total_steps:
@@ -878,6 +1024,11 @@ class PpoTrainer:
                 publish_step_telemetry = bool(
                     self._config.emit_training_telemetry and log_every > 0 and step_id % log_every == 0
                 )
+                step_telemetry_actor_indices = (
+                    self._selected_step_telemetry_actor_indices()
+                    if publish_step_telemetry
+                    else None
+                )
                 publish_observations = self._should_publish_dashboard_observation()
                 if publish_observations:
                     publish_actor_ids = self._observation_publish_actor_ids()
@@ -901,7 +1052,7 @@ class PpoTrainer:
                     values=v_t,
                     intrinsic_rewards=intr_r,
                     aux_batch=aux_batch,
-                    materialize_action_cpu=publish_step_telemetry,
+                    action_cpu_actor_indices=step_telemetry_actor_indices,
                 )
                 pack_ms = (time.perf_counter() - t_pack_start) * 1000
 
@@ -947,7 +1098,7 @@ class PpoTrainer:
                     intrinsic_rewards=host_batch.intrinsic_reward_tensor,
                     loop_similarities=loop_similarities,
                     done_flags=done_or_truncated,
-                    include_telemetry_scalars=publish_step_telemetry,
+                    actor_indices=step_telemetry_actor_indices,
                 )
                 host_extract_ms = (time.perf_counter() - t_host_start) * 1000
 
@@ -985,10 +1136,11 @@ class PpoTrainer:
                         or host_scalar_batch.done_tensor is None
                     ):
                         raise RuntimeError("telemetry scalar extraction is required for step telemetry emission")
-                    for actor_id in range(n):
-                        if not self._should_publish_actor_telemetry(actor_id):
-                            continue
-                        loop_similarity = float(host_scalar_batch.loop_similarity_tensor[actor_id])
+                    if step_telemetry_actor_indices is None:
+                        raise RuntimeError("step_telemetry_actor_indices is required for telemetry emission")
+                    selected_actor_ids = step_telemetry_actor_indices.detach().to(device="cpu", dtype=torch.int64).tolist()
+                    for row, actor_id in enumerate(selected_actor_ids):
+                        loop_similarity = float(host_scalar_batch.loop_similarity_tensor[row])
                         reward_components = None
                         if reward_component_tensor is not None:
                             reward_components = reward_component_tensor[actor_id]
@@ -997,15 +1149,15 @@ class PpoTrainer:
                             step_id=step_id,
                             episode_id=int(res_results[actor_id].episode_id),
                             actor_id=actor_id,
-                            raw_reward=float(host_scalar_batch.raw_reward_tensor[actor_id]),
-                            shaped_reward=float(host_scalar_batch.shaped_reward_tensor[actor_id]),
-                            intrinsic_reward=float(host_scalar_batch.intrinsic_reward_tensor[actor_id]),
+                            raw_reward=float(host_scalar_batch.raw_reward_tensor[row]),
+                            shaped_reward=float(host_scalar_batch.shaped_reward_tensor[row]),
+                            intrinsic_reward=float(host_scalar_batch.intrinsic_reward_tensor[row]),
                             loop_similarity=loop_similarity,
                             is_loop=(loop_similarity > self._config.loop_threshold),
                             beta=self._reward_shaper.beta,
-                            done=bool(host_scalar_batch.done_tensor[actor_id]),
-                            forward_vel=float(host_batch.action_cpu_tensor[actor_id, 0]),
-                            yaw_vel=float(host_batch.action_cpu_tensor[actor_id, 3]),
+                            done=bool(host_scalar_batch.done_tensor[row]),
+                            forward_vel=float(host_batch.action_cpu_tensor[row, 0]),
+                            yaw_vel=float(host_batch.action_cpu_tensor[row, 3]),
                             exploration_reward=0.0 if reward_components is None else float(reward_components[0]),
                             progress_reward=0.0 if reward_components is None else float(reward_components[1]),
                             clearance_reward=0.0 if reward_components is None else float(reward_components[2]),
@@ -1064,6 +1216,7 @@ class PpoTrainer:
 
                 step_id += n
                 self._total_sim_steps += n
+                rollout_actor_steps += n
 
                 tick_ms = (time.perf_counter() - t_tick) * 1000
                 acc_fwd += fwd_ms
@@ -1084,11 +1237,12 @@ class PpoTrainer:
                     sps = log_every / max(0.001, now_perf - getattr(self, '_last_log_time', t_start))
                     self._last_log_time = now_perf
                     zw = self._sim_steps_during_opt / max(1, self._total_sim_steps)
+                    reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))
                     _LOGGER.info(
                         "[step %d] reward_ema=%.4f episodes=%d | sps=%.1f zw=%.1f%% | "
                         "fwd=%.1fms pack=%.1fms env=%.1fms mem=%.1fms trans=%.1fms "
                         "(shape=%.1fms madd=%.1fms buf=%.1fms host=%.1fms tele=%.1fms)",
-                        step_id, r_ema, ep_cnt, sps, zw * 100,
+                        step_id, reward_ema_value, ep_cnt, sps, zw * 100,
                         fwd_ms, pack_ms, step_ms, mem_ms, trans_ms, shape_ms, memory_add_ms, buffer_ms, host_extract_ms, telemetry_ms,
                     )
                     self._publish_perf_telemetry(step_id=step_id, sps=sps, forward_pass_ms=fwd_ms, batch_step_ms=step_ms, memory_query_ms=mem_ms,
@@ -1110,6 +1264,9 @@ class PpoTrainer:
                             step_id,
                         )
 
+            if rollout_actor_steps <= 0:
+                break
+
             # --- Rollout Loop Finished ---
             self._run_ppo_update(
                 multi_buffer=self._multi_buffers,
@@ -1120,7 +1277,8 @@ class PpoTrainer:
                 seq_len=sl,
             )
             if self._last_opt_metrics:
-                self._publish_update_telemetry(step_id, r_ema, self._last_opt_metrics)
+                reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))
+                self._publish_update_telemetry(step_id, reward_ema_value, self._last_opt_metrics)
 
             # Save when we've advanced at least one checkpoint interval since the last save.
             # This remains correct even when rollout boundaries do not land on exact modulo values.
@@ -1129,7 +1287,8 @@ class PpoTrainer:
                 last_checkpoint_step = step_id
 
         reward_mean = float(reward_sum_tensor.item()) / max(1, step_id)
-        return PpoTrainingMetrics(total_steps=step_id, episodes=ep_cnt, reward_mean=reward_mean, reward_ema=r_ema,
+        reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))
+        return PpoTrainingMetrics(total_steps=step_id, episodes=ep_cnt, reward_mean=reward_mean, reward_ema=reward_ema_value,
                                   policy_loss=0.0, value_loss=0.0, entropy=0.0, rnd_loss=0.0, intrinsic_reward_mean=0.0,
                                   loop_detections=0, beta_final=self._reward_shaper.beta,
                                   sps_mean=(step_id / max(0.001, time.perf_counter() - t_start)),

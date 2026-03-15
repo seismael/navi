@@ -6,11 +6,11 @@ import math
 
 import torch
 from torch import Tensor, nn
-from torch.distributions import Normal
 
 __all__: list[str] = ["ActorCriticHeads"]
 
 _SQRT2: float = math.sqrt(2.0)
+_HALF_LOG_TWO_PI: float = 0.5 * math.log(2.0 * math.pi)
 
 
 class ActorCriticHeads(nn.Module):
@@ -46,9 +46,13 @@ class ActorCriticHeads(nn.Module):
         super().__init__()
         self.action_dim = 4
 
-        self.action_scales = torch.tensor(
-            [max_forward, max_vertical, max_lateral, max_yaw],
-            dtype=torch.float32,
+        self.register_buffer(
+            "action_scales",
+            torch.tensor(
+                [max_forward, max_vertical, max_lateral, max_yaw],
+                dtype=torch.float32,
+            ),
+            persistent=False,
         )
 
         # Actor MLP
@@ -115,11 +119,15 @@ class ActorCriticHeads(nn.Module):
             value: (B,) state-value estimates.
 
         """
-        scales = self.action_scales.to(features.device)
-        raw_mean: Tensor = self.actor(features)  # (B, 4) in [-1, 1]
-        action_mean = raw_mean * scales  # (B, 4)
+        action_mean = self.action_mean(features)
         value: Tensor = self.critic(features).squeeze(-1)  # (B,)
         return action_mean, value
+
+    def action_mean(self, features: Tensor) -> Tensor:
+        """Compute the scaled actor mean without running the critic head."""
+        raw_mean: Tensor = self.actor(features)
+        action_scales: Tensor = self.action_scales
+        return raw_mean * action_scales
 
     def log_prob(self, features: Tensor, actions: Tensor) -> Tensor:
         """Evaluate log probability of given actions under the current policy.
@@ -132,14 +140,13 @@ class ActorCriticHeads(nn.Module):
             log_prob: (B,) log probabilities (sum over action dims).
 
         """
-        action_mean, _ = self.forward(features)
-        std = self.log_std.exp()
-        # Gaussian log-prob per dim, then sum
-        var = std * std
+        action_mean = self.action_mean(features)
+        inv_var = torch.exp(-2.0 * self.log_std)
+        # Gaussian log-prob per dim, then sum.
         log_p = (
-            -0.5 * ((actions - action_mean) ** 2) / var
+            -0.5 * ((actions - action_mean) ** 2) * inv_var
             - self.log_std
-            - 0.5 * math.log(2.0 * math.pi)
+            - _HALF_LOG_TWO_PI
         )
         log_prob: Tensor = log_p.sum(dim=-1)
         return log_prob
@@ -151,8 +158,7 @@ class ActorCriticHeads(nn.Module):
             entropy: scalar — sum of per-dim differential entropies.
 
         """
-        std = self.log_std.exp()
-        ent = 0.5 + 0.5 * math.log(2.0 * math.pi) + torch.log(std)
+        ent = 0.5 + _HALF_LOG_TWO_PI + self.log_std
         return ent.sum()
 
     def sample(self, features: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -167,9 +173,15 @@ class ActorCriticHeads(nn.Module):
             values: (B,) state-value estimates.
 
         """
-        action_mean, values = self.forward(features)
+        action_mean = self.action_mean(features)
+        values: Tensor = self.critic(features).squeeze(-1)
         std = self.log_std.exp()
-        dist = Normal(action_mean, std)  # type: ignore[no-untyped-call]
-        actions = dist.sample()  # type: ignore[no-untyped-call]
-        log_probs = dist.log_prob(actions).sum(dim=-1)  # type: ignore[no-untyped-call]
+        noise = torch.randn_like(action_mean)
+        actions = action_mean + noise * std
+        action_delta = actions.detach() - action_mean
+        log_probs = (
+            -0.5 * ((action_delta / std) ** 2)
+            - self.log_std
+            - _HALF_LOG_TWO_PI
+        ).sum(dim=-1)
         return actions, log_probs, values

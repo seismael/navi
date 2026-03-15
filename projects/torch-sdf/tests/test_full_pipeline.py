@@ -1,15 +1,45 @@
-import torch
+import importlib.util
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable, cast
+
 import numpy as np
 import pytest
-import os
-import time
-from typing import Any, cast
+import torch
 import torch_sdf
 
 
 def _require_voxel_dag() -> tuple[Any, Any, Any]:
-    compiler = pytest.importorskip("voxel_dag.compiler")
-    return compiler.MeshIngestor, compiler.compute_dense_sdf, compiler.compress_to_dag
+    compiler_path = _repo_root() / "projects" / "voxel-dag" / "voxel_dag" / "compiler.py"
+    spec = importlib.util.spec_from_file_location("navi_test_voxel_dag_compiler", compiler_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load voxel-dag compiler from {compiler_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.MeshIngestor, module.compute_dense_sdf, module.compress_to_dag
+
+
+def _repo_root() -> Path:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "AGENTS.md").exists() and (parent / "projects").exists():
+            return parent
+    msg = "Could not resolve repo root for torch-sdf full pipeline tests"
+    raise RuntimeError(msg)
+
+
+def _load_oracle_house_writer() -> Callable[[str | Path], None]:
+    helper_path = _repo_root() / "projects" / "contracts" / "src" / "navi_contracts" / "testing" / "oracle_house.py"
+    spec = importlib.util.spec_from_file_location("navi_test_oracle_house", helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load oracle fixture helper from {helper_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return cast("Callable[[str | Path], None]", module.write_square_house_obj)
 
 def test_full_pipeline_integrity():
     """
@@ -73,6 +103,62 @@ def test_full_pipeline_integrity():
 
     os.remove(hallway_obj)
     print("\n[PASS] torch-sdf Hallway & Integrity Validated.")
+
+
+def test_square_house_pipeline_reduces_forward_distance_after_motion(tmp_path: Path) -> None:
+    """Compiled oracle house should report a shorter forward hit after forward motion."""
+    MeshIngestor, compute_dense_sdf, compress_to_dag = _require_voxel_dag()
+    MeshIngestor = cast(Any, MeshIngestor)
+    compute_dense_sdf = cast(Any, compute_dense_sdf)
+    compress_to_dag = cast(Any, compress_to_dag)
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    source = tmp_path / "square_house.obj"
+    _load_oracle_house_writer()(source)
+
+    vertices, indices, bbox_min, bbox_max = MeshIngestor.load_obj(str(source))
+    grid, voxel_size, cube_min = compute_dense_sdf(vertices, indices, bbox_min, bbox_max, 64, padding=0.0)
+    dag_np = compress_to_dag(grid, 64)
+    dag_torch = torch.from_numpy(dag_np.view(np.int64)).cuda()
+    cube_max = cube_min + (64 * voxel_size)
+
+    origins = torch.tensor(
+        [
+            [[0.0, 1.0, 0.0]],
+            [[0.75, 1.0, 0.0]],
+        ],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    dirs = torch.tensor(
+        [
+            [[1.0, 0.0, 0.0]],
+            [[1.0, 0.0, 0.0]],
+        ],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    out_d = torch.full((2, 1), -1.0, device="cuda", dtype=torch.float32)
+    out_s = torch.full((2, 1), -1, device="cuda", dtype=torch.int32)
+
+    torch_sdf.cast_rays(
+        dag_torch,
+        origins,
+        dirs,
+        out_d,
+        out_s,
+        128,
+        10.0,
+        cube_min.tolist(),
+        cube_max.tolist(),
+        64,
+    )
+
+    distances = out_d[:, 0].detach().cpu().numpy()
+    assert np.all(distances > 0.0)
+    assert float(distances[1]) < float(distances[0])
+    assert float(distances[0] - distances[1]) > 0.35
 
 def benchmark_throughput():
     """Verify performance under load (planned 10,000 SPS)."""

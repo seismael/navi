@@ -1,9 +1,9 @@
-"""Temporal backend bake-off harness for actor migration.
+"""Canonical temporal profiling harness.
 
-This script benchmarks candidate temporal cores under the actor interface shape:
-(B, T, D) -> (B, T, D) and single-step (B, D) -> (B, D).
+This script benchmarks the active actor temporal core under the actor interface
+shape: (B, T, D) -> (B, T, D) and single-step (B, D) -> (B, D).
 
-It is migration tooling only and does not alter production runtime selection.
+It is diagnostic tooling only and does not alter production runtime selection.
 """
 
 from __future__ import annotations
@@ -38,51 +38,6 @@ class TemporalCoreLike(Protocol):
         ...
 
 
-class GruTemporalCore(nn.Module):
-    """Simple GRU candidate for baseline comparison."""
-
-    def __init__(self, d_model: int) -> None:
-        super().__init__()
-        self.core = nn.GRU(input_size=d_model, hidden_size=d_model, batch_first=True)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, z_seq: Tensor) -> tuple[Tensor, Tensor | None]:
-        out, hidden = self.core(z_seq)
-        return self.norm(out + z_seq), hidden
-
-    def forward_step(
-        self,
-        z_t: Tensor,
-        hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
-        out, next_hidden = self.core(z_t.unsqueeze(1), hidden)
-        out = self.norm(out.squeeze(1) + z_t)
-        return out, next_hidden
-
-
-class LstmTemporalCore(nn.Module):
-    """Simple LSTM candidate for baseline comparison."""
-
-    def __init__(self, d_model: int) -> None:
-        super().__init__()
-        self.core = nn.LSTM(input_size=d_model, hidden_size=d_model, batch_first=True)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, z_seq: Tensor) -> tuple[Tensor, Tensor | None]:
-        out, _state = self.core(z_seq)
-        return self.norm(out + z_seq), None
-
-    def forward_step(
-        self,
-        z_t: Tensor,
-        hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
-        del hidden
-        out, _state = self.core(z_t.unsqueeze(1))
-        out = self.norm(out.squeeze(1) + z_t)
-        return out, None
-
-
 @dataclass
 class BenchmarkResult:
     """Single candidate benchmark summary."""
@@ -102,22 +57,26 @@ class BenchmarkResult:
 
 
 def _time_call(fn: Callable[[], object], repeats: int) -> float:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start = time.perf_counter()
     for _ in range(repeats):
         fn()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     total = time.perf_counter() - start
     return (total / max(1, repeats)) * 1000.0
 
 
 def _make_candidate(name: str, d_model: int, device: torch.device) -> TemporalCoreLike:
-    if name == "gru":
-        return GruTemporalCore(d_model).to(device)
-    if name == "lstm":
-        return LstmTemporalCore(d_model).to(device)
-    if name == "mamba2":
-        from navi_actor.mamba_core import Mamba2TemporalCore
+    if name == "mambapy":
+        from navi_actor.mambapy_core import MambapyTemporalCore
 
-        return Mamba2TemporalCore(d_model=d_model).to(device)
+        return MambapyTemporalCore(d_model=d_model).to(device)
+    if name == "gru":
+        from navi_actor.gru_core import GRUTemporalCore
+
+        return GRUTemporalCore(d_model=d_model).to(device)
     raise ValueError(f"Unknown candidate: {name}")
 
 
@@ -182,18 +141,19 @@ def benchmark_candidate(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark actor temporal-core candidates")
-    parser.add_argument(
-        "--candidates",
-        type=str,
-        default="mamba2,gru,lstm",
-        help="Comma-separated candidates: mamba2,gru,lstm",
-    )
+    parser = argparse.ArgumentParser(description="Benchmark the canonical actor temporal runtimes")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--seq-len", type=int, default=128)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--repeats", type=int, default=40)
     parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument(
+        "--candidates",
+        nargs="+",
+        default=["mambapy", "gru"],
+        choices=["mambapy", "gru"],
+        help="Temporal-core candidates to benchmark.",
+    )
     parser.add_argument(
         "--device",
         type=str,
@@ -210,10 +170,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    names = [x.strip().lower() for x in args.candidates.split(",") if x.strip()]
-
-    if not names:
-        raise ValueError("No candidates were provided")
+    names = list(args.candidates)
 
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but torch.cuda.is_available() is false")
@@ -238,7 +195,7 @@ def main() -> int:
         print(json.dumps([asdict(x) for x in results], indent=2))  # noqa: T201
         return 0
 
-    print("Temporal backend benchmark results")  # noqa: T201
+    print("Canonical temporal profile results")  # noqa: T201
     print(f"  device={device} batch={args.batch} seq_len={args.seq_len} d_model={args.d_model}")  # noqa: T201
     for result in results:
         if not result.available:

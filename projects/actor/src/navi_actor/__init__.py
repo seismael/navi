@@ -9,6 +9,7 @@ __all__: list[str] = [
     "CognitiveMambaPolicy",
     "EpisodicMemory",
     "extract_spherical_features",
+    "GRUTemporalCore",
     "Mamba2TemporalCore",
     "PPOTransition",
     "PpoLearner",
@@ -25,6 +26,7 @@ __all__: list[str] = [
 from navi_actor.actor_critic import ActorCriticHeads
 from navi_actor.cognitive_policy import CognitiveMambaPolicy
 from navi_actor.config import ActorConfig
+from navi_actor.gru_core import GRUTemporalCore
 from navi_actor.learner_ppo import PpoLearner, PpoMetrics
 from navi_actor.mamba_core import Mamba2TemporalCore
 from navi_actor.memory.episodic import EpisodicMemory

@@ -43,6 +43,9 @@ param(
     [string]$Checkpoint = "",
     [int]$LogEvery = 100,
     [int]$RolloutLength = 512,
+    [int]$ActorTelemetryPort = 5557,
+    [ValidateSet("mambapy", "gru")]
+    [string]$TemporalCore = "gru",
 
     # ── Inference-mode ZMQ addresses ──
     [string]$EnvironmentPub = "tcp://*:5559",
@@ -119,7 +122,11 @@ function Stop-NaviProcesses {
     }
 
     # Also kill any detached child process still holding Navi ports.
-    Stop-ListenersOnPorts -Ports @(5557, 5559, 5560)
+    $ports = @(5559, 5560, 5557)
+    if ($ActorTelemetryPort -ne 5557) {
+        $ports += $ActorTelemetryPort
+    }
+    Stop-ListenersOnPorts -Ports $ports
 }
 
 function Start-BackgroundUv {
@@ -250,6 +257,69 @@ function Wait-ForPorts {
     return $false
 }
 
+function Wait-ForTrainingReady {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$Port,
+        [string[]]$LogFiles,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($null -ne $Process) {
+            try {
+                $Process.Refresh()
+                if ($Process.HasExited) {
+                    return @{
+                        Ready = $false
+                        Reason = "process-exited"
+                        ExitCode = $Process.ExitCode
+                    }
+                }
+            }
+            catch {
+            }
+        }
+
+        if (Wait-ForPorts -Ports @($Port) -TimeoutSeconds 1) {
+            return @{
+                Ready = $true
+                Reason = "port-bound"
+            }
+        }
+
+        foreach ($logFile in $LogFiles) {
+            if (-not $logFile -or -not (Test-Path $logFile)) {
+                continue
+            }
+
+            $tail = Get-Content $logFile -Tail 40 -ErrorAction SilentlyContinue
+            if (-not $tail) {
+                continue
+            }
+
+            $tailText = ($tail -join "`n")
+            if (
+                $tailText -match "Async telemetry worker started on .*:$Port" -or
+                $tailText -match "Canonical PPO trainer started: .* pub=tcp://localhost:$Port"
+            ) {
+                return @{
+                    Ready = $true
+                    Reason = "log-ready"
+                }
+            }
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    return @{
+        Ready = $false
+        Reason = "timeout"
+    }
+}
+
 $repoRoot = Get-RepoRoot
 $logsDir = Join-Path $repoRoot "scripts\logs"
 
@@ -316,9 +386,11 @@ if ($Train) {
         "run",
         "--python", $PythonVersion,
         "--project", (Join-Path $repoRoot "projects\actor"),
-        "navi-actor", "train",
+        "python", "-m", "navi_actor.cli", "train",
         "--actors", "$NumActors",
+        "--temporal-core", "$TemporalCore",
         "--total-steps", $TotalSteps,
+        "--actor-pub", "tcp://localhost:$ActorTelemetryPort",
         "--shuffle",
         "--checkpoint-every", $CheckpointEvery,
         "--checkpoint-dir", $CheckpointDir,
@@ -355,6 +427,7 @@ if ($Train) {
 
     $trainLogOut = Join-Path $logsDir "train.out.log"
     $trainLogErr = Join-Path $logsDir "train.err.log"
+    $trainUnifiedLog = Join-Path $repoRoot "logs\navi_actor_train.log"
 
     $trainProc = $null
     try {
@@ -364,6 +437,8 @@ if ($Train) {
         Write-Host "  Corpus     : $(if ($resolvedGmDagFile) { $resolvedGmDagFile } elseif ($resolvedScene) { $resolvedScene } elseif ($resolvedManifest) { $resolvedManifest } elseif ($resolvedCorpusRoot) { $resolvedCorpusRoot } else { 'auto-discovered canonical corpus' })"
         Write-Host "  Actors     : $NumActors (Standard Fleet)"
         Write-Host "  Total Steps: $(if ($TotalSteps -le 0) { 'continuous until stopped' } else { $TotalSteps })"
+        Write-Host "  Temporal   : $TemporalCore"
+        Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
         Write-Host "  Dashboard  : $(if ($NoDashboard) { 'disabled' } else { 'enabled' })"
         Write-Host "========================================================"
@@ -373,31 +448,41 @@ if ($Train) {
         Write-Host "  PID: $($trainProc.Id)"
         Write-Host "  Logs: $trainLogOut"
         Write-Host "        $trainLogErr"
+        Write-Host "        $trainUnifiedLog"
 
-        Write-Host "Verifying training telemetry socket (5557)..."
-        if (-not (Wait-ForPorts -Ports @(5557) -TimeoutSeconds 60)) {
-            Write-Host "ERROR: training telemetry failed readiness check (5557)."
+        Write-Host "Verifying training telemetry readiness ($ActorTelemetryPort)..."
+        $trainingReady = Wait-ForTrainingReady -Process $trainProc -Port $ActorTelemetryPort -LogFiles @($trainLogErr, $trainUnifiedLog) -TimeoutSeconds 180
+        if (-not $trainingReady.Ready) {
+            $reason = [string]$trainingReady.Reason
+            if ($reason -eq "process-exited") {
+                Write-Host "ERROR: canonical train exited before telemetry became ready (exit code $($trainingReady.ExitCode))."
+            }
+            else {
+                Write-Host "ERROR: training telemetry failed readiness check ($ActorTelemetryPort, reason=$reason)."
+            }
             Write-Host "Check logs: $trainLogErr"
+            Write-Host "            $trainUnifiedLog"
             if ($null -ne $trainProc -and -not $trainProc.HasExited) {
                 Stop-ProcessTreeById -ProcessId $trainProc.Id
             }
-            Stop-ListenersOnPorts -Ports @(5557, 5559, 5560)
+            Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
             exit 1
         }
         else {
-            Write-Host "  OK: actor telemetry is bound."
+            Write-Host "  OK: actor telemetry is ready ($($trainingReady.Reason))."
         }
 
         if (-not $NoDashboard) {
             # The canonical trainer only guarantees actor telemetry. The auditor
             # remains resilient when matrix/step streams are absent.
             Write-Host "`nWaiting for actor telemetry before launching dashboard..."
-            if (-not (Wait-ForPorts -Ports @(5557) -TimeoutSeconds 60)) {
-                Write-Host "ERROR: Dashboard launch aborted, actor telemetry not ready (5557)."
+            $dashboardReady = Wait-ForTrainingReady -Process $trainProc -Port $ActorTelemetryPort -LogFiles @($trainLogErr, $trainUnifiedLog) -TimeoutSeconds 180
+            if (-not $dashboardReady.Ready) {
+                Write-Host "ERROR: Dashboard launch aborted, actor telemetry not ready ($ActorTelemetryPort, reason=$($dashboardReady.Reason))."
                 if ($null -ne $trainProc -and -not $trainProc.HasExited) {
                     Stop-ProcessTreeById -ProcessId $trainProc.Id
                 }
-                Stop-ListenersOnPorts -Ports @(5557, 5559, 5560)
+                Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
                 exit 1
             }
 
@@ -406,12 +491,12 @@ if ($Train) {
             & uv run --project (Join-Path $repoRoot "projects\auditor") `
                 --python $PythonVersion `
                 navi-auditor dashboard `
-                --actor-sub "tcp://localhost:5557" `
+                --actor-sub "tcp://localhost:$ActorTelemetryPort" `
                 --passive
         }
         else {
             Write-Host "`nDashboard disabled. Training runs in background."
-            Write-Host "  Tail logs: Get-Content '$trainLogErr' -Wait"
+            Write-Host "  Tail logs: Get-Content '$trainUnifiedLog' -Wait"
             Write-Host "  Stop:      Stop-Process -Id $($trainProc.Id) -Force"
 
             # In no-dashboard mode, wait for canonical train to finish naturally.
@@ -430,7 +515,7 @@ if ($Train) {
             Write-Host "`nStopping canonical train (PID $($trainProc.Id))..."
             Stop-ProcessTreeById -ProcessId $trainProc.Id
         }
-        Stop-ListenersOnPorts -Ports @(5557, 5559, 5560)
+        Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
     }
     exit 0
 }
@@ -462,6 +547,7 @@ $actorArgs = @(
     "--sub", $ActorSub,
     "--pub", $ActorPub,
     "--mode", "step",
+    "--temporal-core", "$TemporalCore",
     "--step-endpoint", $ActorStepEndpoint,
     "--azimuth-bins", "$AzimuthBins",
     "--elevation-bins", "$ElevationBins"

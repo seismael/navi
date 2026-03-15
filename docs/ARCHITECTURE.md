@@ -60,9 +60,15 @@ transient source staging
   -> compiled corpus promotion
   -> CUDA DAG loading and batched ray execution
   -> environment reward and observation adaptation
-  -> actor rollout and PPO
+  -> actor rollout, selected temporal core, and PPO
   -> passive telemetry, record, and replay surfaces
 ```
+
+The actor segment of that path is canonical only when the temporal core runs
+through the one production selector contract used on the active Windows
+machine. The repository defaults that selector to the native cuDNN GRU
+path, while allowing `mambapy` to run on the same trainer surface for
+like-for-like comparisons without introducing a second actor architecture.
 
 The canonical training integration point is at the CLI and orchestration
 boundary. The actor is allowed to instantiate or drive the environment backend

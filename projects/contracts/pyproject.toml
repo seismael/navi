@@ -28,6 +28,7 @@ packages = ["src/navi_contracts"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = ["--strict-markers", "--strict-config", "-ra", "--tb=short"]
+cache_dir = "tests/.pytest_cache_local"
 markers = [
     "slow: marks tests as slow",
     "integration: marks integration tests",

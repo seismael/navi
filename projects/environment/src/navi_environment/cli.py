@@ -13,7 +13,10 @@ import typer
 
 from navi_contracts import Action, setup_logging
 from navi_environment.config import EnvironmentConfig
-from navi_environment.integration.corpus import prepare_training_scene_corpus, validate_compiled_scene_corpus
+from navi_environment.integration.corpus import (
+    prepare_training_scene_corpus,
+    validate_compiled_scene_corpus,
+)
 from navi_environment.integration.voxel_dag import compile_gmdag_world, probe_sdfdag_runtime
 from navi_environment.server import EnvironmentServer
 
@@ -116,6 +119,9 @@ def _run_bench_iteration(
 
     total_actor_steps = steps * actors
     measured_sps = total_actor_steps / elapsed if elapsed > 0.0 else 0.0
+    torch_compile_active = False
+    if hasattr(backend, "torch_compile_enabled"):
+        torch_compile_active = bool(backend.torch_compile_enabled())
     return {
         "measured_sps": measured_sps,
         "rolling_sps": snapshot.sps,
@@ -127,6 +133,7 @@ def _run_bench_iteration(
         "total_actor_steps": snapshot.total_actor_steps,
         "expected_total_batches": expected_total_batches,
         "expected_total_actor_steps": expected_total_actor_steps,
+        "torch_compile_active": int(torch_compile_active),
     }
 
 
@@ -134,9 +141,15 @@ def _aggregate_bench_runs(runs: list[dict[str, float | int]]) -> dict[str, float
     if not runs:
         raise RuntimeError("bench-sdfdag requires at least one run")
 
+    compile_values = {int(run["torch_compile_active"]) for run in runs if "torch_compile_active" in run}
+    compile_summary: dict[str, float | int] = {}
+    if len(compile_values) == 1:
+        compile_summary["torch_compile_active"] = next(iter(compile_values))
+
     if len(runs) == 1:
         return {
             **runs[0],
+            **compile_summary,
             "aggregation": "single",
             "repeats": 1,
             "per_run": [dict(runs[0], run_index=1)],
@@ -154,6 +167,7 @@ def _aggregate_bench_runs(runs: list[dict[str, float | int]]) -> dict[str, float
     expected_total_actor_steps_values = [int(run["expected_total_actor_steps"]) for run in runs]
 
     return {
+        **compile_summary,
         "aggregation": "median",
         "repeats": len(runs),
         "measured_sps": statistics.median(measured_sps_values),
@@ -415,6 +429,7 @@ def bench_sdfdag(
     elevation_bins: int = typer.Option(48, help="Distance-matrix elevation bins"),
     max_distance: float = typer.Option(30.0, help="Distance normalization range"),
     sdf_max_steps: int = typer.Option(256, help="Maximum sphere-tracing iterations per ray"),
+    torch_compile: bool = typer.Option(True, "--torch-compile/--no-torch-compile", help="Compile tensor-only sdfdag helper graphs with torch.compile"),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON benchmark summary instead of text"),
 ) -> None:
     """Benchmark the canonical batched SDF/DAG environment path."""
@@ -429,6 +444,7 @@ def bench_sdfdag(
         backend="sdfdag",
         gmdag_file=gmdag_file,
         sdf_max_steps=sdf_max_steps,
+        sdfdag_torch_compile=torch_compile,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
         max_distance=max_distance,
@@ -455,6 +471,7 @@ def bench_sdfdag(
         "elevation_bins": elevation_bins,
         "max_distance": max_distance,
         "sdf_max_steps": sdf_max_steps,
+        "torch_compile": torch_compile,
         **aggregated,
     }
     if json_output:

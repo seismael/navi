@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from navi_contracts.testing.oracle_house import house_metric_distances, house_observation
 from navi_environment.backends.sdfdag_backend import (
     SdfDagBackend,
     _forward_structure_reward,
@@ -134,12 +135,13 @@ def test_scene_rotation_waits_for_configured_episode_budget() -> None:
     backend = object.__new__(SdfDagBackend)
     backend._scene_pool = ["scene_a.gmdag", "scene_b.gmdag"]
     backend._scene_pool_idx = 0
-    backend._episodes_in_scene = 15
+    backend._episodes_in_scene = 31
     backend._scene_episodes_per_scene = 16
     backend._n_actors = 2
     backend._device = torch.device("cpu")
     backend._torch = torch
     backend._spawn_positions = torch.zeros((2, 3), dtype=torch.float32)
+    backend._needs_reset_mask = torch.zeros((2,), dtype=torch.bool)
 
     def _load_scene(_scene_path: str) -> list[tuple[float, float, float]]:
         spawns = [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
@@ -340,3 +342,60 @@ def test_cast_actor_batch_tensors_rejects_wrong_output_dtype() -> None:
 
     with pytest.raises(RuntimeError, match="out_semantics must have dtype"):
         backend._cast_actor_batch_tensors((0,))
+
+
+def test_postprocess_cast_outputs_preserves_oracle_house_profile() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._torch = torch
+    backend._max_distance = 10.0
+    backend._az_bins = 12
+    backend._el_bins = 3
+
+    oracle = house_observation()
+    metric = house_metric_distances(backend._max_distance)
+    metric = np.where(oracle.valid, metric, backend._max_distance + 1.0)
+    out_distances = torch.from_numpy(metric.reshape(1, -1))
+    out_semantics = torch.from_numpy(oracle.semantic.reshape(1, -1))
+
+    depth_batch, semantic_batch, valid_batch, min_distances, *_rest = backend._postprocess_cast_outputs_impl(
+        out_distances,
+        out_semantics,
+    )
+
+    np.testing.assert_allclose(depth_batch[0].numpy(), oracle.depth)
+    np.testing.assert_array_equal(semantic_batch[0].numpy(), oracle.semantic)
+    np.testing.assert_array_equal(valid_batch[0].numpy(), oracle.valid)
+    assert min_distances.shape == (1,)
+    assert min_distances[0].item() == pytest.approx(float(np.min(metric[oracle.valid])))
+
+
+def test_materialize_observation_preserves_oracle_house_arrays() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._episode_ids = torch.tensor([17], dtype=torch.int64)
+    backend.actor_pose = lambda actor_id: type("Pose", (), {
+        "x": float(actor_id),
+        "y": 0.0,
+        "z": 0.0,
+        "roll": 0.0,
+        "pitch": 0.0,
+        "yaw": 0.0,
+        "timestamp": 1.0,
+    })()  # type: ignore[method-assign]
+
+    oracle = house_observation()
+    delta = np.zeros_like(oracle.depth)
+    observation = backend._materialize_observation(
+        actor_id=0,
+        step_id=9,
+        depth_2d=oracle.depth,
+        delta_2d=delta,
+        semantic_2d=oracle.semantic,
+        valid_2d=oracle.valid,
+    )
+
+    np.testing.assert_allclose(observation.depth[0], oracle.depth)
+    np.testing.assert_allclose(observation.delta_depth[0], delta)
+    np.testing.assert_array_equal(observation.semantic[0], oracle.semantic)
+    np.testing.assert_array_equal(observation.valid_mask[0], oracle.valid)
+    assert observation.episode_id == 17
+    assert observation.step_id == 9

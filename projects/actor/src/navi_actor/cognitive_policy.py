@@ -1,7 +1,7 @@
-"""Cognitive Mamba Policy — end-to-end neural policy for PPO training.
+"""Cognitive policy — end-to-end neural policy for PPO training.
 
 **This module is sacred.**  The cognitive pipeline
-(RayViTEncoder → Mamba2TemporalCore → EpisodicMemory → ActorCriticHeads)
+(RayViTEncoder → TemporalCore → EpisodicMemory → ActorCriticHeads)
 is never modified to accommodate new data sources or sensor types.
 External data connects only through ``DatasetAdapter`` instances in
 ``environment/backends/`` that transform raw observations *to*
@@ -18,18 +18,41 @@ import torch
 from torch import Tensor, nn
 
 from navi_actor.actor_critic import ActorCriticHeads
-from navi_actor.mamba_core import Mamba2TemporalCore
+from navi_actor.config import SUPPORTED_TEMPORAL_CORES, TemporalCoreName
+from navi_actor.gru_core import GRUTemporalCore
+from navi_actor.mambapy_core import MambapyTemporalCore
 
 __all__: list[str] = ["CognitiveMambaPolicy"]
 
 
-class CognitiveMambaPolicy(nn.Module):
-    """Composes RayViTEncoder -> Mamba2TemporalCore -> ActorCriticHeads.
+def _build_temporal_core(
+    *,
+    temporal_core: TemporalCoreName,
+    embedding_dim: int,
+    d_state: int,
+    d_conv: int,
+    expand: int,
+) -> nn.Module:
+    if temporal_core == "mambapy":
+        return MambapyTemporalCore(
+            d_model=embedding_dim,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+        )
+    if temporal_core == "gru":
+        return GRUTemporalCore(d_model=embedding_dim)
+    supported = ", ".join(SUPPORTED_TEMPORAL_CORES)
+    raise ValueError(f"Unsupported temporal core '{temporal_core}'. Expected one of: {supported}")
+
+
+class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
+    """Composes RayViTEncoder -> TemporalCore -> ActorCriticHeads.
 
     Five-stage cognitive flow:
       1. RayViT Encoder: (B,3,Az,El) -> (B,D) spatial embedding z_t
       2. (RND + EpisodicMemory operate externally on z_t)
-      3. Mamba2 Temporal Core: z_t -> temporal features f_t
+    3. Temporal Core: z_t -> temporal features f_t
       4. Actor-Critic Heads: f_t -> actions + value
     """
 
@@ -37,6 +60,7 @@ class CognitiveMambaPolicy(nn.Module):
         self,
         embedding_dim: int = 128,
         *,
+        temporal_core: TemporalCoreName = "gru",
         azimuth_bins: int = 128,
         elevation_bins: int = 24,
         max_forward: float = 1.0,
@@ -49,6 +73,7 @@ class CognitiveMambaPolicy(nn.Module):
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
+        self.temporal_core_name = temporal_core
         self.azimuth_bins = azimuth_bins
         self.elevation_bins = elevation_bins
 
@@ -56,8 +81,9 @@ class CognitiveMambaPolicy(nn.Module):
 
         self.encoder = RayViTEncoder(embedding_dim=embedding_dim)
 
-        self.temporal_core = Mamba2TemporalCore(
-            d_model=embedding_dim,
+        self.temporal_core = _build_temporal_core(
+            temporal_core=temporal_core,
+            embedding_dim=embedding_dim,
             d_state=d_state,
             d_conv=d_conv,
             expand=expand,
@@ -187,7 +213,6 @@ class CognitiveMambaPolicy(nn.Module):
         obs_seq: Tensor,
         actions_seq: Tensor,
         hidden: Tensor | None = None,
-        dones: Tensor | None = None,
         aux_seq: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
         """Evaluate a full sequence for BPTT training.
@@ -196,7 +221,6 @@ class CognitiveMambaPolicy(nn.Module):
             obs_seq: (B, T, 3, Az, El) observation sequence.
             actions_seq: (B, T, 4) action sequence.
             hidden: initial hidden state.
-            dones: (B, T) boolean episode-boundary mask.
             aux_seq: (B, T, 3) optional auxiliary tensor sequence.
 
         Returns:
@@ -213,9 +237,9 @@ class CognitiveMambaPolicy(nn.Module):
         z_flat = self.encoder(flat_obs)
         z_seq = z_flat.reshape(batch, seq_len, -1)
 
-        # Temporal core: full sequence with dones mask
+        # Temporal core: full-sequence evaluation on the active hidden-free path
         features_seq, new_hidden = self.temporal_core.forward(
-            z_seq, hidden, dones=dones, aux_tensor=aux_seq,
+            z_seq, hidden, aux_tensor=aux_seq,
         )
         flat_features = features_seq.reshape(batch * seq_len, -1)
         flat_actions = actions_seq.reshape(batch * seq_len, -1)
@@ -227,7 +251,7 @@ class CognitiveMambaPolicy(nn.Module):
         entropy = self.heads.entropy()
         return log_probs, values, entropy, new_hidden, z_flat
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[untyped-decorator]
     def act(
         self,
         obs: Any,
@@ -248,6 +272,7 @@ class CognitiveMambaPolicy(nn.Module):
             new_hidden: updated hidden state.
 
         """
+        del step_id
         self.eval()
         obs_tensor = self._obs_to_tensor(obs)
         actions, _, _, new_hidden, _ = self.forward(obs_tensor, hidden, aux_tensor=aux_tensor)

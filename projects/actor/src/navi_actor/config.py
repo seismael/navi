@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-__all__: list[str] = ["ActorConfig"]
+TemporalCoreName = Literal["mambapy", "gru"]
+SUPPORTED_TEMPORAL_CORES: tuple[TemporalCoreName, ...] = ("mambapy", "gru")
+
+__all__: list[str] = ["ActorConfig", "SUPPORTED_TEMPORAL_CORES", "TemporalCoreName"]
 
 
 def find_root_env() -> Path:
@@ -50,6 +54,10 @@ class ActorConfig(BaseSettings):
     )
 
     mode: str = "async"
+    temporal_core: TemporalCoreName = Field(
+        default="gru",
+        validation_alias="NAVI_ACTOR_TEMPORAL_CORE",
+    )
     azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")
     elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS")
     embedding_dim: int = 128
@@ -89,8 +97,13 @@ class ActorConfig(BaseSettings):
     emit_observation_stream: bool = True
     dashboard_observation_hz: float = 10.0
     emit_training_telemetry: bool = True
+    emit_update_loss_telemetry: bool = False
     emit_perf_telemetry: bool = True
     profile_cuda_events: bool = False
+    reward_shaping_torch_compile: bool = Field(
+        default=True,
+        validation_alias="NAVI_ACTOR_REWARD_SHAPING_TORCH_COMPILE",
+    )
 
     # Diagnostic ablations on the canonical trainer surface
     enable_episodic_memory: bool = True

@@ -20,6 +20,9 @@ param(
     [int]$RolloutLength = 512,
     [int]$CheckpointEvery = 25000,
     [string]$LogDir = "scripts/logs/train",
+    [int]$ActorTelemetryPort = 5557,
+    [ValidateSet("mambapy", "gru")]
+    [string]$TemporalCore = "gru",
     [string]$PythonVersion = "3.12"
 )
 
@@ -92,9 +95,14 @@ function Stop-NaviProcesses {
         Stop-ProcessTreeById -ProcessId $_.ProcessId
     }
 
+    $portsPattern = "5559|5560|5557"
+    if ($ActorTelemetryPort -ne 5557) {
+        $portsPattern = "$portsPattern|$ActorTelemetryPort"
+    }
+
     $deadline = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
-        $held = netstat -ano 2>$null | Select-String "5559|5560|5557"
+        $held = netstat -ano 2>$null | Select-String $portsPattern
         if (-not $held) { break }
         foreach ($line in $held) {
             if ($line -match '\s(\d+)\s*$') {
@@ -154,6 +162,8 @@ Write-Host "  Steps      : $(if ($TotalSteps -le 0) { 'continuous until stopped'
 Write-Host "  Actors     : $NumActors (Standard Fleet)"
 Write-Host "  Resolution : ${AzimuthBins}x${ElevationBins}"
 Write-Host "  Runtime    : sdfdag (canonical)"
+Write-Host "  Temporal   : $TemporalCore"
+Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
 Write-Host "  Checkpoint : $CheckpointDir (every $CheckpointEvery)"
 Write-Host "  Optimizer  : LR=$LearningRate, Batch=$MinibatchSize, Epochs=$PpoEpochs"
 Write-Host "  Rollout    : $RolloutLength"
@@ -167,11 +177,13 @@ $actorArgs = @(
     "run",
     "--python", $PythonVersion,
     "--project", (Join-Path $repoRoot "projects\actor"),
-    "navi-actor", "train",
+    "python", "-m", "navi_actor.cli", "train",
     "--actors", "$NumActors",
+    "--temporal-core", "$TemporalCore",
     "--azimuth-bins", "$AzimuthBins",
     "--elevation-bins", "$ElevationBins",
     "--total-steps", "$TotalSteps",
+    "--actor-pub", "tcp://localhost:$ActorTelemetryPort",
     "--checkpoint-every", "$CheckpointEvery",
     "--checkpoint-dir", $CheckpointDir,
     "--minibatch-size", "$MinibatchSize",

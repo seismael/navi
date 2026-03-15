@@ -6,14 +6,14 @@ import json
 import struct
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
 import typer
 from typer.testing import CliRunner
 
-from navi_environment.cli import _build_backend
-from navi_environment.cli import app
+from navi_environment.cli import _build_backend, app
 from navi_environment.config import EnvironmentConfig
 from navi_environment.integration.voxel_dag import load_gmdag_asset, probe_sdfdag_runtime
 
@@ -594,6 +594,8 @@ def test_build_backend_sdfdag_exits_on_preflight_issues(monkeypatch: pytest.Monk
 
 
 def test_bench_sdfdag_cli_reports_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
     class FakeBackend:
         def __init__(self) -> None:
             self.reset_calls: list[tuple[int, int]] = []
@@ -623,7 +625,11 @@ def test_bench_sdfdag_cli_reports_metrics(monkeypatch: pytest.MonkeyPatch) -> No
 
     backend = FakeBackend()
     monkeypatch.setattr("navi_environment.cli.setup_logging", lambda *_args: None)
-    monkeypatch.setattr("navi_environment.cli._build_backend", lambda _config: backend)
+    def _build_backend_with_capture(config: EnvironmentConfig) -> FakeBackend:
+        captured["config"] = config
+        return backend
+
+    monkeypatch.setattr("navi_environment.cli._build_backend", _build_backend_with_capture)
     perf_counter_values = iter([100.0, 100.5])
     monkeypatch.setattr("navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values))
 
@@ -643,10 +649,66 @@ def test_bench_sdfdag_cli_reports_metrics(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert result.exit_code == 0
+    assert cast("EnvironmentConfig", captured["config"]).sdfdag_torch_compile is True
     assert backend.reset_calls == [(0, 0), (0, 1), (0, 2), (0, 3)]
     assert backend.batch_calls == 9
     assert "measured_sps=64.00" in result.stdout
     assert "rolling_sps=63.50" in result.stdout
+
+
+def test_bench_sdfdag_cli_can_disable_torch_compile(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, EnvironmentConfig] = {}
+
+    class FakeBackend:
+        def reset(self, episode_id: int, *, actor_id: int = 0) -> object:
+            return object()
+
+        def batch_step(self, actions: tuple[object, ...], step_id: int) -> tuple[tuple[object, ...], tuple[object, ...]]:
+            return tuple(object() for _ in actions), tuple(object() for _ in actions)
+
+        def perf_snapshot(self) -> object:
+            return SimpleNamespace(
+                sps=63.5,
+                last_batch_step_ms=14.2,
+                ema_batch_step_ms=13.8,
+                avg_batch_step_ms=14.0,
+                avg_actor_step_ms=3.5,
+                total_batches=9,
+                total_actor_steps=36,
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("navi_environment.cli.setup_logging", lambda *_args: None)
+    fake_backend = FakeBackend()
+
+    def _build_backend_with_capture(config: EnvironmentConfig) -> FakeBackend:
+        captured["config"] = config
+        return fake_backend
+
+    monkeypatch.setattr("navi_environment.cli._build_backend", _build_backend_with_capture)
+    perf_counter_values = iter([100.0, 100.5])
+    monkeypatch.setattr("navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values))
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "bench-sdfdag",
+            "--gmdag-file",
+            "scene.gmdag",
+            "--actors",
+            "4",
+            "--steps",
+            "8",
+            "--warmup-steps",
+            "1",
+            "--no-torch-compile",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["config"].sdfdag_torch_compile is False
 
 
 def test_bench_sdfdag_cli_can_emit_json_summary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -698,6 +760,7 @@ def test_bench_sdfdag_cli_can_emit_json_summary(monkeypatch: pytest.MonkeyPatch)
     assert payload["measured_sps"] == 64.0
     assert payload["expected_total_batches"] == 9
     assert payload["expected_total_actor_steps"] == 36
+    assert payload["torch_compile_active"] == 0
 
 
 def test_bench_sdfdag_cli_can_emit_median_summary_for_repeated_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -763,6 +826,7 @@ def test_bench_sdfdag_cli_can_emit_median_summary_for_repeated_runs(monkeypatch:
     assert payload["profile"] == "bench-sdfdag"
     assert payload["aggregation"] == "median"
     assert payload["repeats"] == 3
+    assert payload["torch_compile_active"] == 0
     assert payload["measured_sps"] == pytest.approx(71.11111111111111)
     assert payload["measured_sps_mean"] == pytest.approx(71.70370370370371)
     assert payload["measured_sps_min"] == pytest.approx(64.0)

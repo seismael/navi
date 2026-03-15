@@ -71,6 +71,56 @@ function Get-OptMetrics {
     return $values
 }
 
+function Get-NamedMsValue {
+    param(
+        [string]$Text,
+        [string]$Name
+    )
+
+    $pattern = [regex]([string]::Format('{0}=(?<value>[0-9.]+)ms', [regex]::Escape($Name)))
+    $match = $pattern.Match($Text)
+    if (-not $match.Success) {
+        return $null
+    }
+    return [double]$match.Groups['value'].Value
+}
+
+function Get-OptStageMetrics {
+    param([string[]]$Lines)
+
+    $pattern = [regex]'Inline PPO optimization completed in\s+(?<ppo>[0-9.]+)ms.*?avg\((?<avg>.*?)\)\s+total\(.*?(?:diag\((?<diag>.*?)\))?\)'
+    $rows = @()
+    foreach ($line in $Lines) {
+        $match = $pattern.Match($line)
+        if (-not $match.Success) {
+            continue
+        }
+        $avgText = $match.Groups['avg'].Value
+        $rows += [pscustomobject]@{
+            ppo_update_ms = [double]$match.Groups['ppo'].Value
+            fetch_ms = Get-NamedMsValue -Text $avgText -Name 'fetch'
+            prep_ms = Get-NamedMsValue -Text $avgText -Name 'prep'
+            eval_ms = Get-NamedMsValue -Text $avgText -Name 'eval'
+            backward_ms = Get-NamedMsValue -Text $avgText -Name 'bwd'
+            grad_clip_ms = Get-NamedMsValue -Text $avgText -Name 'clip'
+            optimizer_step_ms = Get-NamedMsValue -Text $avgText -Name 'optim'
+            rnd_step_ms = Get-NamedMsValue -Text $avgText -Name 'rnd'
+            post_update_stats_ms = Get-NamedMsValue -Text $avgText -Name 'stats'
+            update_loop_overhead_ms = Get-NamedMsValue -Text $avgText -Name 'loop'
+            progress_callback_ms = Get-NamedMsValue -Text $avgText -Name 'cb'
+            epoch_setup_ms = Get-NamedMsValue -Text $avgText -Name 'setup'
+            epoch_finalize_ms = Get-NamedMsValue -Text $avgText -Name 'finalize'
+            gpu_eval_ms = Get-NamedMsValue -Text $line -Name 'gpu_eval'
+            gpu_backward_ms = Get-NamedMsValue -Text $line -Name 'gpu_bwd'
+            gpu_grad_clip_ms = Get-NamedMsValue -Text $line -Name 'gpu_clip'
+            gpu_optimizer_step_ms = Get-NamedMsValue -Text $line -Name 'gpu_optim'
+            gpu_rnd_step_ms = Get-NamedMsValue -Text $line -Name 'gpu_rnd'
+            gpu_post_update_stats_ms = Get-NamedMsValue -Text $line -Name 'gpu_stats'
+        }
+    }
+    return $rows
+}
+
 function Get-CheckpointPaths {
     param([string[]]$Lines)
 
@@ -88,7 +138,7 @@ function Get-CheckpointPaths {
 function Get-RunDescriptor {
     param([string[]]$Lines)
 
-    $pattern = [regex]'^\[(?<ts>[^\]]+)\].*Canonical PPO trainer started:\s+actors=(?<actors>\d+)\s+gmdag=(?<gmdag>.+?)\s+pub=(?<pub>\S+)'
+    $pattern = [regex]'^\[(?<ts>[^\]]+)\].*Canonical PPO trainer started:\s+actors=(?<actors>\d+)\s+gmdag=(?<gmdag>.+?)\s+pub=(?<pub>\S+)\s+temporal=(?<temporal>\S+)'
     foreach ($line in $Lines) {
         $match = $pattern.Match($line)
         if ($match.Success) {
@@ -98,6 +148,7 @@ function Get-RunDescriptor {
                 actors = [int]$match.Groups['actors'].Value
                 gmdag = $match.Groups['gmdag'].Value.Trim()
                 pub = $match.Groups['pub'].Value.Trim()
+                temporal = $match.Groups['temporal'].Value.Trim()
             }
         }
     }
@@ -126,7 +177,7 @@ function Get-RepoRunWindow {
         return $null
     }
 
-    $startPattern = [regex]'^\[(?<ts>[^\]]+)\].*Canonical PPO trainer started:\s+actors=(?<actors>\d+)\s+gmdag=(?<gmdag>.+?)\s+pub=(?<pub>\S+)'
+    $startPattern = [regex]'^\[(?<ts>[^\]]+)\].*Canonical PPO trainer started:\s+actors=(?<actors>\d+)\s+gmdag=(?<gmdag>.+?)\s+pub=(?<pub>\S+)\s+temporal=(?<temporal>\S+)'
     $matchedStartIndex = -1
 
     for ($index = 0; $index -lt $RepoLines.Count; $index++) {
@@ -146,6 +197,9 @@ function Get-RepoRunWindow {
             continue
         }
         if ($match.Groups['pub'].Value.Trim() -ne $RunDescriptor.pub) {
+            continue
+        }
+        if ($match.Groups['temporal'].Value.Trim() -ne $RunDescriptor.temporal) {
             continue
         }
 
@@ -181,11 +235,13 @@ $resolvedOutputJson = if ([string]::IsNullOrWhiteSpace($OutputJson)) {
 $lines = Get-Content $resolvedLogPath
 $stepRows = @(Get-StepMetrics -Lines $lines)
 $artifactOptRows = @(Get-OptMetrics -Lines $lines)
+$artifactOptStageRows = @(Get-OptStageMetrics -Lines $lines)
 $artifactCheckpoints = @(Get-CheckpointPaths -Lines $lines)
 $runDescriptor = Get-RunDescriptor -Lines $lines
 
 $ppoSource = if ($artifactOptRows.Count -gt 0) { "artifact-log" } else { "unavailable" }
 $ppoRows = $artifactOptRows
+$ppoStageRows = $artifactOptStageRows
 $checkpointPaths = $artifactCheckpoints
 
 if ($artifactOptRows.Count -eq 0 -and (Test-Path $resolvedRepoLogPath)) {
@@ -193,10 +249,14 @@ if ($artifactOptRows.Count -eq 0 -and (Test-Path $resolvedRepoLogPath)) {
     $repoWindow = Get-RepoRunWindow -RepoLines $repoLines -RunDescriptor $runDescriptor
     if ($null -ne $repoWindow) {
         $repoOptRows = @(Get-OptMetrics -Lines $repoWindow)
+        $repoOptStageRows = @(Get-OptStageMetrics -Lines $repoWindow)
         $repoCheckpoints = @(Get-CheckpointPaths -Lines $repoWindow)
         if ($repoOptRows.Count -gt 0) {
             $ppoRows = $repoOptRows
             $ppoSource = "repo-log-fallback"
+        }
+        if ($repoOptStageRows.Count -gt 0) {
+            $ppoStageRows = $repoOptStageRows
         }
         if ($repoCheckpoints.Count -gt 0) {
             $checkpointPaths = $repoCheckpoints
@@ -218,6 +278,7 @@ $summary = [ordered]@{
     actors = if ($null -ne $runDescriptor) { $runDescriptor.actors } else { $null }
     gmdag = if ($null -ne $runDescriptor) { $runDescriptor.gmdag } else { $null }
     actor_pub = if ($null -ne $runDescriptor) { $runDescriptor.pub } else { $null }
+    temporal_core = if ($null -ne $runDescriptor) { $runDescriptor.temporal } else { $null }
     samples = $stepRows.Count
     steady_sps_mean = Measure-Mean -Rows $stepRows -Property 'sps'
     env_ms_mean = Measure-Mean -Rows $stepRows -Property 'env_ms'
@@ -226,13 +287,31 @@ $summary = [ordered]@{
     host_extract_ms_mean = Measure-Mean -Rows $stepRows -Property 'host_ms'
     telemetry_publish_ms_mean = Measure-Mean -Rows $stepRows -Property 'tele_ms'
     ppo_update_ms_mean = if ($ppoRows.Count -gt 0) { [double](($ppoRows | Measure-Object -Average).Average) } else { $null }
+    minibatch_fetch_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'fetch_ms'
+    minibatch_prep_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'prep_ms'
+    policy_eval_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'eval_ms'
+    backward_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'backward_ms'
+    grad_clip_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'grad_clip_ms'
+    optimizer_step_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'optimizer_step_ms'
+    rnd_step_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'rnd_step_ms'
+    post_update_stats_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'post_update_stats_ms'
+    update_loop_overhead_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'update_loop_overhead_ms'
+    progress_callback_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'progress_callback_ms'
+    epoch_setup_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'epoch_setup_ms'
+    epoch_finalize_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'epoch_finalize_ms'
+    gpu_policy_eval_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'gpu_eval_ms'
+    gpu_backward_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'gpu_backward_ms'
+    gpu_grad_clip_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'gpu_grad_clip_ms'
+    gpu_optimizer_step_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'gpu_optimizer_step_ms'
+    gpu_rnd_step_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'gpu_rnd_step_ms'
+    gpu_post_update_stats_ms_mean = Measure-Mean -Rows $ppoStageRows -Property 'gpu_post_update_stats_ms'
     ppo_update_source = $ppoSource
     final_checkpoint_path = $finalCheckpointPath
 }
 
 $summary | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 $resolvedOutputJson
 
-$status = "Summary saved: {0}`n  samples={1} sps={2:N2} env={3:N4}ms mem={4:N4}ms trans={5:N4}ms host={6:N4}ms tele={7:N4}ms ppo={8} source={9}" -f `
+$status = "Summary saved: {0}`n  samples={1} sps={2:N2} env={3:N4}ms mem={4:N4}ms trans={5:N4}ms host={6:N4}ms tele={7:N4}ms ppo={8} bwd={9} gpu_bwd={10} source={11}" -f `
     $resolvedOutputJson, `
     $summary.samples, `
     $summary.steady_sps_mean, `
@@ -242,5 +321,7 @@ $status = "Summary saved: {0}`n  samples={1} sps={2:N2} env={3:N4}ms mem={4:N4}m
     $summary.host_extract_ms_mean, `
     $summary.telemetry_publish_ms_mean, `
     $(if ($null -eq $summary.ppo_update_ms_mean) { "n/a" } else { "{0:N2}ms" -f $summary.ppo_update_ms_mean }), `
+    $(if ($null -eq $summary.backward_ms_mean) { "n/a" } else { "{0:N2}ms" -f $summary.backward_ms_mean }), `
+    $(if ($null -eq $summary.gpu_backward_ms_mean) { "n/a" } else { "{0:N2}ms" -f $summary.gpu_backward_ms_mean }), `
     $summary.ppo_update_source
 Write-Host $status

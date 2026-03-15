@@ -40,6 +40,80 @@ def _dag_tensor_from_words(words: list[np.uint64]) -> torch.Tensor:
     return torch.from_numpy(dag.view(np.int64)).cuda()
 
 
+def _point_for_octant_path(
+    octants: list[int],
+    bbox_min: tuple[float, float, float],
+    bbox_max: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    current_min = list(bbox_min)
+    current_max = list(bbox_max)
+    for octant in octants:
+        mid_x = (current_min[0] + current_max[0]) * 0.5
+        mid_y = (current_min[1] + current_max[1]) * 0.5
+        mid_z = (current_min[2] + current_max[2]) * 0.5
+        if octant & 1:
+            current_min[0] = mid_x
+        else:
+            current_max[0] = mid_x
+        if octant & 2:
+            current_min[1] = mid_y
+        else:
+            current_max[1] = mid_y
+        if octant & 4:
+            current_min[2] = mid_z
+        else:
+            current_max[2] = mid_z
+    return (
+        (current_min[0] + current_max[0]) * 0.5,
+        (current_min[1] + current_max[1]) * 0.5,
+        (current_min[2] + current_max[2]) * 0.5,
+    )
+
+
+def _single_path_dag_words(octants: list[int], *, distance: float, semantic: int) -> np.ndarray:
+    words: list[np.uint64] = []
+    child_pointer_slots: list[int] = []
+    for depth, octant in enumerate(octants):
+        pointer_index = len(words) + 1
+        words.append(_internal_word(1 << octant, pointer_index))
+        words.append(np.uint64(0))
+        child_pointer_slots.append(pointer_index)
+        if depth > 0:
+            words[child_pointer_slots[depth - 1]] = np.uint64(pointer_index - 1)
+    leaf_index = len(words)
+    if child_pointer_slots:
+        words[child_pointer_slots[-1]] = np.uint64(leaf_index)
+    words.append(_leaf_word(distance, semantic=semantic))
+    return np.asarray(words, dtype=np.uint64)
+
+
+def _prefixed_uniform_leaf_dag_words(
+    prefix_octants: list[int], *, distance: float, semantic: int
+) -> np.ndarray:
+    words: list[np.uint64] = []
+    child_pointer_slots: list[int] = []
+    for depth, octant in enumerate(prefix_octants):
+        pointer_index = len(words) + 1
+        words.append(_internal_word(1 << octant, pointer_index))
+        words.append(np.uint64(0))
+        child_pointer_slots.append(pointer_index)
+        if depth > 0:
+            words[child_pointer_slots[depth - 1]] = np.uint64(pointer_index - 1)
+
+    pointer_index = len(words) + 1
+    words.append(_internal_word(0xFF, pointer_index))
+    words.extend(np.uint64(0) for _ in range(8))
+    if child_pointer_slots:
+        words[child_pointer_slots[-1]] = np.uint64(pointer_index - 1)
+
+    leaf_base = len(words)
+    for child_index in range(8):
+        words[pointer_index + child_index] = np.uint64(leaf_base + child_index)
+    words.extend(_leaf_word(distance, semantic=semantic) for _ in range(8))
+
+    return np.asarray(words, dtype=np.uint64)
+
+
 def _manual_octree_reference(
     dag_words: np.ndarray,
     origin: tuple[float, float, float],
@@ -724,6 +798,44 @@ def test_native_runtime_uses_sparse_child_mask_offsets_correctly() -> None:
     assert out_d.squeeze(0).tolist() == pytest.approx(expected_distances, rel=0.0, abs=1e-6)
     assert out_s.squeeze(0).tolist() == expected_semantics
     assert float(out_d[0, 3].item()) > 10.0
+
+
+def test_native_runtime_preserves_deep_single_path_traversal_across_repeated_steps() -> None:
+    backend = _require_native_backend()
+    prefix_octants = [0, 1, 1, 1]
+    dag_words = _prefixed_uniform_leaf_dag_words(prefix_octants, distance=0.015, semantic=23)
+    dag = _dag_tensor_from_words(dag_words.tolist())
+    bbox_min = (0.0, 0.0, 0.0)
+    bbox_max = (1.0, 1.0, 1.0)
+    origin = _point_for_octant_path(prefix_octants + [0], bbox_min, bbox_max)
+    origins = torch.tensor([[origin]], device="cuda", dtype=torch.float32)
+    dirs = torch.tensor([[[1.0, 0.0, 0.0]]], device="cuda", dtype=torch.float32)
+    out_d = torch.full((1, 1), -1.0, device="cuda", dtype=torch.float32)
+    out_s = torch.full((1, 1), -1, device="cuda", dtype=torch.int32)
+
+    backend.cast_rays(dag, origins, dirs, out_d, out_s, 3, 1.0, list(bbox_min), list(bbox_max), 32)
+
+    assert pytest.approx(float(out_d[0, 0].item()), rel=0.0, abs=2e-5) == 0.045
+    assert int(out_s[0, 0].item()) == 0
+
+
+def test_native_runtime_reuses_deep_leaf_payload_across_repeated_steps() -> None:
+    backend = _require_native_backend()
+    octants = [0, 1, 1, 1, 0]
+    dag_words = _single_path_dag_words(octants, distance=0.012, semantic=19)
+    dag = _dag_tensor_from_words(dag_words.tolist())
+    bbox_min = (0.0, 0.0, 0.0)
+    bbox_max = (1.0, 1.0, 1.0)
+    origin = _point_for_octant_path(octants, bbox_min, bbox_max)
+    origins = torch.tensor([[origin]], device="cuda", dtype=torch.float32)
+    dirs = torch.tensor([[[0.0, 0.0, 1.0]]], device="cuda", dtype=torch.float32)
+    out_d = torch.full((1, 1), -1.0, device="cuda", dtype=torch.float32)
+    out_s = torch.full((1, 1), -1, device="cuda", dtype=torch.int32)
+
+    backend.cast_rays(dag, origins, dirs, out_d, out_s, 2, 1.0, list(bbox_min), list(bbox_max), 32)
+
+    assert pytest.approx(float(out_d[0, 0].item()), rel=0.0, abs=2e-5) == 0.024
+    assert int(out_s[0, 0].item()) == 0
 
 if __name__ == "__main__":
     print("Torch-SDF Source Integrity Verified.")

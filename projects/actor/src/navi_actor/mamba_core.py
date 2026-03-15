@@ -1,4 +1,4 @@
-"""Canonical mambapy temporal core for sequence modeling."""
+"""Canonical hardware-fused Mamba-2 temporal core for sequence modeling."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
-    """Temporal sequence model using canonical mambapy Mamba.
+    """Temporal sequence model using canonical hardware-fused mamba-ssm.
 
     Args:
         d_model: embedding dimension (must match encoder output).
@@ -32,26 +32,23 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
         super().__init__()
         self.d_model = d_model
         try:
-            from mambapy.mamba import Mamba, MambaConfig  # type: ignore[import-untyped]
+            from mamba_ssm import Mamba2  # type: ignore[import-untyped]
         except Exception as exc:  # pragma: no cover - environment-dependent import path
             raise RuntimeError(
-                "Canonical temporal core requires mambapy. "
-                "Run `uv sync --project projects/actor --python 3.12` before launching actor runtime."
+                "Canonical temporal core requires fused mamba-ssm and causal-conv1d. "
+                "Install the fused temporal dependencies or provide a compatible fused wheel before launching actor runtime."
             ) from exc
 
-        self.core = Mamba(
-            MambaConfig(
-                d_model=d_model,
-                n_layers=1,
-                d_state=d_state,
-                d_conv=d_conv,
-                expand_factor=expand,
-            )
+        self.core = Mamba2(
+            d_model=d_model,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
         )
         self.norm = nn.LayerNorm(d_model)
         self.aux_proj = nn.Linear(3, d_model)
         _LOGGER.info(
-            "Mamba2TemporalCore: canonical mambapy runtime active",
+            "Mamba2TemporalCore: canonical fused mamba-ssm runtime active",
         )
 
     def forward(
@@ -75,11 +72,12 @@ class Mamba2TemporalCore(nn.Module):  # type: ignore[misc]
 
         """
         del hidden, dones
+        residual = z_seq
         if aux_tensor is not None:
             z_seq = z_seq + self.aux_proj(aux_tensor)
 
-        out: Tensor = self.core(z_seq)
-        out = self.norm(out + z_seq)
+        out: Tensor = self.core(z_seq.contiguous())
+        out = self.norm(out + residual)
         return out, None
 
     def forward_step(

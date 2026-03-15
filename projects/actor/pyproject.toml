@@ -11,7 +11,6 @@ requires-python = ">=3.12"
 dependencies = [
     "navi-contracts>=0.1.0",
     "navi-environment>=0.1.0",
-    "mambapy>=1.2.0",
     "pyzmq>=26.0",
     "typer>=0.15",
     "torch==2.5.1",
@@ -31,6 +30,13 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.8",
     "mypy>=1.13",
+]
+fused-temporal = [
+    "causal-conv1d>=1.4.0; platform_system != 'Windows'",
+    "mamba-ssm>=2.2.2; platform_system != 'Windows'",
+]
+reference-temporal = [
+    "mambapy>=1.2.0",
 ]
 
 [project.scripts]
@@ -87,6 +93,10 @@ module = [
     "torch.*",
     "mambapy",
     "mambapy.*",
+    "mamba_ssm",
+    "mamba_ssm.*",
+    "causal_conv1d",
+    "causal_conv1d.*",
     "faiss",
     "faiss.*",
     "psutil",

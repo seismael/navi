@@ -10,6 +10,8 @@ set -euo pipefail
 CUDA_TAG="${CUDA_TAG:-cu121}"
 TORCH_VERSION="${TORCH_VERSION:-2.5.1}"
 SKIP_ACTOR_SYNC="${SKIP_ACTOR_SYNC:-0}"
+INSTALL_FUSED_TEMPORAL="${INSTALL_FUSED_TEMPORAL:-0}"
+FUSED_WHEEL_PATH="${FUSED_WHEEL_PATH:-}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ACTOR_PROJECT="$REPO_ROOT/projects/actor"
@@ -48,6 +50,19 @@ echo "Running CUDA preflight now..."
 "$PY" "$REPO_ROOT/scripts/check_gpu.py"
 
 if [[ "$SKIP_ACTOR_SYNC" != "1" ]]; then
-  echo "Syncing actor project dependencies (canonical mambapy runtime)..."
+  echo "Syncing actor project dependencies (canonical Windows-friendly Mamba runtime metadata)..."
   uv sync --project "$ACTOR_PROJECT" --python 3.12
+fi
+
+if [[ "$INSTALL_FUSED_TEMPORAL" == "1" ]]; then
+  echo "Installing optional future fused temporal runtime..."
+  if [[ -n "$FUSED_WHEEL_PATH" ]]; then
+    uv pip install --python "$PY" --force-reinstall "$FUSED_WHEEL_PATH"
+  elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OS" == "Windows_NT" ]]; then
+    uv pip install --python "$PY" --no-build-isolation \
+      "$REPO_ROOT/third_party/mamba-for-windows/causal-conv1d-1.4.0" \
+      "$REPO_ROOT/third_party/mamba-for-windows/mamba-2.2.2"
+  else
+    uv pip install --python "$PY" --upgrade "causal-conv1d>=1.4.0" "mamba-ssm>=2.2.2"
+  fi
 fi

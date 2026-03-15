@@ -6,35 +6,109 @@
 namespace toponav {
 namespace cuda {
 
+__device__ inline bool point_in_bounds(
+    float px,
+    float py,
+    float pz,
+    const float bmin[3],
+    const float bmax[3])
+{
+    return px >= bmin[0] && px <= bmax[0] &&
+           py >= bmin[1] && py <= bmax[1] &&
+           pz >= bmin[2] && pz <= bmax[2];
+}
+
+__device__ inline uint64_t load_dag_word(
+    const uint64_t* __restrict__ dag_memory,
+    const uint64_t* __restrict__ dag_cache,
+    uint32_t ptr)
+{
+    return (ptr < kDagCacheSize) ? dag_cache[ptr] : dag_memory[ptr];
+}
+
+__device__ inline float decode_leaf_distance(uint64_t node)
+{
+    uint16_t dist_bits = static_cast<uint16_t>(node & 0xFFFF);
+    return __half2float(*reinterpret_cast<__half*>(&dist_bits));
+}
+
+__device__ inline int32_t decode_leaf_semantic(uint64_t node)
+{
+    return static_cast<int32_t>((node >> 16) & 0xFFFF);
+}
+
 // --- Device Helper: Stackless DAG Query ---
 __device__ inline void query_dag_stackless(
     const uint64_t* __restrict__ dag_memory,
     const uint64_t* __restrict__ dag_cache,
     float px, float py, float pz,
     const float bbox_min[3], const float bbox_max[3], int resolution,
+    uint32_t& cached_ptr,
+    float cached_bmin[3],
+    float cached_bmax[3],
+    bool& cache_valid,
+    float leaf_bmin[3],
+    float leaf_bmax[3],
+    float& cached_leaf_dist,
+    int32_t& cached_leaf_semantic,
+    bool& leaf_cache_valid,
     float& out_dist, int32_t& out_semantic) 
 {
-    if (px < bbox_min[0] || px > bbox_max[0] ||
-        py < bbox_min[1] || py > bbox_max[1] ||
-        pz < bbox_min[2] || pz > bbox_max[2]) {
+    if (!point_in_bounds(px, py, pz, bbox_min, bbox_max)) {
         out_dist = kOutsideDomainDistance;
         out_semantic = 0;
         return;
     }
 
-    uint32_t current_ptr = 0;
-    float cur_bmin[3] = {bbox_min[0], bbox_min[1], bbox_min[2]};
-    float cur_bmax[3] = {bbox_max[0], bbox_max[1], bbox_max[2]};
+    if (leaf_cache_valid && point_in_bounds(px, py, pz, leaf_bmin, leaf_bmax)) {
+        out_dist = cached_leaf_dist;
+        out_semantic = cached_leaf_semantic;
+        return;
+    }
+
+    const bool use_cached_prefix = cache_valid && point_in_bounds(px, py, pz, cached_bmin, cached_bmax);
+    uint32_t current_ptr = use_cached_prefix ? cached_ptr : 0;
+    float cur_bmin[3] = {
+        use_cached_prefix ? cached_bmin[0] : bbox_min[0],
+        use_cached_prefix ? cached_bmin[1] : bbox_min[1],
+        use_cached_prefix ? cached_bmin[2] : bbox_min[2],
+    };
+    float cur_bmax[3] = {
+        use_cached_prefix ? cached_bmax[0] : bbox_max[0],
+        use_cached_prefix ? cached_bmax[1] : bbox_max[1],
+        use_cached_prefix ? cached_bmax[2] : bbox_max[2],
+    };
+    int depth = use_cached_prefix ? kTraversalCacheDepth : 0;
+    (void)resolution;
     
     // Iterative descent
-    for (int depth = 0; depth < 32; ++depth) {
-        uint64_t node = (current_ptr < kDagCacheSize) ? dag_cache[current_ptr] : dag_memory[current_ptr];
+    for (; depth < 32; ++depth) {
+        uint64_t node = load_dag_word(dag_memory, dag_cache, current_ptr);
         
         if ((node >> 63) == 1) {
-            uint16_t dist_bits = static_cast<uint16_t>(node & 0xFFFF);
-            out_dist = __half2float(*reinterpret_cast<__half*>(&dist_bits));
-            out_semantic = static_cast<int32_t>((node >> 16) & 0xFFFF);
+            leaf_bmin[0] = cur_bmin[0];
+            leaf_bmin[1] = cur_bmin[1];
+            leaf_bmin[2] = cur_bmin[2];
+            leaf_bmax[0] = cur_bmax[0];
+            leaf_bmax[1] = cur_bmax[1];
+            leaf_bmax[2] = cur_bmax[2];
+            cached_leaf_dist = decode_leaf_distance(node);
+            cached_leaf_semantic = decode_leaf_semantic(node);
+            leaf_cache_valid = true;
+            out_dist = cached_leaf_dist;
+            out_semantic = cached_leaf_semantic;
             return;
+        }
+
+        if (!use_cached_prefix && depth == kTraversalCacheDepth) {
+            cached_ptr = current_ptr;
+            cached_bmin[0] = cur_bmin[0];
+            cached_bmin[1] = cur_bmin[1];
+            cached_bmin[2] = cur_bmin[2];
+            cached_bmax[0] = cur_bmax[0];
+            cached_bmax[1] = cur_bmax[1];
+            cached_bmax[2] = cur_bmax[2];
+            cache_valid = true;
         }
 
         // Calculate midpoints
@@ -63,7 +137,7 @@ __device__ inline void query_dag_stackless(
 
         // Fetch the actual pointer to the child node from the pointer array
         uint32_t child_ptr_idx = child_base + offset;
-        current_ptr = static_cast<uint32_t>((child_ptr_idx < kDagCacheSize) ? dag_cache[child_ptr_idx] : dag_memory[child_ptr_idx]);
+        current_ptr = static_cast<uint32_t>(load_dag_word(dag_memory, dag_cache, child_ptr_idx));
     }
 }
 
@@ -101,6 +175,15 @@ __global__ void sphere_trace_kernel(
     float current_t = 0.0f;
     float dist = 0.0f;
     int32_t semantic = 0;
+    uint32_t cached_ptr = 0;
+    float cached_bmin[3] = {bmin_x, bmin_y, bmin_z};
+    float cached_bmax[3] = {bmax_x, bmax_y, bmax_z};
+    bool cache_valid = false;
+    float leaf_bmin[3] = {bmin_x, bmin_y, bmin_z};
+    float leaf_bmax[3] = {bmax_x, bmax_y, bmax_z};
+    float cached_leaf_dist = 0.0f;
+    int32_t cached_leaf_semantic = 0;
+    bool leaf_cache_valid = false;
 
     const float float_bmin[3] = {bmin_x, bmin_y, bmin_z};
     const float float_bmax[3] = {bmax_x, bmax_y, bmax_z};
@@ -110,7 +193,26 @@ __global__ void sphere_trace_kernel(
         float py = oy + current_t * dy;
         float pz = oz + current_t * dz;
 
-        query_dag_stackless(dag_memory, dag_cache, px, py, pz, float_bmin, float_bmax, resolution, dist, semantic);
+        query_dag_stackless(
+            dag_memory,
+            dag_cache,
+            px,
+            py,
+            pz,
+            float_bmin,
+            float_bmax,
+            resolution,
+            cached_ptr,
+            cached_bmin,
+            cached_bmax,
+            cache_valid,
+            leaf_bmin,
+            leaf_bmax,
+            cached_leaf_dist,
+            cached_leaf_semantic,
+            leaf_cache_valid,
+            dist,
+            semantic);
 
         if (dist < kHitEpsilon) {
             out_distances[idx] = current_t;

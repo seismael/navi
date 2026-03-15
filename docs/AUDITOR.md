@@ -77,6 +77,7 @@ Current canonical default:
 
 - actor `0` receives a passive live observation stream at a low but visibly live
   cadence of about `10 Hz`
+- widening the live observation stream to every actor is reserved for explicit diagnostic fan-out, not the throughput-safe default
 - optimizer-window heartbeats reuse that same cadence so the dashboard does not
   appear frozen between rollout and update phases
 - the stream remains droppable and must never backpressure the trainer

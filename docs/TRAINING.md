@@ -24,6 +24,20 @@ Default behavior:
 - CUDA-capable machine with working PyTorch CUDA runtime
 - free port `5557` for actor telemetry
 
+Repository training wrappers launch the actor via `python -m navi_actor.cli`
+inside the actor project environment so canonical training does not depend on
+console-script resolution state.
+
+Canonical training currently assumes the actor temporal core runs through the
+native cuDNN GRU path by default on the active Windows machine. The canonical
+train and serve surfaces expose one explicit temporal-core selector contract on
+the same trainer surface: `gru` (default) and `mambapy`.
+
+Canonical actor reward shaping also requests `torch.compile` by default when
+the shaping path stays tensor-only on the rollout hot path. On unsupported
+GPU/compiler stacks, Navi reports that compile was requested but inactive and
+continues on the eager tensor path for honest attribution.
+
 ## 3. Refresh And Preflight
 
 ```powershell
@@ -46,6 +60,12 @@ entire promoted corpus before using benchmark results to judge the upgrade:
 # Standard continuous training
 ./scripts/train.ps1
 
+# Standard continuous training with the alternate Mambapy backend
+./scripts/train.ps1 -TemporalCore mambapy
+
+# Standard continuous training on an alternate actor telemetry port
+./scripts/train.ps1 -ActorTelemetryPort 5565
+
 # Long-duration wrapper
 ./scripts/train-all-night.ps1
 
@@ -55,8 +75,17 @@ entire promoted corpus before using benchmark results to judge the upgrade:
 # Full stack training launcher
 ./scripts/run-ghost-stack.ps1 -Train
 
+# Full stack training launcher with Mambapy selected explicitly
+./scripts/run-ghost-stack.ps1 -Train -TemporalCore mambapy
+
+# Full stack training launcher on an alternate actor telemetry port
+./scripts/run-ghost-stack.ps1 -Train -ActorTelemetryPort 5565
+
 # First end-to-end canonical qualification surface
 ./scripts/qualify-canonical-stack.ps1
+
+# One-command bounded temporal comparison on the canonical trainer surface
+./scripts/run-temporal-compare.ps1
 ```
 
 The qualification script now proves the bounded canonical flow end to end:
@@ -89,7 +118,25 @@ Explicit narrowing remains available when requested:
 ./scripts/train.ps1 -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag
 ./scripts/train.ps1 -TotalSteps 500000
 ./scripts/run-ghost-stack.ps1 -Train -TotalSteps 500000
+./scripts/train.ps1 -TemporalCore mambapy -TotalSteps 500000
 ```
+
+For a bounded like-for-like backend comparison on the canonical trainer surface:
+
+```powershell
+./scripts/run-temporal-compare.ps1
+./scripts/run-temporal-compare.ps1 -TotalSteps 256
+```
+
+The comparison wrapper runs each backend sequentially on the direct actor
+trainer surface with isolated per-repeat logs, checkpoints,
+and summary JSON files under one timestamped artifact root. The wrapper now
+defaults to `3` repeats per backend and records both mean and median aggregate
+metrics so local Windows variance does not decide the temporal-core conclusion.
+Use `-ProfileCudaEvents` only for diagnostic comparison runs when you need
+median learner substage timings such as `backward_ms` or `gpu_backward_ms`.
+Compare runs by changing only the temporal-core selector unless a diagnostic
+experiment explicitly calls for more changes.
 
 ## 5. Checkpoints
 
@@ -117,6 +164,9 @@ For scripted passive proof without launching the GUI, use:
 uv run --project .\projects\auditor navi-auditor dashboard-attach-check --actor-sub tcp://localhost:5557 --json
 ```
 
+If you override the training telemetry port on the wrapper, use the same port
+in dashboard attach commands.
+
 ## 7. Recovery
 
 ```powershell
@@ -126,6 +176,7 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 ## 8. Operational Notes
 
 - production training advertises only the canonical `sdfdag` path
+- production training defaults the temporal core to `gru` on the active machine, with `mambapy` available as an explicit selector on the same surface when comparing runs
 - wrappers default to the canonical `256x48` observation contract with minibatch `64`, BPTT `8`, and rollout `512`
 - corpus compilation defaults to `512`, aligned with the canonical `256x48` environment observation contract
 - benchmarks, wrappers, and tests must use real dataset scenes or compiled dataset `.gmdag` assets; generated or sample scenes are not part of the canonical path
@@ -136,8 +187,11 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - collision remains non-terminal in canonical training, with negative collision reward plus positive reward for increasing obstacle clearance after near-contact
 - canonical environment shaping also penalizes starvation-heavy views and persistent near-field wall-hugging using ratios derived from the current spherical observation
 - canonical geometry-foraging shaping positively values mid-range structure visibility, forward-sector structure reacquisition, and controlled inspection turns that reveal more geometry instead of less
-- use explicit overrides only for deliberate experiments
+- use explicit overrides only for deliberate experiments; temporal-core comparisons should change only `TemporalCore` or `--temporal-core` while holding all other canonical settings fixed
 - dashboard mode detection stays on low-volume telemetry to avoid rollout stalls
 - the selected-actor dashboard observation stream defaults to a passive `10 Hz`
 	cadence so live inspection remains visibly current without reintroducing
 	per-step publication
+- widening live observation publication to every actor is a deliberate high-overhead diagnostic mode and should be enabled only when the operator explicitly requests all-actor telemetry fan-out
+- PPO update-loss scalar materialization is diagnostic-only on the canonical hot path: the trainer still emits coarse `actor.training.ppo.update` events for mode/status detection by default, but full PPO loss fields are populated only when explicit update-loss telemetry is enabled
+- when a supported fused Mamba-2 environment is ready later, re-promotion must be proven by rerunning the canonical temporal profile and bounded canonical training surfaces before the active docs and scripts are switched away from GRU

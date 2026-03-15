@@ -1,4 +1,6 @@
+import importlib.util
 from pathlib import Path
+from typing import Callable, cast
 
 import numpy as np
 import os
@@ -9,6 +11,23 @@ import time
 import pytest
 
 from voxel_dag.compiler import MeshIngestor, compute_dense_sdf, compress_to_dag, write_gmdag
+
+
+def _load_oracle_house_helpers() -> tuple[Callable[[], tuple[np.ndarray, np.ndarray]], Callable[[str | Path], None]]:
+    repo_root = Path(__file__).resolve().parents[3]
+    helper_path = repo_root / "projects" / "contracts" / "src" / "navi_contracts" / "testing" / "oracle_house.py"
+    spec = importlib.util.spec_from_file_location("navi_test_oracle_house", helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load oracle fixture helper from {helper_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return (
+        cast("Callable[[], tuple[np.ndarray, np.ndarray]]", module.canonical_house_bbox),
+        cast("Callable[[str | Path], None]", module.write_square_house_obj),
+    )
+
+
+canonical_house_bbox, write_square_house_obj = _load_oracle_house_helpers()
 
 
 _HEADER = struct.Struct("<4sIIffffI")
@@ -235,6 +254,7 @@ def test_native_compiler_is_deterministic_for_fixed_fixture(tmp_path: Path) -> N
     compiler = _resolve_native_compiler()
     if compiler is None:
         pytest.skip("Native voxel-dag compiler executable is not available")
+    compiler = cast(Path, compiler)
 
     source = tmp_path / "cube.obj"
     create_test_obj(source, "cube")
@@ -274,6 +294,7 @@ def test_native_compiler_matches_python_header_contract_for_cube_fixture(tmp_pat
     compiler = _resolve_native_compiler()
     if compiler is None:
         pytest.skip("Native voxel-dag compiler executable is not available")
+    compiler = cast(Path, compiler)
 
     source = tmp_path / "cube.obj"
     create_test_obj(source, "cube")
@@ -319,6 +340,34 @@ def test_native_compiler_matches_python_header_contract_for_cube_fixture(tmp_pat
     assert native_header[4] == pytest.approx(python_header[4], rel=0.0, abs=1e-6)
     assert native_header[5] > 0
     assert python_header[5] > 0
+
+
+def test_square_house_fixture_compiles_deterministically_with_expected_bounds(tmp_path: Path) -> None:
+    source = tmp_path / "square_house.obj"
+    write_square_house_obj(source)
+
+    vertices, indices, bbox_min, bbox_max = MeshIngestor.load_obj(source)
+    grid, voxel_size, cube_min = compute_dense_sdf(vertices, indices, bbox_min, bbox_max, 32, padding=0.0)
+    dag = compress_to_dag(grid, 32)
+    first = tmp_path / "square_house_first.gmdag"
+    second = tmp_path / "square_house_second.gmdag"
+
+    write_gmdag(first, dag, 32, cube_min, voxel_size)
+    write_gmdag(second, dag, 32, cube_min, voxel_size)
+
+    expected_min, expected_max = canonical_house_bbox()
+    np.testing.assert_allclose(bbox_min, expected_min)
+    np.testing.assert_allclose(bbox_max, expected_max)
+    assert dag.size > 1
+    assert first.read_bytes() == second.read_bytes()
+
+    magic, version, resolution, header_min, header_voxel, node_count = _read_gmdag_header(first)
+    assert magic == b"GDAG"
+    assert version == 1
+    assert resolution == 32
+    np.testing.assert_allclose(np.array(header_min, dtype=np.float32), cube_min)
+    assert header_voxel > 0.0
+    assert node_count == int(dag.size)
 
 if __name__ == "__main__":
     print("Running TopoNav Voxel-DAG Comprehensive Test Suite...")

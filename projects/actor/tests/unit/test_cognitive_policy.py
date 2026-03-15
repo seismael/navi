@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Any, cast
 
+import pytest
 import torch
 
 from navi_actor.cognitive_policy import CognitiveMambaPolicy
+from navi_actor.config import TemporalCoreName
+from navi_actor.gru_core import GRUTemporalCore
+from navi_actor.mambapy_core import MambapyTemporalCore
 
 
-def _make_policy() -> CognitiveMambaPolicy:
+def _make_policy(*, temporal_core: TemporalCoreName = "gru") -> CognitiveMambaPolicy:
     return CognitiveMambaPolicy(
         embedding_dim=128,
+        temporal_core=temporal_core,
         azimuth_bins=64,
         elevation_bins=32,
     )
@@ -91,7 +97,7 @@ def test_gradient_flow() -> None:
     obs = torch.randn(2, 3, 128, 24)
     _, log_probs, values, _, _ = policy.forward(obs)
     loss = log_probs.sum() + values.sum()
-    loss.backward()  # type: ignore[no-untyped-call]
+    loss.backward()
     # Check at least some parameters have gradients
     grads = [p.grad for p in policy.parameters() if p.grad is not None]
     assert len(grads) > 0
@@ -106,7 +112,7 @@ def test_evaluate_value_stop_gradient() -> None:
 
     # Backward through values only (simulating critic loss)
     policy.zero_grad()
-    values.sum().backward()  # type: ignore[no-untyped-call]
+    values.sum().backward()
 
     # Encoder and temporal core should have NO gradients
     for name, p in policy.encoder.named_parameters():
@@ -134,7 +140,7 @@ def test_evaluate_sequence_value_stop_gradient() -> None:
     _, values, _, _, _ = policy.evaluate_sequence(obs_seq, acts_seq)
 
     policy.zero_grad()
-    values.sum().backward()  # type: ignore[no-untyped-call]
+    values.sum().backward()
 
     for name, p in policy.encoder.named_parameters():
         assert p.grad is None or torch.all(p.grad == 0), (
@@ -160,7 +166,7 @@ def test_evaluate_actor_gradient_flows_to_backbone() -> None:
     log_probs, _, _, _, _ = policy.evaluate(obs, acts)
 
     policy.zero_grad()
-    (-log_probs.sum()).backward()  # type: ignore[no-untyped-call]
+    (-log_probs.sum()).backward()
 
     # Encoder and temporal core SHOULD have gradients from policy loss
     encoder_grads = [
@@ -174,3 +180,24 @@ def test_evaluate_actor_gradient_flows_to_backbone() -> None:
         if p.grad is not None and not torch.all(p.grad == 0)
     ]
     assert len(temporal_grads) > 0, "Temporal core must receive policy-loss gradients"
+
+
+def test_policy_uses_canonical_gru_temporal_core() -> None:
+    """The default policy should instantiate the canonical GRU core."""
+    policy = _make_policy()
+
+    assert isinstance(policy.temporal_core, GRUTemporalCore)
+
+
+def test_policy_can_select_mambapy_temporal_core() -> None:
+    """The policy should instantiate Mambapy when the selector requests it."""
+    pytest.importorskip("mambapy")
+    policy = _make_policy(temporal_core="mambapy")
+
+    assert isinstance(policy.temporal_core, MambapyTemporalCore)
+
+
+def test_policy_rejects_unsupported_temporal_core() -> None:
+    """Unsupported temporal-core names must fail fast at policy construction."""
+    with pytest.raises(ValueError, match="Unsupported temporal core"):
+        CognitiveMambaPolicy(temporal_core=cast("Any", "mamba-ssm"))
