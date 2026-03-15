@@ -17,6 +17,8 @@ from navi_environment.backends.sdfdag_backend import (
     _observation_profile,
     _obstacle_clearance_reward,
     _proximity_penalty,
+    _select_spawn_yaw_from_observation,
+    _spawn_candidate_score,
     _starvation_penalty,
     _structure_band_reward,
     _validate_unit_direction_tensor,
@@ -83,6 +85,115 @@ def test_observation_profile_tracks_starvation_and_near_geometry() -> None:
     assert math.isclose(proximity_ratio, 0.25)
     assert math.isclose(structure_band_ratio, 0.25)
     assert math.isclose(forward_structure_ratio, 0.25)
+
+
+def test_select_spawn_yaw_rotates_structure_into_forward_sector() -> None:
+    depth = np.ones((12, 4), dtype=np.float32)
+    valid = np.zeros((12, 4), dtype=np.bool_)
+    depth[4:7, :] = 0.3
+    valid[4:7, :] = True
+
+    yaw = _select_spawn_yaw_from_observation(
+        depth,
+        valid,
+        max_distance=10.0,
+        structure_band_min_distance=1.5,
+        structure_band_max_distance=10.0,
+    )
+
+    azimuth_bins = depth.shape[0]
+    shift = int(round((yaw / (2.0 * math.pi)) * azimuth_bins)) % azimuth_bins
+    rotated_depth = np.roll(depth, -shift, axis=0)
+    rotated_valid = np.roll(valid, -shift, axis=0)
+    before_forward = _observation_profile(
+        depth,
+        valid,
+        max_distance=10.0,
+        proximity_distance_threshold=1.0,
+        structure_band_min_distance=1.5,
+        structure_band_max_distance=10.0,
+    )[3]
+    after_forward = _observation_profile(
+        rotated_depth,
+        rotated_valid,
+        max_distance=10.0,
+        proximity_distance_threshold=1.0,
+        structure_band_min_distance=1.5,
+        structure_band_max_distance=10.0,
+    )[3]
+
+    assert after_forward > before_forward
+    assert after_forward > 0.0
+
+
+def test_spawn_candidate_score_prefers_structure_over_empty_space() -> None:
+    structured_depth = np.ones((12, 4), dtype=np.float32)
+    structured_valid = np.zeros((12, 4), dtype=np.bool_)
+    structured_depth[3:9, :] = 0.4
+    structured_valid[3:9, :] = True
+    empty_depth = np.ones((12, 4), dtype=np.float32)
+    empty_valid = np.zeros((12, 4), dtype=np.bool_)
+
+    structured_score = _spawn_candidate_score(
+        structured_depth,
+        structured_valid,
+        max_distance=10.0,
+        proximity_distance_threshold=1.0,
+        structure_band_min_distance=1.5,
+        structure_band_max_distance=10.0,
+    )
+    empty_score = _spawn_candidate_score(
+        empty_depth,
+        empty_valid,
+        max_distance=10.0,
+        proximity_distance_threshold=1.0,
+        structure_band_min_distance=1.5,
+        structure_band_max_distance=10.0,
+    )
+
+    assert structured_score > empty_score
+
+
+def test_reset_uses_precomputed_spawn_yaw() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._initial_resets_remaining = 0
+    backend._maybe_rotate_scene = lambda *, is_natural: False  # type: ignore[method-assign]
+    backend._spawn_positions = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
+    backend._spawn_yaws = torch.tensor([1.25], dtype=torch.float32)
+    backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
+    backend._actor_yaws = torch.zeros((1,), dtype=torch.float32)
+    backend._episode_ids = torch.zeros((1,), dtype=torch.int64)
+    backend._actor_steps = torch.zeros((1,), dtype=torch.int32)
+    backend._prev_depth_tensors = torch.zeros((1, 2, 2), dtype=torch.float32)
+    backend._prev_min_distances = torch.zeros((1,), dtype=torch.float32)
+    backend._prev_structure_band_ratios = torch.zeros((1,), dtype=torch.float32)
+    backend._prev_forward_structure_ratios = torch.zeros((1,), dtype=torch.float32)
+    backend._episode_returns = torch.zeros((1,), dtype=torch.float32)
+    backend._visit_grid = torch.zeros((1, 1, 1), dtype=torch.uint8)
+    backend._prev_linear_vels = torch.zeros((1, 3), dtype=torch.float32)
+    backend._prev_angular_vels = torch.zeros((1, 3), dtype=torch.float32)
+    backend._needs_reset_mask = torch.zeros((1,), dtype=torch.bool)
+    backend._max_distance = 10.0
+    backend._proximity_distance_threshold = 1.0
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
+    backend._cast_actor_batch_tensors = lambda actor_ids: (  # type: ignore[method-assign]
+        torch.zeros((1, 2, 2), dtype=torch.float32),
+        torch.zeros((1, 2, 2), dtype=torch.int32),
+        torch.zeros((1, 2, 2), dtype=torch.bool),
+    )
+    backend._consume_actor_observation = lambda **kwargs: (  # type: ignore[method-assign]
+        None,
+        np.zeros((2, 2), dtype=np.float32),
+        torch.zeros((2, 2), dtype=torch.float32),
+    )
+    backend._materialize_observation = lambda **kwargs: "ok"  # type: ignore[method-assign]
+
+    result = backend.reset(episode_id=7, actor_id=0)
+
+    assert result == "ok"
+    assert torch.allclose(backend._actor_positions[0], torch.tensor([1.0, 2.0, 3.0]))
+    assert float(backend._actor_yaws[0]) == pytest.approx(1.25)
 
 
 def test_starvation_penalty_triggers_only_beyond_threshold() -> None:

@@ -20,12 +20,15 @@ __all__: list[str] = [
     "add_orientation_guides",
     "center_forward_azimuth",
     "compute_nav_metrics",
+    "depth_to_observer_palette",
     "depth_to_viridis",
     "distance_color",
     "draw_semantic_legend",
     "extract_forward_fov",
     "overlay_overhead_annotations",
     "render_bev_occupancy",
+    "render_front_depth_grid",
+    "render_front_hemisphere_heatmap",
     "render_first_person",
     "render_forward_polar",
     "turbo_color_bgr",
@@ -33,7 +36,7 @@ __all__: list[str] = [
 ]
 
 # ── visual constants ─────────────────────────────────────────────────
-VIEW_RANGE_M: float = 10.0
+VIEW_RANGE_M: float = 30.0
 FWD_FOV_DEG: float = 120.0
 MAIN_FOV_DEG: float = 95.0
 
@@ -192,6 +195,189 @@ def depth_to_viridis(
     return coloured
 
 
+def depth_to_observer_palette(
+    depth: np.ndarray,
+    valid: np.ndarray | None = None,
+) -> np.ndarray:
+    """Convert depth to a smooth observer-friendly palette.
+
+    The palette keeps red reserved for collision-near bins, then transitions
+    through yellow and green toward blue for farther structure. Contrast is
+    scaled dynamically from the valid depth distribution so indoor scenes keep
+    visible separation without flooding the whole panel with red.
+    """
+    if valid is not None and np.any(valid):
+        valid_vals = depth[valid]
+        lo = float(np.percentile(valid_vals, 2))
+        hi = float(np.percentile(valid_vals, 98))
+    else:
+        lo, hi = 0.0, 1.0
+
+    span = max(hi - lo, 1e-4)
+    normalised = np.clip((depth - lo) / span, 0.0, 1.0)
+
+    control_x = np.array([0.0, 0.14, 0.38, 0.68, 1.0], dtype=np.float32)
+    control_bgr = np.array(
+        [
+            [0.0, 0.0, 255.0],
+            [0.0, 160.0, 255.0],
+            [0.0, 235.0, 255.0],
+            [70.0, 210.0, 70.0],
+            [255.0, 120.0, 40.0],
+        ],
+        dtype=np.float32,
+    )
+
+    flat = normalised.reshape(-1)
+    b = np.interp(flat, control_x, control_bgr[:, 0])
+    g = np.interp(flat, control_x, control_bgr[:, 1])
+    r = np.interp(flat, control_x, control_bgr[:, 2])
+    coloured = np.stack([b, g, r], axis=-1).reshape(depth.shape + (3,)).astype(np.uint8)
+
+    if valid is not None:
+        _apply_fog_of_war(coloured, ~valid)
+
+    return coloured
+
+
+def render_front_depth_grid(
+    depth: np.ndarray,
+    valid: np.ndarray,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Render the exact front-half `(azimuth, elevation)` bins as a dense heatmap.
+
+    This keeps the observer view faithful to the actual front-half spherical
+    observation: for the canonical `256x48` contract and `180` degrees FOV this
+    is an exact `128x48` depth grid, enlarged with nearest-neighbour scaling.
+    """
+    panel = np.full((height, width, 3), (14, 10, 8), dtype=np.uint8)
+    az_bins, el_bins = depth.shape
+    if az_bins == 0 or el_bins == 0:
+        return panel
+
+    pad_x = 16
+    pad_top = 24
+    pad_bottom = 28
+    target_w = max(1, width - 2 * pad_x)
+    target_h = max(1, height - pad_top - pad_bottom)
+
+    depth_src = depth.T.astype(np.float32)
+    valid_src = valid.T.astype(np.float32)
+    weighted_src = depth_src * valid_src
+
+    weighted_up = cv2.resize(weighted_src, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    valid_up = cv2.resize(valid_src, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+    # Smooth sparse observations into a readable observer view while preserving
+    # the original front-half geometry trend and keeping low-confidence regions dark.
+    weighted_blur = cv2.GaussianBlur(weighted_up, (0, 0), sigmaX=7.0, sigmaY=5.0)
+    valid_blur = cv2.GaussianBlur(valid_up, (0, 0), sigmaX=7.0, sigmaY=5.0)
+    dense_depth = np.divide(weighted_blur, np.maximum(valid_blur, 1e-4))
+    confidence = np.clip(valid_blur, 0.0, 1.0)
+
+    heatmap = depth_to_observer_palette(dense_depth, confidence > 0.02).astype(np.float32)
+    background = np.full((target_h, target_w, 3), (18, 14, 10), dtype=np.float32)
+    alpha = np.clip(confidence[..., None] ** 0.85, 0.0, 1.0)
+    blended = (heatmap * alpha) + (background * (1.0 - alpha))
+    panel[pad_top:pad_top + target_h, pad_x:pad_x + target_w] = blended.astype(np.uint8)
+
+    cx = pad_x + target_w // 2
+    cy = pad_top + target_h // 2
+    cv2.line(panel, (cx, pad_top), (cx, pad_top + target_h - 1), (58, 58, 58), 1, cv2.LINE_AA)
+    cv2.line(panel, (pad_x, cy), (pad_x + target_w - 1, cy), (58, 58, 58), 1, cv2.LINE_AA)
+    cv2.rectangle(panel, (pad_x - 1, pad_top - 1), (pad_x + target_w, pad_top + target_h), (70, 70, 70), 1)
+
+    cv2.putText(panel, "UP", (cx - 10, 18), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(panel, "DOWN", (cx - 24, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(panel, "LEFT", (pad_x, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    right_size = cv2.getTextSize("RIGHT", _HUD_FONT, 0.45, 1)[0]
+    cv2.putText(panel, "RIGHT", (width - right_size[0] - pad_x, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    return panel
+
+
+def render_front_hemisphere_heatmap(
+    depth: np.ndarray,
+    valid: np.ndarray,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Render a 180-degree front hemisphere as a filled semi-ellipse heatmap."""
+    panel = np.full((height, width, 3), 12, dtype=np.uint8)
+    az_bins, el_bins = depth.shape
+    if az_bins == 0 or el_bins == 0:
+        return panel
+
+    pad_x = 12
+    pad_top = 12
+    pad_bottom = 18
+    cx = width * 0.5
+    cy = height - pad_bottom
+    rx = max((width - 2 * pad_x) * 0.5, 1.0)
+    ry = max(height - pad_top - pad_bottom, 1.0)
+
+    xs = np.arange(width, dtype=np.float32)
+    ys = np.arange(height, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(xs, ys)
+
+    x_norm = (x_grid - cx) / rx
+    inside_x = np.abs(x_norm) <= 1.0
+    dome = np.sqrt(np.clip(1.0 - np.square(x_norm), 0.0, 1.0))
+    top_y = cy - ry * dome
+    inside_y = (y_grid >= top_y) & (y_grid <= cy)
+    inside = inside_x & inside_y
+
+    denom = np.maximum(cy - top_y, 1.0)
+    elevation_t = np.clip((y_grid - top_y) / denom, 0.0, 1.0)
+    azimuth_t = np.clip((x_norm + 1.0) * 0.5, 0.0, 1.0)
+
+    depth_src = depth.T.astype(np.float32)
+    valid_src = valid.T.astype(np.float32)
+    map_x = (azimuth_t * (az_bins - 1)).astype(np.float32)
+    map_y = (elevation_t * (el_bins - 1)).astype(np.float32)
+
+    depth_proj = cv2.remap(
+        depth_src,
+        map_x,
+        map_y,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0.0,
+    )
+    valid_proj = cv2.remap(
+        valid_src,
+        map_x,
+        map_y,
+        cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0.0,
+    ) > 0.5
+
+    heatmap = depth_to_viridis(depth_proj, valid_proj & inside)
+    panel[inside] = heatmap[inside]
+
+    boundary_pts: list[tuple[int, int]] = []
+    for x in range(int(pad_x), int(width - pad_x)):
+        xn = (x - cx) / rx
+        if abs(xn) > 1.0:
+            continue
+        y = int(round(cy - ry * np.sqrt(max(0.0, 1.0 - xn * xn))))
+        boundary_pts.append((x, y))
+    if len(boundary_pts) >= 2:
+        pts = np.array(boundary_pts, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(panel, [pts], False, (110, 110, 110), 1, cv2.LINE_AA)
+
+    base_y = int(round(cy))
+    cv2.line(panel, (int(cx), int(top_y[:, width // 2].min())), (int(cx), base_y), _GUIDE_COLOR, 1, cv2.LINE_AA)
+    cv2.line(panel, (int(cx - rx), base_y), (int(cx + rx), base_y), (60, 60, 60), 1, cv2.LINE_AA)
+
+    cv2.putText(panel, "LEFT", (pad_x, max(20, height - 6)), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    right_size = cv2.getTextSize("RIGHT", _HUD_FONT, 0.45, 1)[0]
+    cv2.putText(panel, "RIGHT", (max(pad_x, width - right_size[0] - pad_x), max(20, height - 6)), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    return panel
+
+
 # ── Remap table cache for dense first-person projection ──────────────
 _REMAP_CACHE: dict[tuple[int, int, int, int, int], tuple[np.ndarray, np.ndarray]] = {}
 _SEMANTIC_LUT: np.ndarray | None = None
@@ -253,49 +439,36 @@ def _build_remap_tables(
     el_bins: int,
     pitch_q: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build (or return cached) inverse-projection tables for cv2.remap.
-
-    Maps every (screen_x, screen_y) → (az_bin, el_bin) as float32,
-    so cv2.remap can bilinearly sample the semantic panorama.
-    """
+    """Build inverse-projection tables for spherical-to-rectilinear remap."""
     key = (width, height, az_bins, el_bins, pitch_q)
-    cached = _REMAP_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if key in _REMAP_CACHE:
+        return _REMAP_CACHE[key]
 
-    # Pitch in radians from quantised centidegrees
-    pitch_rad = float(pitch_q) * 0.01 * (np.pi / 180.0)
-
-    # Focal length for MAIN_FOV_DEG
+    pitch_rad = float(pitch_q) * 0.00017453
     f = width / (2.0 * np.tan(np.deg2rad(MAIN_FOV_DEG) / 2.0))
 
-    # Horizon shifts with pitch
-    horizon_y = height * 0.54 + pitch_rad * f
+    x = np.arange(width, dtype=np.float32) - (width / 2.0)
+    y = np.arange(height, dtype=np.float32) - (height * 0.5)
+    xx, yy = np.meshgrid(x, y)
 
-    # Screen pixel grids (every output pixel)
-    sx = np.arange(width, dtype=np.float32)
-    sy = np.arange(height, dtype=np.float32)
-    sx_grid, sy_grid = np.meshgrid(sx, sy)  # (H, W) each
+    curr_y = yy * np.cos(pitch_rad) - f * np.sin(pitch_rad)
+    curr_z = yy * np.sin(pitch_rad) + f * np.cos(pitch_rad)
 
-    # Inverse pinhole → view angles
-    view_az = np.arctan2(sx_grid - width * 0.5, f)  # horizontal angle
-    view_el = np.arctan2(horizon_y - sy_grid, f)     # vertical angle
+    view_az = np.arctan2(xx, curr_z)
+    view_el = np.arcsin(
+        np.clip(curr_y / np.sqrt(xx**2 + curr_y**2 + curr_z**2), -1.0, 1.0),
+    )
 
-    # Map view angles → source bin coordinates (float)
-    az_lo = -np.deg2rad(FWD_FOV_DEG / 2.0)
-    az_hi = np.deg2rad(FWD_FOV_DEG / 2.0)
-    el_lo = -np.deg2rad(35.0)
-    el_hi = np.deg2rad(35.0)
+    az_limit = np.deg2rad(FWD_FOV_DEG / 2.0)
+    el_limit = np.deg2rad(35.0)
 
-    # Normalise to [0, bins-1]
-    map_x = ((view_az - az_lo) / (az_hi - az_lo) * (az_bins - 1)).astype(np.float32)
-    map_y = ((el_hi - view_el) / (el_hi - el_lo) * (el_bins - 1)).astype(np.float32)
+    map_x = ((view_az + az_limit) / (2.0 * az_limit) * (az_bins - 1)).astype(np.float32)
+    map_y = ((el_limit - view_el) / (2.0 * el_limit) * (el_bins - 1)).astype(np.float32)
 
-    # Keep cache bounded
-    if len(_REMAP_CACHE) > 8:
+    if len(_REMAP_CACHE) > 16:
         _REMAP_CACHE.clear()
     _REMAP_CACHE[key] = (map_x, map_y)
-    return map_x, map_y
+    return _REMAP_CACHE[key]
 
 
 def _make_bg_gradient(width: int, height: int, horizon_y: int) -> np.ndarray:
@@ -327,134 +500,137 @@ def render_first_person(
     width: int,
     height: int,
     pitch: float = 0.0,
+    max_distance_m: float = VIEW_RANGE_M,
 ) -> tuple[np.ndarray, float]:
-    """Dense depth-fill first-person view via equirect-to-rectilinear remap.
+    """Render a corrected perspective projection from the canonical spherical view."""
+    centered_depth, centered_semantic, centered_valid = extract_forward_fov(
+        depth,
+        semantic,
+        valid,
+        fov_degrees=FWD_FOV_DEG,
+    )
+    del centered_semantic
 
-    Uses ``cv2.remap`` to bilinearly sample the equirectangular depth
-    data for every output pixel, producing a fully-filled perspective
-    projection with Turbo depth colouring.  Invalid pixels fall through
-    to a sky/floor gradient background.
-
-    Parameters
-    ----------
-    depth
-        ``(az_bins, el_bins)`` normalised [0, 1] depth.
-    semantic
-        ``(az_bins, el_bins)`` integer semantic class IDs (reserved).
-    valid
-        ``(az_bins, el_bins)`` boolean validity mask.
-    width, height
-        Output image dimensions in pixels.
-    pitch
-        Robot pitch in radians (positive = look up).
-
-    Returns
-    -------
-    ``(bgr_image, center_distance_m)``
-    """
-    _ = semantic  # reserved for future semantic overlay
-    az_bins, el_bins = depth.shape
-    colorbar_w = 28
-    view_w = width - colorbar_w
-
+    az_bins, el_bins = centered_depth.shape
     if az_bins == 0 or el_bins == 0:
-        img = np.full((height, width, 3), 8, dtype=np.uint8)
-        return img, VIEW_RANGE_M
+        return np.full((height, width, 3), 15, dtype=np.uint8), float(max_distance_m)
 
-    # Pitch quantisation for remap cache (centidegrees)
-    pitch_q = round(float(np.rad2deg(pitch)) * 100.0)
-    flen = view_w / (2.0 * np.tan(np.deg2rad(MAIN_FOV_DEG) / 2.0))
-    horizon_y = int(np.clip(height * 0.54 + pitch * flen, 0, height - 1))
+    pitch_q = int(np.rad2deg(pitch) * 100)
+    map_x, map_y = _build_remap_tables(width, height, az_bins, el_bins, pitch_q)
 
-    # ── Background: sky / floor gradient ─────────────────────────────
-    img = _make_bg_gradient(width, height, horizon_y)
+    depth_src = centered_depth.T.astype(np.float32)
+    valid_src = centered_valid.T.astype(np.float32)
 
-    # ── Inverse-projection remap tables ──────────────────────────────
-    map_x, map_y = _build_remap_tables(view_w, height, az_bins, el_bins, pitch_q)
-
-    # Source images transposed to (el, az) so remap X→az col, Y→el row
-    depth_src = depth.T.astype(np.float32)
-    valid_src = valid.T.astype(np.float32)
-
-    depth_proj = cv2.remap(
-        depth_src, map_x, map_y, cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_CONSTANT, borderValue=1.0,
+    proj_depth = cv2.remap(
+        depth_src,
+        map_x,
+        map_y,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=1.0,
     )
-    valid_proj = cv2.remap(
-        valid_src, map_x, map_y, cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT, borderValue=0.0,
+    proj_valid = cv2.remap(
+        valid_src,
+        map_x,
+        map_y,
+        cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0.0,
     )
-    vis_mask = valid_proj > 0.5
+    mask = proj_valid > 0.5
 
-    # ── Turbo colormap with local contrast stretch ─────────────────
     lut = _turbo_lut()
-    depth_clamped = np.clip(depth_proj, 0.0, 1.0)
-
-    # Auto-range: stretch actual valid depth range across full LUT
-    # so close-range indoor scenes still show clear depth variation
-    if np.any(vis_mask):
-        valid_depths = depth_clamped[vis_mask]
-        d_lo = float(np.percentile(valid_depths, 1))
-        d_hi = float(np.percentile(valid_depths, 99))
-        d_span = max(d_hi - d_lo, 0.01)
-        depth_stretched = np.clip((depth_clamped - d_lo) / d_span, 0.0, 1.0)
+    proj_depth = np.clip(proj_depth, 0.0, 1.0)
+    if np.any(mask):
+        valid_depths = proj_depth[mask]
+        d_min, d_max = np.percentile(valid_depths, [0.5, 99.5])
+        d_span = max(float(d_max - d_min), 0.01)
+        norm_depth = np.clip((proj_depth - float(d_min)) / d_span, 0.0, 1.0)
     else:
-        depth_stretched = depth_clamped
+        norm_depth = proj_depth
 
-    turbo_idx = np.clip(
-        (1.0 - depth_stretched) * 255.0, 0, 255,
-    ).astype(np.uint8)
-    depth_colored = lut[turbo_idx, 0, :]  # (height, view_w, 3)
+    color_idx = ((1.0 - norm_depth) * 255.0).astype(np.uint8)
+    canvas = lut[color_idx, 0, :].copy()
 
-    # Composite depth onto gradient (view area only)
-    view_region = img[:, :view_w]
-    view_region[vis_mask] = depth_colored[vis_mask]
+    _apply_fog_of_war(canvas, ~mask)
 
-    # ── Subtle grid overlay ──────────────────────────────────────────
-    cv2.line(img, (0, horizon_y), (view_w - 1, horizon_y), (55, 55, 55), 1)
-    cv2.line(img, (view_w // 2, 0), (view_w // 2, height - 1), (40, 40, 40), 1)
+    cx = width // 2
+    cy = height // 2
+    cv2.line(canvas, (cx, 0), (cx, height - 1), (60, 60, 60), 1, cv2.LINE_AA)
 
-    for i in range(1, 8):
-        y_up = int(horizon_y - (horizon_y * i / 8.0))
-        y_dn = int(horizon_y + ((height - horizon_y) * i / 8.0))
-        if 0 <= y_up < height:
-            cv2.line(img, (0, y_up), (view_w - 1, y_up), (28, 28, 28), 1)
-        if 0 <= y_dn < height:
-            cv2.line(img, (0, y_dn), (view_w - 1, y_dn), (28, 28, 28), 1)
+    f = width / (2.0 * np.tan(np.deg2rad(MAIN_FOV_DEG) / 2.0))
+    horizon_y = int(cy + pitch * f)
+    if 0 <= horizon_y < height:
+        cv2.line(canvas, (0, horizon_y), (width - 1, horizon_y), (60, 60, 60), 1, cv2.LINE_AA)
 
-    for i in range(1, 12):
-        x_line = int(view_w * i / 12.0)
-        cv2.line(img, (x_line, 0), (x_line, height - 1), (28, 28, 28), 1)
+    mid_az = az_bins // 2
+    mid_el = el_bins // 2
+    center_val = centered_depth[mid_az, mid_el] if centered_valid[mid_az, mid_el] else 1.0
+    center_m = float(center_val * max_distance_m)
 
-    # ── Colorbar + crosshair ─────────────────────────────────────────
-    _draw_lidar_colorbar(img, view_w, 0, colorbar_w, height)
-    _draw_lidar_crosshair(img, view_w // 2, horizon_y)
-
-    # Centre distance readout
-    center_col = az_bins // 2
-    center_band = valid[max(0, center_col - 2): min(az_bins, center_col + 3), :]
-    center_depth = depth[max(0, center_col - 2): min(az_bins, center_col + 3), :]
-    if np.any(center_band):
-        center_m = float(np.min(center_depth[center_band]) * VIEW_RANGE_M)
-    else:
-        center_m = VIEW_RANGE_M
-
-    dist_label = f"{center_m:.1f}m"
+    label_y = max(18, min(height - 12, horizon_y - 10 if 0 <= horizon_y < height else cy - 10))
     cv2.putText(
-        img, dist_label,
-        (view_w // 2 + 16, horizon_y - 6),
-        _HUD_FONT, 0.55, (0, 255, 0), 1, cv2.LINE_AA,
+        canvas,
+        f"CTR {center_m:.1f}m",
+        (cx + 10, label_y),
+        _HUD_FONT,
+        0.4,
+        (200, 200, 200),
+        1,
+        cv2.LINE_AA,
+    )
+
+    cv2.putText(canvas, "UP", (cx - 10, 20), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "DOWN", (cx - 24, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "LEFT", (8, max(20, height - 8)), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    right_size = cv2.getTextSize("RIGHT", _HUD_FONT, 0.45, 1)[0]
+    cv2.putText(
+        canvas,
+        "RIGHT",
+        (max(8, width - right_size[0] - 8), max(20, height - 8)),
+        _HUD_FONT,
+        0.45,
+        _TITLE_TEXT_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        f"RANGE {float(max_distance_m):.0f}m",
+        (10, 22),
+        _HUD_FONT,
+        0.4,
+        (170, 170, 170),
+        1,
+        cv2.LINE_AA,
+    )
+    fov_label = f"HFOV {FWD_FOV_DEG:.0f}deg"
+    fov_size = cv2.getTextSize(fov_label, _HUD_FONT, 0.4, 1)[0]
+    cv2.putText(
+        canvas,
+        fov_label,
+        (max(8, width - fov_size[0] - 10), 22),
+        _HUD_FONT,
+        0.4,
+        (170, 170, 170),
+        1,
+        cv2.LINE_AA,
     )
 
     pitch_deg = float(np.rad2deg(pitch))
     if abs(pitch_deg) > 0.5:
-        label = f"pitch {pitch_deg:+.1f}\xb0"
         cv2.putText(
-            img, label, (view_w // 2 - 40, 24),
-            _HUD_FONT, 0.45, _HEADING_COLOR, 1, cv2.LINE_AA,
+            canvas,
+            f"pitch {pitch_deg:+.1f}\xb0",
+            (cx - 40, 24),
+            _HUD_FONT,
+            0.45,
+            _HEADING_COLOR,
+            1,
+            cv2.LINE_AA,
         )
 
-    return img, center_m
+    return canvas, center_m
 
 
 def _draw_lidar_colorbar(
@@ -554,6 +730,7 @@ def render_forward_polar(
     w: int,
     h: int,
     scan_history: list[np.ndarray] | None = None,
+    max_distance_m: float = VIEW_RANGE_M,
 ) -> np.ndarray:
     """Render forward 180° scan as a continuous Turbo-filled polar plot.
 
@@ -567,11 +744,11 @@ def render_forward_polar(
         return panel
 
     # ── per-azimuth minimum distance (with smoothing) ───────────────
-    min_d = np.full((az_bins,), VIEW_RANGE_M, dtype=np.float32)
+    min_d = np.full((az_bins,), float(max_distance_m), dtype=np.float32)
     for i in range(az_bins):
         v = valid[i]
         if np.any(v):
-            min_d[i] = float(np.min(depth[i][v]) * VIEW_RANGE_M)
+            min_d[i] = float(np.min(depth[i][v]) * max_distance_m)
 
     min_d = np.convolve(
         min_d,
@@ -616,7 +793,7 @@ def render_forward_polar(
     scan_dist = min_d[bin_lo] * (1.0 - frac) + min_d[bin_hi] * frac
 
     # Pixel radius corresponding to scan distance
-    scan_r_px = (scan_dist / VIEW_RANGE_M) * max_r
+    scan_r_px = (scan_dist / float(max_distance_m)) * max_r
 
     # Fill mask: inside scan boundary AND within 180° forward arc
     in_arc = (pixel_angle >= az_lo) & (pixel_angle <= az_hi) & (dy >= -4)
@@ -630,7 +807,7 @@ def render_forward_polar(
     )
     # Map to actual distance for Turbo colouring
     filled_dist_m = filled_depth * scan_dist
-    depth_norm = np.clip(filled_dist_m / VIEW_RANGE_M, 0.0, 1.0)
+    depth_norm = np.clip(filled_dist_m / float(max_distance_m), 0.0, 1.0)
 
     # Turbo LUT colouring
     lut = _turbo_lut()
@@ -650,7 +827,7 @@ def render_forward_polar(
     boundary_angles = np.linspace(-np.pi / 2.0, np.pi / 2.0, az_bins)
     boundary_pts: list[tuple[int, int]] = []
     for k in range(az_bins):
-        rd = float(min_d[k] / VIEW_RANGE_M) * max_r
+        rd = float(min_d[k] / float(max_distance_m)) * max_r
         bx = int(cx + rd * np.sin(boundary_angles[k]))
         by = int(cy - rd * np.cos(boundary_angles[k]))
         boundary_pts.append((bx, by))
@@ -663,7 +840,7 @@ def render_forward_polar(
         (1.0, "1m"), (2.0, "2m"), (5.0, "5m"), (10.0, "10m"),
     ]
     for ring_m, ring_label in ring_specs:
-        rr = int(max_r * min(1.0, ring_m / VIEW_RANGE_M))
+        rr = int(max_r * min(1.0, ring_m / float(max_distance_m)))
         cv2.ellipse(
             panel, (cx, cy), (rr, rr), 0, 180, 360,
             (80, 80, 80), 1, cv2.LINE_AA,
@@ -700,6 +877,7 @@ def render_bev_occupancy(
     w: int,
     h: int,
     pose_history: list[tuple[float, float, float]] | None = None,
+    max_distance_m: float = VIEW_RANGE_M,
 ) -> np.ndarray:
     """Render 360-degree observation as top-down occupancy map."""
     panel = np.full((h, w, 3), 20, dtype=np.uint8)
@@ -709,7 +887,7 @@ def render_bev_occupancy(
 
     cx = w // 2
     cy = h // 2
-    scale = (min(w, h) * 0.45) / VIEW_RANGE_M
+    scale = (min(w, h) * 0.45) / float(max_distance_m)
     angles = np.linspace(-np.pi, np.pi, az_bins, endpoint=False)
 
     # Distance rings for reference
@@ -722,8 +900,8 @@ def render_bev_occupancy(
         v = valid[i]
         if not np.any(v):
             continue
-        d = float(np.min(depth[i][v]) * VIEW_RANGE_M)
-        d_clamped = min(VIEW_RANGE_M, d)
+        d = float(np.min(depth[i][v]) * max_distance_m)
+        d_clamped = min(float(max_distance_m), d)
         x = int(cx + d_clamped * np.sin(angles[i]) * scale)
         y = int(cy - d_clamped * np.cos(angles[i]) * scale)
         if 0 <= x < w and 0 <= y < h:

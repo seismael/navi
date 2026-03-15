@@ -23,6 +23,7 @@ class _StubConfig:
     step_endpoint: str = "tcp://env-rep:5560"
     output_path: str = "session.zarr"
     pub_address: str = "tcp://*:5558"
+    observation_max_distance_m: float = 30.0
 
 
 class _ViewerSpy:
@@ -88,6 +89,7 @@ def test_dashboard_passive_mode_disables_environment_sockets(monkeypatch: Any) -
         "hz": 30.0,
         "linear_speed": 1.5,
         "yaw_rate": 1.5,
+        "max_distance_m": 30.0,
         "scene_path": None,
     }
 
@@ -123,6 +125,7 @@ def test_dashboard_passive_mode_ignores_explicit_environment_endpoints(monkeypat
     assert _ViewerSpy.last_kwargs["actor_sub"] == "tcp://override-actor-pub:6002"
     assert _ViewerSpy.last_kwargs["enable_actor_selector"] is True
     assert _ViewerSpy.last_kwargs["actor_id"] == 3
+    assert _ViewerSpy.last_kwargs["max_distance_m"] == 30.0
 
 
 def test_dashboard_default_mode_uses_configured_environment_wiring(monkeypatch: Any) -> None:
@@ -141,6 +144,7 @@ def test_dashboard_default_mode_uses_configured_environment_wiring(monkeypatch: 
     assert _ViewerSpy.last_kwargs["step_endpoint"] == "tcp://env-rep:5560"
     assert _ViewerSpy.last_kwargs["enable_actor_selector"] is True
     assert _ViewerSpy.last_kwargs["actor_id"] == 0
+    assert _ViewerSpy.last_kwargs["max_distance_m"] == 30.0
 
 
 def test_dashboard_attach_check_emits_json_summary(monkeypatch: Any) -> None:
@@ -191,6 +195,58 @@ def test_dashboard_attach_check_exits_nonzero_on_timeout(monkeypatch: Any) -> No
     assert result.exit_code == 1
     assert "ok=False" in result.output
     assert "issue=No dashboard-observable actor traffic arrived" in result.output
+
+
+def test_dashboard_capture_frame_emits_json_summary(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "setup_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "AuditorConfig", _StubConfig)
+    monkeypatch.setattr(
+        cli,
+        "_capture_dashboard_frame",
+        lambda **_kwargs: {
+            "profile": "dashboard-capture-frame",
+            "ok": True,
+            "actor_sub": "tcp://actor-pub:5557",
+            "actor_id": 0,
+            "output_dir": "artifacts/dashboard-captures/20260315-000000",
+            "valid_ratio": 0.82,
+            "depth_min": 0.12,
+            "depth_max": 0.98,
+            "depth_mean": 0.44,
+            "center_distance_m": 2.1,
+            "elapsed_seconds": 0.5,
+        },
+    )
+
+    result = runner.invoke(cli.app, ["dashboard-capture-frame", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["actor_id"] == 0
+
+
+def test_dashboard_capture_frame_exits_nonzero_on_timeout(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "setup_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "AuditorConfig", _StubConfig)
+    monkeypatch.setattr(
+        cli,
+        "_capture_dashboard_frame",
+        lambda **_kwargs: {
+            "profile": "dashboard-capture-frame",
+            "ok": False,
+            "actor_sub": "tcp://actor-pub:5557",
+            "actor_id": 0,
+            "elapsed_seconds": 15.0,
+            "issues": ["No matching distance_matrix_v2 frame arrived before timeout."],
+        },
+    )
+
+    result = runner.invoke(cli.app, ["dashboard-capture-frame"])
+
+    assert result.exit_code == 1
+    assert "ok=False" in result.output
+    assert "issue=No matching distance_matrix_v2 frame arrived before timeout." in result.output
 
 
 def test_record_single_sub_uses_one_endpoint(monkeypatch: Any) -> None:

@@ -56,6 +56,7 @@ class CanonicalRuntime(Protocol):
         actor_indices: torch.Tensor | None = None,
         scratch_slot: int = 0,
         publish_actor_ids: tuple[int, ...] = (),
+        materialize_results: bool = False,
     ) -> tuple[SdfDagTensorStepBatch, tuple[Any, ...]]: ...
 
     def close(self) -> None: ...
@@ -211,7 +212,6 @@ class _PendingRolloutGroup:
     values: torch.Tensor
     intrinsic_rewards: torch.Tensor
     step_batch: SdfDagTensorStepBatch
-    results: tuple[Any, ...]
     step_telemetry_local_indices: torch.Tensor
     fwd_ms: float
     step_ms: float
@@ -659,16 +659,17 @@ class PpoTrainer:
         actor_indices: torch.Tensor | None = None,
         scratch_slot: int = 0,
         publish_actor_ids: tuple[int, ...] = (),
-    ) -> tuple[SdfDagTensorStepBatch, tuple[Any, ...]]:
+    ) -> SdfDagTensorStepBatch:
         runtime = self._require_tensor_runtime()
-        step_batch, results = runtime.batch_step_tensor_actions(
+        step_batch, _results = runtime.batch_step_tensor_actions(
             action_tensor,
             step_id,
             actor_indices=actor_indices,
             scratch_slot=scratch_slot,
             publish_actor_ids=publish_actor_ids,
+            materialize_results=False,
         )
-        return step_batch, results
+        return step_batch
 
     def _launch_rollout_group(
         self,
@@ -704,7 +705,7 @@ class PpoTrainer:
             fwd_ms = (time.perf_counter() - t_fwd_start) * 1000
 
             t_step_start = time.perf_counter()
-            step_batch, results = self._request_batch_step_tensor_actions(
+            step_batch = self._request_batch_step_tensor_actions(
                 actions.detach(),
                 step_id,
                 actor_indices=actor_indices,
@@ -724,7 +725,6 @@ class PpoTrainer:
             values=values,
             intrinsic_rewards=intrinsic_rewards,
             step_batch=step_batch,
-            results=results,
             step_telemetry_local_indices=step_telemetry_local_indices,
             fwd_ms=fwd_ms,
             step_ms=step_ms,
@@ -809,12 +809,10 @@ class PpoTrainer:
         return 1.0 / max(float(self._config.dashboard_observation_hz), 1.0)
 
     def _observation_publish_actor_ids(self) -> tuple[int, ...]:
-        """Return the actor ids whose DistanceMatrix observations may be published."""
+        """Return the actor ids whose low-rate dashboard observations may be published."""
         if not self._config.emit_observation_stream:
             return ()
-        if self._config.telemetry_all_actors:
-            return tuple(range(self._n_actors))
-        return (int(self._config.telemetry_actor_id),)
+        return tuple(range(self._n_actors))
 
     def _should_publish_actor_telemetry(self, actor_id: int) -> bool:
         if self._config.telemetry_all_actors:
@@ -1274,8 +1272,9 @@ class PpoTrainer:
                             raise RuntimeError("telemetry scalar extraction is required for step telemetry emission")
                         selected_local_rows = pending.step_telemetry_local_indices.detach().to(device="cpu", dtype=torch.int64).tolist()
                         selected_actor_ids = step_actor_indices.index_select(0, pending.step_telemetry_local_indices).detach().to(device="cpu", dtype=torch.int64).tolist()
+                        selected_episode_ids = pending.step_batch.episode_id_tensor.index_select(0, pending.step_telemetry_local_indices).detach().to(device="cpu", dtype=torch.int64).tolist()
                         telemetry_reward_components = (
-                            reward_component_tensor.index_select(0, pending.step_telemetry_local_indices)
+                            reward_component_tensor.index_select(0, pending.step_telemetry_local_indices).detach().to(device="cpu", dtype=torch.float32)
                             if reward_component_tensor is not None
                             else None
                         )
@@ -1287,7 +1286,7 @@ class PpoTrainer:
                             t_tel_start = time.perf_counter()
                             self._publish_step_telemetry(
                                 step_id=step_id,
-                                episode_id=int(pending.results[selected_local_rows[row]].episode_id),
+                                episode_id=int(selected_episode_ids[row]),
                                 actor_id=actor_id,
                                 raw_reward=float(host_scalar_batch.raw_reward_tensor[row]),
                                 shaped_reward=float(host_scalar_batch.shaped_reward_tensor[row]),

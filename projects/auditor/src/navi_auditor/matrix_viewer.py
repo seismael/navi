@@ -24,6 +24,7 @@ class MatrixViewer:
         hz: float = 30.0,
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
+        max_distance_m: float = 30.0,
         scene_path: str | None = None,
     ) -> None:
         self._matrix_sub = matrix_sub
@@ -34,6 +35,7 @@ class MatrixViewer:
         self._hz = hz
         self._linear_speed = linear_speed
         self._yaw_rate = yaw_rate
+        self._max_distance_m = max_distance_m
         self._scene_path = scene_path
 
     def run(self) -> None:
@@ -53,5 +55,6 @@ class MatrixViewer:
             hz=self._hz,
             linear_speed=self._linear_speed,
             yaw_rate=self._yaw_rate,
+            max_distance_m=self._max_distance_m,
             scene_path=self._scene_path,
         )

@@ -56,6 +56,10 @@ class AuditorConfig(_SettingsBase):
         default="tcp://*:5558",
         validation_alias="NAVI_AUDITOR_PUB_ADDRESS",
     )
+    observation_max_distance_m: float = Field(
+        default=30.0,
+        validation_alias="NAVI_MAX_DISTANCE",
+    )
 
     @property
     def sub_addresses(self) -> tuple[str, ...]:

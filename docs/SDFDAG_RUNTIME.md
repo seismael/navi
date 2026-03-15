@@ -159,7 +159,9 @@ Performance work on this stack should assume:
 - reusable buffers are preferred over per-step allocation
 - `torch_sdf.cast_rays()` is the CUDA boundary; tensor-only direction prep, output normalization, kinematics, and reward helper graphs around that boundary are valid `torch.compile` targets on the canonical path
 - canonical action-tensor stepping must keep command rows on device rather than bouncing CUDA actions through NumPy
+- canonical trainer-facing tensor steps should return tensor bookkeeping as the primary result surface and treat Python `StepResult` reconstruction as an opt-in diagnostic/public seam rather than unconditional per-step work
 - reset handling should batch state reinitialization and initial observation seeding for all selected actors instead of walking the CUDA reset mask actor-by-actor
+- canonical reset pose selection may spend extra one-time scene-load work on low-resolution spherical spawn probes so spawn positions and initial yaws favor navigable, structure-visible interior views instead of pure clearance maxima
 - collision rollback on the canonical tensor path should restore the previous safe pose without launching a second collided-subset ray cast in the same tick
 - materialization for dashboards and telemetry should be selective
 - host extraction should be batched and coarse when unavoidable

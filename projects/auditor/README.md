@@ -9,7 +9,7 @@ Gallery Layer for Ghost-Matrix runtime.
 - **Passive only** — never gates simulation throughput or modifies training.
 - Records `distance_matrix_v2`, `action_v2`, and `telemetry_event_v2` streams.
 - Replays recorded streams via ZMQ PUB.
-- Provides a live PyQtGraph dashboard with a single selected actor depth view
+- Provides a live PyQtGraph dashboard with one selected actor perspective view
   and actor selector enabled by default.
 - Dashboard metrics are intentionally not rendered in UI; metrics remain
   available via logs, telemetry events, and recorder artifacts.
@@ -51,6 +51,9 @@ uv run navi-auditor dataset-audit --json
 # Headless passive attach proof for live training or replay streams
 uv run navi-auditor dashboard-attach-check --actor-sub tcp://localhost:5557 --json
 
+# One-shot live frame capture for raw-vs-projected inspection
+uv run navi-auditor dashboard-capture-frame --actor-sub tcp://localhost:5557 --json
+
 # Shortcut command (equivalent to: navi-auditor dashboard)
 uv run dashboard
 
@@ -71,10 +74,17 @@ uv run navi-auditor dashboard --matrix-sub tcp://localhost:5559 --actor-sub tcp:
 The `GhostMatrixDashboard` is a standalone PyQtGraph application that connects
 via ZMQ PUB/SUB and can run independently from training. It displays:
 
-- One selected live actor depth view with the selector enabled by default
+- One selected live actor perspective view with corrected spherical-to-rectilinear
+  projection geometry and the selector enabled by default
+- The live HUD shows `CTR ...m` for the centre ray and `RANGE ...m` for the
+  observation horizon so the centre label is not mistaken for the global limit
 - WAITING / OBSERVER / TRAINING / INFERENCE mode indicator
 - Compact same-line status telemetry: stall time, SPS, reward EMA, episode
   count, latest step, optimizer wall-time, and zero-wait ratio
+
+Use `dashboard-capture-frame` when you need the raw spherical `DistanceMatrix`
+offline for diagnostics; that debug surface is not part of the normal live
+observer layout.
 
 The selector stays available by default so operators can switch the
 displayed actor when diagnosing specific env IDs.

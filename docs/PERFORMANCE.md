@@ -200,6 +200,7 @@ for the canonical tensor path:
 - indexed CUDA state updates must use proper indexed assignment semantics rather than `.copy_()` on advanced-indexed temporary tensors
 - actor-index routing on the canonical tensor path should stay tensor-native through batch stepping, reset seeding, and observation casting; convert to Python only at the final public result or selected publish seam
 - final public `StepResult` materialization on the tensor path should use one packed host mirror for result rows rather than separate per-field `.cpu().tolist()` extractions
+- canonical trainer-facing tensor steps should not request `StepResult` materialization at all; reward, truncation, env-id, and episode-id columns must stay on-device and drive rollout bookkeeping directly unless a non-training caller explicitly needs public result objects
 - eager tensor micro-kernels around `torch_sdf.cast_rays()` should be fused with `torch.compile` on the canonical path when the helper graph remains pure PyTorch tensor code
 
 ## 5. Benchmark Gates

@@ -193,6 +193,7 @@ Important current checks include:
 - `check-sdfdag` corpus validation against the promoted manifest, live promoted assets, and canonical compile resolution when run without `--gmdag-file`
 - `bench-sdfdag --json` structured summaries for repeatable environment benchmark capture and live promoted-corpus benchmark smoke proof
 - deterministic oracle-fixture checks that preserve exact `(1, Az, El)` depth, delta-depth, validity, and movement-induced view changes before those observations reach the actor or auditor
+- canonical `SdfDagBackend` reset selection now scores candidate spawn poses from low-resolution spherical probes so actors start in structure-visible interior views rather than clearance-only void-facing poses
 | `max_distance` | `float` | 30.0 | Maximum observation distance (metres) |
 | `habitat_scene` | `str` | `""` | Path to Habitat `.glb` scene (Habitat only) |
 | `habitat_dataset_config` | `str` | `""` | Path to PointNav episode JSON (Habitat only) |

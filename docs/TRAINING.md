@@ -193,9 +193,7 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - canonical geometry-foraging shaping positively values mid-range structure visibility, forward-sector structure reacquisition, and controlled inspection turns that reveal more geometry instead of less
 - use explicit overrides only for deliberate experiments; temporal-core comparisons should change only `TemporalCore` or `--temporal-core` while holding all other canonical settings fixed
 - dashboard mode detection stays on low-volume telemetry to avoid rollout stalls
-- the selected-actor dashboard observation stream defaults to a passive `10 Hz`
-	cadence so live inspection remains visibly current without reintroducing
-	per-step publication
-- widening live observation publication to every actor is a deliberate high-overhead diagnostic mode and should be enabled only when the operator explicitly requests all-actor telemetry fan-out
+- the dashboard observation stream publishes a passive `10 Hz` selector-visible frame for every actor so operators can switch actors live without restarting training
+- widening full training telemetry beyond those low-rate observation frames remains a deliberate high-overhead diagnostic mode and should be enabled only when the operator explicitly requests all-actor telemetry fan-out
 - PPO update-loss scalar materialization is diagnostic-only on the canonical hot path: the trainer still emits coarse `actor.training.ppo.update` events for mode/status detection by default, but full PPO loss fields are populated only when explicit update-loss telemetry is enabled
 - when a supported fused Mamba-2 environment is ready later, re-promotion must be proven by rerunning the canonical temporal profile and bounded canonical training surfaces before the active docs and scripts are switched away from GRU

@@ -1,4 +1,4 @@
-"""Ghost-Matrix RL Dashboard — single selected actor view.
+"""Ghost-Matrix RL Dashboard — selected actor observer view.
 
 The dashboard is intentionally visual-only: it renders one live actor
 depth view with mode/status indication. The actor selector is enabled by
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import time
 
-import cv2
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -18,12 +17,10 @@ from navi_auditor.dashboard.panels import (
     StatusBar,
 )
 from navi_auditor.dashboard.renderers import (
-    add_orientation_guides,
-    depth_to_viridis,
-    extract_forward_fov,
+    render_first_person,
 )
 from navi_auditor.dashboard.status_line import build_status_metrics_line
-from navi_auditor.stream_engine import StreamEngine
+from navi_auditor.stream_engine import StreamEngine, StreamState
 
 __all__: list[str] = ["GhostMatrixDashboard"]
 
@@ -61,6 +58,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         hz: float = 30.0,
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
+        max_distance_m: float = 30.0,
         scene_path: str | None = None,
     ) -> None:
         super().__init__()
@@ -87,6 +85,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._fwd = 0.0
         self._yaw = 0.0
         self._scene_path = scene_path
+        self._max_distance_m = float(max_distance_m)
 
         # ── build UI ─────────────────────────────────────────────────
         self._status_bar = StatusBar()
@@ -102,7 +101,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
     # ── layout construction ──────────────────────────────────────────
 
     def _build_layout(self) -> None:
-        """Build the main window layout with one selected actor view."""
+        """Build the main window layout with one live actor panel."""
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main_layout = QtWidgets.QVBoxLayout(central)
@@ -137,7 +136,12 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             selector_layout.addStretch()
             main_layout.addWidget(selector_container)
 
-        main_layout.addWidget(self._actor_panel, stretch=1)
+        content = QtWidgets.QWidget()
+        content_layout = QtWidgets.QHBoxLayout(content)
+        content_layout.setContentsMargins(8, 8, 8, 8)
+        content_layout.setSpacing(8)
+        content_layout.addWidget(self._actor_panel, stretch=1)
+        main_layout.addWidget(content, stretch=1)
 
     def _update_actor_selector_label(self) -> None:
         """Render the currently watched actor beside the selector."""
@@ -175,7 +179,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._engine.set_selected_actor(self._selected_actor)
         self._update_actor_selector_label()
 
-    def _shared_metrics_state(self) -> object | None:
+    def _shared_metrics_state(self) -> StreamState | None:
         """Return one actor state carrying shared coarse trainer metrics."""
         for actor_state in self._engine.actor_states.values():
             if (
@@ -229,25 +233,20 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._handle_teleop()
 
     def _update_actor_panel(self, panel: ImagePanel, dm: object) -> None:
-        """Update one actor panel with depth-derived viridis view."""
-        import numpy as np
-
+        """Update one actor panel with the corrected forward perspective view."""
         from navi_contracts import DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
-        fov_depth, fov_valid = extract_forward_fov(
+        actor_img, _center_m = render_first_person(
             dm.depth[0],
+            dm.semantic[0],
             dm.valid_mask[0],
-            fov_degrees=_FOV_FRACTION * 360.0,
+            960,
+            540,
+            pitch=float(dm.robot_pose.pitch),
+            max_distance_m=self._max_distance_m,
         )
-
-        # Raw depth (Viridis) — transpose to put Azimuth on X and Elevation on Y
-        viridis_img = depth_to_viridis(fov_depth.T, fov_valid.T)
-        viridis_resized = cv2.resize(
-            viridis_img, (480, 360), interpolation=cv2.INTER_NEAREST,
-        )
-        add_orientation_guides(viridis_resized)
-        panel.set_image(viridis_resized)
+        panel.set_image(actor_img)
 
     # ── teleop / keyboard control ────────────────────────────────────
 
@@ -323,6 +322,7 @@ def run_dashboard(
     hz: float = 30.0,
     linear_speed: float = 1.5,
     yaw_rate: float = 1.5,
+    max_distance_m: float = 30.0,
     scene_path: str | None = None,
 ) -> None:
     """Launch the Ghost-Matrix RL Dashboard as a standalone application."""
@@ -337,6 +337,7 @@ def run_dashboard(
         hz=hz,
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,
+        max_distance_m=max_distance_m,
         scene_path=scene_path,
     )
     dashboard.show()

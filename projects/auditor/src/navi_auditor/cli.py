@@ -8,10 +8,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import cv2
+import numpy as np
 import typer
 import zmq
 
 from navi_auditor.config import AuditorConfig
+from navi_auditor.dashboard.renderers import depth_to_viridis, render_first_person
 from navi_contracts import TOPIC_ACTION, TOPIC_DISTANCE_MATRIX, TOPIC_TELEMETRY_EVENT, setup_logging
 
 if TYPE_CHECKING:
@@ -321,6 +324,7 @@ def dashboard(
     hz: float = typer.Option(30.0, help="Dashboard + teleop tick rate"),
     linear_speed: float = typer.Option(1.5, help="Max horizontal linear speed"),
     yaw_rate: float = typer.Option(1.5, help="Max yaw rate"),
+    max_distance: float | None = typer.Option(None, min=0.01, help="Observation normalization horizon in meters."),
     scene: str = typer.Option(
         "",
         help="Path to .glb/.obj mesh for 3D environment view",
@@ -334,6 +338,7 @@ def dashboard(
     m_sub = "" if passive else (matrix_sub if matrix_sub is not None else config.matrix_sub_address)
     a_sub = actor_sub if actor_sub is not None else config.actor_sub_address
     s_end = "" if passive else (step_endpoint if step_endpoint is not None else config.step_endpoint)
+    resolved_max_distance = float(max_distance) if max_distance is not None else float(config.observation_max_distance_m)
 
     typer.echo("Initialising Ghost-Matrix RL Dashboard...")
     typer.echo("  Tab=toggle manual/AI  WASD/arrows=move  ESC=quit")
@@ -350,6 +355,7 @@ def dashboard(
         hz=hz,
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,
+        max_distance_m=resolved_max_distance,
         scene_path=scene_path,
     )
     dashboard_runner.run()
@@ -386,6 +392,153 @@ def dashboard_attach_check(
 
     if not summary["ok"]:
         raise typer.Exit(code=1)
+
+
+@app.command("dashboard-capture-frame")
+def dashboard_capture_frame(
+    actor_sub: str = typer.Option(None, help="Actor PUB SUB address to observe."),
+    actor_id: int = typer.Option(0, min=0, help="Actor env_id to capture."),
+    timeout_seconds: float = typer.Option(15.0, min=0.1, help="Maximum time to wait for a matching frame."),
+    output_dir: str = typer.Option("", help="Optional output directory override."),
+    max_distance: float | None = typer.Option(None, min=0.01, help="Observation normalization horizon in meters."),
+    json_output: bool = typer.Option(False, "--json", help="Emit a JSON summary instead of text."),
+) -> None:
+    """Capture one live dashboard-visible DistanceMatrix frame plus rendered diagnostics."""
+    setup_logging("navi_auditor_dashboard_capture_frame")
+    config = AuditorConfig()
+    resolved_actor_sub = actor_sub if actor_sub is not None else config.actor_sub_address
+    summary = _capture_dashboard_frame(
+        actor_sub=resolved_actor_sub,
+        actor_id=actor_id,
+        timeout_seconds=timeout_seconds,
+        output_dir=Path(output_dir) if output_dir else None,
+        max_distance_m=float(max_distance) if max_distance is not None else float(config.observation_max_distance_m),
+    )
+
+    if json_output:
+        typer.echo(json.dumps(summary, indent=2))
+    elif summary["ok"]:
+        typer.echo(
+            "dashboard-capture-frame - "
+            f"ok=True, actor_id={summary['actor_id']}, output_dir={summary['output_dir']}, "
+            f"valid_ratio={summary['valid_ratio']:.4f}, min_depth={summary['depth_min']:.4f}, max_depth={summary['depth_max']:.4f}"
+        )
+    else:
+        typer.echo(
+            "dashboard-capture-frame - "
+            f"ok=False, actor_id={summary['actor_id']}, elapsed_seconds={summary['elapsed_seconds']:.3f}",
+            err=True,
+        )
+        for issue in cast("list[str]", summary.get("issues", [])):
+            typer.echo(f"issue={issue}", err=True)
+
+    if not summary["ok"]:
+        raise typer.Exit(code=1)
+
+
+def _capture_dashboard_frame(
+    *,
+    actor_sub: str,
+    actor_id: int,
+    timeout_seconds: float,
+    output_dir: Path | None,
+    max_distance_m: float,
+) -> dict[str, Any]:
+    from navi_contracts import DistanceMatrix, deserialize
+
+    started = time.perf_counter()
+    context: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
+    socket = context.socket(zmq.SUB)
+    socket.setsockopt(zmq.RCVHWM, 200)
+    socket.setsockopt(zmq.LINGER, 0)
+    socket.connect(actor_sub)
+    socket.setsockopt(zmq.SUBSCRIBE, TOPIC_DISTANCE_MATRIX.encode("utf-8"))
+    poller = zmq.Poller()
+    poller.register(socket, zmq.POLLIN)
+    try:
+        deadline = time.perf_counter() + timeout_seconds
+        while time.perf_counter() < deadline:
+            events = dict(poller.poll(250))
+            if socket not in events:
+                continue
+            topic_bytes, data = socket.recv_multipart()
+            if topic_bytes.decode("utf-8") != TOPIC_DISTANCE_MATRIX:
+                continue
+            msg = deserialize(data)
+            if not isinstance(msg, DistanceMatrix):
+                continue
+            current_actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
+            if current_actor_id != actor_id:
+                continue
+
+            artifact_root = output_dir or (_repo_root() / "artifacts" / "dashboard-captures" / time.strftime("%Y%m%d-%H%M%S"))
+            artifact_root.mkdir(parents=True, exist_ok=True)
+
+            raw_depth = np.asarray(msg.depth[0], dtype=np.float32)
+            raw_valid = np.asarray(msg.valid_mask[0], dtype=bool)
+            raw_semantic = np.asarray(msg.semantic[0], dtype=np.int32)
+
+            perspective_img, center_distance = render_first_person(
+                raw_depth,
+                raw_semantic,
+                raw_valid,
+                960,
+                720,
+                pitch=msg.robot_pose.pitch,
+                max_distance_m=max_distance_m,
+            )
+            raw_img = depth_to_viridis(raw_depth.T, raw_valid.T)
+            raw_img = cv2.resize(raw_img, (960, 240), interpolation=cv2.INTER_NEAREST)
+
+            perspective_path = artifact_root / "perspective.png"
+            raw_path = artifact_root / "raw_distance_matrix.png"
+            npz_path = artifact_root / "distance_matrix_arrays.npz"
+            summary_path = artifact_root / "summary.json"
+
+            cv2.imwrite(str(perspective_path), perspective_img)
+            cv2.imwrite(str(raw_path), raw_img)
+            np.savez_compressed(
+                npz_path,
+                depth=raw_depth,
+                valid_mask=raw_valid,
+                semantic=raw_semantic,
+            )
+
+            valid_values = raw_depth[raw_valid]
+            summary = {
+                "profile": "dashboard-capture-frame",
+                "ok": True,
+                "actor_sub": actor_sub,
+                "actor_id": actor_id,
+                "step_id": int(msg.step_id),
+                "timestamp": float(msg.timestamp),
+                "output_dir": str(artifact_root),
+                "perspective_image": str(perspective_path),
+                "raw_image": str(raw_path),
+                "arrays": str(npz_path),
+                "matrix_shape": [int(raw_depth.shape[0]), int(raw_depth.shape[1])],
+                "valid_ratio": float(np.mean(raw_valid.astype(np.float32))),
+                "depth_min": float(np.min(valid_values)) if valid_values.size > 0 else 0.0,
+                "depth_max": float(np.max(valid_values)) if valid_values.size > 0 else 0.0,
+                "depth_mean": float(np.mean(valid_values)) if valid_values.size > 0 else 0.0,
+                "center_distance_m": float(center_distance),
+                "max_distance_m": float(max_distance_m),
+                "elapsed_seconds": float(time.perf_counter() - started),
+            }
+            summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            return summary
+
+        return {
+            "profile": "dashboard-capture-frame",
+            "ok": False,
+            "actor_sub": actor_sub,
+            "actor_id": actor_id,
+            "elapsed_seconds": float(time.perf_counter() - started),
+            "issues": ["No matching distance_matrix_v2 frame arrived before timeout."],
+        }
+    finally:
+        socket.close()
+        context.term()
 
 
 @app.command("dataset-audit")

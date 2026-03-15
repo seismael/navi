@@ -567,14 +567,15 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
             actor_indices: torch.Tensor | None = None,
             scratch_slot: int = 0,
             publish_actor_ids: tuple[int, ...] = (),
+            materialize_results: bool = False,
         ) -> tuple[FakeTensorBatch, tuple[object, ...]]:
             del publish_actor_ids, scratch_slot
             assert action_tensor.shape == (1, 4)
             assert step_id == 19
             assert actor_indices is not None
+            assert materialize_results is False
             assert torch.equal(actor_indices, torch.tensor([3], dtype=torch.int64, device=trainer._device))
-            result = type("FakeResult", (), {"episode_id": 5})()
-            return FakeTensorBatch(), (result,)
+            return FakeTensorBatch(), ()
 
         def perf_snapshot(self) -> object:
             raise AssertionError("not used")
@@ -591,14 +592,13 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
         publish_actor_ids=(0,),
     )
 
-    step_batch, results = payload
+    step_batch = payload
     assert step_batch.observation_tensor.shape == (1, 3, 8, 4)
     assert torch.allclose(step_batch.reward_tensor, torch.tensor([1.25], dtype=torch.float32, device=trainer._device))
     assert torch.equal(step_batch.done_tensor, torch.tensor([False], dtype=torch.bool, device=trainer._device))
     assert torch.equal(step_batch.truncated_tensor, torch.tensor([True], dtype=torch.bool, device=trainer._device))
     assert torch.equal(step_batch.episode_id_tensor, torch.tensor([5], dtype=torch.int64, device=trainer._device))
     assert torch.equal(step_batch.env_id_tensor, torch.tensor([3], dtype=torch.int64, device=trainer._device))
-    assert len(results) == 1
     assert step_batch.published_observations == {}
 
 
@@ -613,8 +613,9 @@ def test_load_initial_observation_batch_requires_tensor_reset_seam() -> None:
             step_id: int,
             *,
             publish_actor_ids: tuple[int, ...] = (),
+            materialize_results: bool = False,
         ) -> tuple[object, tuple[object, ...]]:
-            del action_tensor, step_id, publish_actor_ids
+            del action_tensor, step_id, publish_actor_ids, materialize_results
             raise AssertionError("not used")
 
         def perf_snapshot(self) -> object:
@@ -640,8 +641,9 @@ def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
             step_id: int,
             *,
             publish_actor_ids: tuple[int, ...] = (),
+            materialize_results: bool = False,
         ) -> tuple[object, tuple[object, ...]]:
-            del action_tensor, step_id, publish_actor_ids
+            del action_tensor, step_id, publish_actor_ids, materialize_results
             raise AssertionError("not used")
 
         def reset_tensor(
@@ -686,19 +688,20 @@ def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
     assert published[0].step_id == 0
 
 
-def test_observation_publish_actor_ids_respects_stream_and_selector_config() -> None:
-    """Canonical trainer should default to the selected actor and widen only on explicit all-actor mode."""
+def test_observation_publish_actor_ids_publish_all_actors_for_selector_visibility() -> None:
+    """Canonical trainer should publish low-rate observation frames for every actor."""
     trainer = _make_trainer()
+    trainer._n_actors = 4
     trainer._config.emit_observation_stream = False
     assert trainer._observation_publish_actor_ids() == ()
 
     trainer._config.emit_observation_stream = True
     trainer._config.telemetry_all_actors = False
     trainer._config.telemetry_actor_id = 2
-    assert trainer._observation_publish_actor_ids() == (2,)
+    assert trainer._observation_publish_actor_ids() == (0, 1, 2, 3)
 
     trainer._config.telemetry_all_actors = True
-    assert trainer._observation_publish_actor_ids() == tuple(range(trainer._n_actors))
+    assert trainer._observation_publish_actor_ids() == (0, 1, 2, 3)
 
 
 def test_load_initial_observation_batch_skips_materialization_when_stream_disabled() -> None:
@@ -714,8 +717,9 @@ def test_load_initial_observation_batch_skips_materialization_when_stream_disabl
             step_id: int,
             *,
             publish_actor_ids: tuple[int, ...] = (),
+            materialize_results: bool = False,
         ) -> tuple[object, tuple[object, ...]]:
-            del action_tensor, step_id, publish_actor_ids
+            del action_tensor, step_id, publish_actor_ids, materialize_results
             raise AssertionError("not used")
 
         def reset_tensor(
@@ -767,8 +771,9 @@ def test_load_initial_observation_batch_preserves_oracle_house_tensor_and_public
             step_id: int,
             *,
             publish_actor_ids: tuple[int, ...] = (),
+            materialize_results: bool = False,
         ) -> tuple[object, tuple[object, ...]]:
-            del action_tensor, step_id, publish_actor_ids
+            del action_tensor, step_id, publish_actor_ids, materialize_results
             raise AssertionError("not used")
 
         def reset_tensor(
@@ -961,14 +966,15 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
             actor_indices: torch.Tensor | None = None,
             scratch_slot: int = 0,
             publish_actor_ids: tuple[int, ...] = (),
+            materialize_results: bool = False,
         ) -> tuple[FakeTensorStepBatch, tuple[object, ...]]:
-            del publish_actor_ids, scratch_slot
+            del publish_actor_ids, scratch_slot, materialize_results
             assert actor_indices is not None
+            assert materialize_results is False
             actor_count = int(actor_indices.shape[0])
             assert action_tensor.shape == (actor_count, 4)
             self.step_calls += 1
-            result = type("FakeResult", (), {"episode_id": 0})()
-            return FakeTensorStepBatch(self._device, actor_indices), tuple(result for _ in range(actor_count))
+            return FakeTensorStepBatch(self._device, actor_indices), ()
 
         def perf_snapshot(self) -> object:
             return type(

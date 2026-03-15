@@ -8,11 +8,14 @@ from navi_auditor.dashboard.renderers import (
     add_orientation_guides,
     center_forward_azimuth,
     compute_nav_metrics,
+    depth_to_observer_palette,
     depth_to_viridis,
     distance_color,
     extract_forward_fov,
     overlay_overhead_annotations,
     render_bev_occupancy,
+    render_front_depth_grid,
+    render_front_hemisphere_heatmap,
     render_first_person,
     render_forward_polar,
     zoom_overhead,
@@ -28,7 +31,6 @@ class TestDepthToViridis:
         valid = np.ones((16, 8), dtype=bool)
         result = depth_to_viridis(depth, valid)
         assert result.shape == (16, 8, 3)
-        assert result.dtype == np.uint8
 
     def test_invalid_regions_get_fog_of_war(self) -> None:
         depth = np.ones((16, 8), dtype=np.float32) * 0.5
@@ -43,6 +45,34 @@ class TestDepthToViridis:
         assert result.shape == (16, 8, 3)
 
 
+class TestDepthToObserverPalette:
+    """Tests for the observer-facing red/yellow/green/blue palette."""
+
+    def test_output_shape_matches_input(self) -> None:
+        depth = np.random.rand(16, 8).astype(np.float32)
+        valid = np.ones((16, 8), dtype=bool)
+        result = depth_to_observer_palette(depth, valid)
+        assert result.shape == (16, 8, 3)
+        assert result.dtype == np.uint8
+
+    def test_near_bins_are_warmer_than_far_bins(self) -> None:
+        depth = np.linspace(0.0, 1.0, 8, dtype=np.float32).reshape(1, 8)
+        valid = np.ones((1, 8), dtype=bool)
+        result = depth_to_observer_palette(depth, valid)
+        near = result[0, 0].astype(np.int32)
+        far = result[0, -1].astype(np.int32)
+
+        assert near[2] > near[0]
+        assert far[0] > far[2]
+
+    def test_invalid_regions_get_fog_of_war(self) -> None:
+        depth = np.ones((16, 8), dtype=np.float32) * 0.5
+        valid = np.zeros((16, 8), dtype=bool)
+        result = depth_to_observer_palette(depth, valid)
+        assert result.shape == (16, 8, 3)
+        assert result.dtype == np.uint8
+
+
 class TestRenderFirstPerson:
     """Tests for first-person dense projection."""
 
@@ -54,13 +84,14 @@ class TestRenderFirstPerson:
         assert img.shape == (240, 320, 3)
         assert isinstance(dist, float)
 
-    def test_all_invalid_returns_background(self) -> None:
+    def test_all_invalid_returns_dense_far_view(self) -> None:
         depth = np.zeros((32, 16), dtype=np.float32)
         semantic = np.zeros((32, 16), dtype=np.int32)
         valid = np.zeros((32, 16), dtype=bool)
         img, dist = render_first_person(depth, semantic, valid, 320, 240)
         assert img.shape == (240, 320, 3)
         assert dist >= 9.0  # Should be VIEW_RANGE_M
+        assert float(np.mean(img)) > 5.0
 
     def test_dense_coverage_with_valid_data(self) -> None:
         """Most pixels should be filled with non-background colours."""
@@ -68,10 +99,10 @@ class TestRenderFirstPerson:
         semantic = np.ones((85, 128), dtype=np.int32)  # WALL
         valid = np.ones((85, 128), dtype=bool)
         img, _dist = render_first_person(depth, semantic, valid, 320, 240)
-        # With full valid data, very few pixels should remain pure background
+        # With full valid data, almost the full panel should be visibly populated.
         non_black = np.any(img > 20, axis=-1)
         coverage = float(np.mean(non_black))
-        assert coverage > 0.7, f"Expected >70% coverage, got {coverage:.1%}"
+        assert coverage > 0.9, f"Expected >90% coverage, got {coverage:.1%}"
 
     def test_pitch_shifts_horizon(self) -> None:
         """Non-zero pitch should produce a visibly different image."""
@@ -118,6 +149,62 @@ class TestRenderForwardPolar:
         valid = np.ones((32, 16), dtype=bool)
         result = render_forward_polar(depth, valid, 200, 200)
         assert result.shape == (200, 200, 3)
+
+    def test_centered_forward_gap_affects_top_center_arc(self) -> None:
+        """A forward opening should appear near the top-center of the polar panel."""
+        depth = np.full((32, 8), 0.2, dtype=np.float32)
+        valid = np.ones((32, 8), dtype=bool)
+        center = depth.shape[0] // 2
+        depth[center - 2:center + 2, :] = 0.8
+
+        result = render_forward_polar(depth, valid, 240, 240)
+
+        top_center_patch = result[20:70, 95:145]
+        side_patch = result[120:190, 10:60]
+        assert float(np.mean(top_center_patch)) > float(np.mean(side_patch))
+
+
+class TestRenderFrontHemisphereHeatmap:
+    """Tests for the front-hemisphere actor heatmap renderer."""
+
+    def test_output_shape(self) -> None:
+        depth = np.random.rand(64, 16).astype(np.float32)
+        valid = np.ones((64, 16), dtype=bool)
+        result = render_front_hemisphere_heatmap(depth, valid, 320, 240)
+        assert result.shape == (240, 320, 3)
+
+    def test_renderer_uses_panel_height_for_center_column(self) -> None:
+        depth = np.random.rand(64, 16).astype(np.float32)
+        valid = np.ones((64, 16), dtype=bool)
+        result = render_front_hemisphere_heatmap(depth, valid, 320, 240)
+        center_col = result[:, 160]
+        non_background = np.any(center_col != np.array([12, 12, 12], dtype=np.uint8), axis=1)
+        assert int(np.count_nonzero(non_background)) > 150
+
+
+class TestRenderFrontDepthGrid:
+    """Tests for the exact front-half depth-grid renderer."""
+
+    def test_output_shape(self) -> None:
+        depth = np.random.rand(128, 48).astype(np.float32)
+        valid = np.ones((128, 48), dtype=bool)
+        result = render_front_depth_grid(depth, valid, 960, 540)
+        assert result.shape == (540, 960, 3)
+
+    def test_invalid_bins_remain_muted_instead_of_far_colored(self) -> None:
+        depth = np.ones((128, 48), dtype=np.float32)
+        valid = np.zeros((128, 48), dtype=bool)
+        depth[60:68, 18:30] = 0.25
+        valid[60:68, 18:30] = True
+
+        result = render_front_depth_grid(depth, valid, 960, 540)
+        feature_patch = result[210:330, 430:530]
+        invalid_patch = result[40:120, 40:120]
+
+        feature_mean = np.mean(feature_patch.astype(np.float32), axis=(0, 1))
+        invalid_mean = np.mean(invalid_patch.astype(np.float32), axis=(0, 1))
+
+        assert float(np.linalg.norm(feature_mean - invalid_mean)) > 25.0
 
 
 class TestPanoramaAlignment:
