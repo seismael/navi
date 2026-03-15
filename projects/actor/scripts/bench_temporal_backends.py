@@ -150,9 +150,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidates",
         nargs="+",
-        default=["mambapy", "gru"],
-        choices=["mambapy", "gru"],
-        help="Temporal-core candidates to benchmark.",
+        default=["gru"],
+        choices=["gru", "mambapy"],
+        help="Temporal-core candidates to benchmark. GRU is the canonical default on the active Windows machine.",
     )
     parser.add_argument(
         "--device",

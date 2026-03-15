@@ -1,7 +1,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
-    [ValidateSet("mambapy", "gru")]
-    [string[]]$TemporalCores = @("mambapy", "gru"),
+    [ValidateSet("gru", "mambapy")]
+    [string[]]$TemporalCores = @("gru"),
     [string]$Scene = "",
     [string]$Manifest = "",
     [string]$CorpusRoot = "",

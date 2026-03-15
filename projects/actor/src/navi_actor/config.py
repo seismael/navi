@@ -9,8 +9,8 @@ from pydantic import Field
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-TemporalCoreName = Literal["mambapy", "gru"]
-SUPPORTED_TEMPORAL_CORES: tuple[TemporalCoreName, ...] = ("mambapy", "gru")
+TemporalCoreName = Literal["gru", "mambapy"]
+SUPPORTED_TEMPORAL_CORES: tuple[TemporalCoreName, ...] = ("gru", "mambapy")
 
 __all__: list[str] = ["ActorConfig", "SUPPORTED_TEMPORAL_CORES", "TemporalCoreName"]
 

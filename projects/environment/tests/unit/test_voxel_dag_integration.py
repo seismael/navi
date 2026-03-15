@@ -241,6 +241,29 @@ def test_load_gmdag_asset_rejects_child_pointer_table_past_payload(tmp_path: Pat
         load_gmdag_asset(asset_path)
 
 
+def test_load_gmdag_asset_can_skip_deep_layout_validation_for_runtime_loads(tmp_path: Path) -> None:
+    asset_path = tmp_path / "runtime_only_bad_layout.gmdag"
+    internal_word = np.uint64((1 << 55) | 5)
+    nodes = np.array([internal_word], dtype=np.uint64)
+    header = _HEADER.pack(
+        b"GDAG",
+        1,
+        32,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        nodes.shape[0],
+    )
+    asset_path.write_bytes(header + nodes.tobytes())
+
+    asset = load_gmdag_asset(asset_path, validate_layout=False)
+
+    assert asset.path == asset_path.resolve()
+    assert asset.resolution == 32
+    assert np.array_equal(asset.nodes, nodes)
+
+
 def test_probe_sdfdag_runtime_reports_missing_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_import_module(name: str) -> object:
         if name == "torch":
@@ -591,6 +614,43 @@ def test_build_backend_sdfdag_exits_on_preflight_issues(monkeypatch: pytest.Monk
         _build_backend(EnvironmentConfig(backend="sdfdag", gmdag_file="scene.gmdag"))
 
     assert exc_info.value.exit_code == 1
+
+
+def test_build_backend_only_uses_dependency_preflight_before_runtime_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    from navi_environment.integration.voxel_dag import GmDagRuntimeStatus
+
+    captured: dict[str, object] = {}
+
+    def _fake_probe(path: Path | None = None, *, validate_asset_layout: bool = True) -> GmDagRuntimeStatus:
+        captured["probe_path"] = path
+        captured["validate_asset_layout"] = validate_asset_layout
+        return GmDagRuntimeStatus(
+            compiler_ready=True,
+            torch_ready=True,
+            cuda_ready=True,
+            torch_sdf_ready=True,
+            asset_loaded=False,
+            compiler_path=Path("C:/tools/voxel-dag.exe"),
+            gmdag_path=None,
+            resolution=None,
+            node_count=None,
+            bbox_min=None,
+            bbox_max=None,
+            issues=(),
+        )
+
+    class FakeBackend:
+        def __init__(self, config: EnvironmentConfig) -> None:
+            captured["config"] = config
+
+    monkeypatch.setattr("navi_environment.cli.probe_sdfdag_runtime", _fake_probe)
+    monkeypatch.setattr("navi_environment.backends.sdfdag_backend.SdfDagBackend", FakeBackend)
+
+    backend = _build_backend(EnvironmentConfig(backend="sdfdag", gmdag_file="scene.gmdag"))
+
+    assert isinstance(backend, FakeBackend)
+    assert captured["probe_path"] is None
+    assert captured["validate_asset_layout"] is True
 
 
 def test_bench_sdfdag_cli_reports_metrics(monkeypatch: pytest.MonkeyPatch) -> None:

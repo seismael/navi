@@ -71,6 +71,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Oracle Fixture Family Rule:** Canonical correctness work MUST maintain one reusable small-fixture family with known expected observations so compiler, environment, actor-seam, and auditor tests share the same geometry truth instead of duplicating ad hoc literals.
 - **Determinism Rule:** Repeated compilation of the same fixture with the same inputs MUST produce byte-identical `.gmdag` output unless the documented format contract is intentionally revised in the same change.
 - **Binary Integrity Rule:** The `.gmdag` loader MUST reject malformed headers, non-finite bounds, impossible pointer layouts, out-of-range child references, cycles, and trailing or truncated payloads.
+- **Runtime Validation Boundary Rule:** Full `.gmdag` pointer-layout traversal belongs to explicit integrity and promoted-corpus validation surfaces. Ordinary environment startup and benchmarking MUST trust already-qualified canonical assets after lightweight binary sanity checks rather than re-running whole-DAG validation on every load.
 - **Real Corpus Rule:** Canonical promoted-corpus validation MUST prove that real compiled assets from approved datasets load, match manifest metadata, and remain benchmark-viable at the canonical compile resolution.
 - **Benchmark Drift Rule:** Compiler/runtime validation MUST track both correctness and throughput so a faster but geometrically wrong transform, or a correct but throughput-regressing transform, cannot silently ship.
 

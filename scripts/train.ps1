@@ -21,7 +21,7 @@ param(
     [int]$CheckpointEvery = 25000,
     [string]$LogDir = "scripts/logs/train",
     [int]$ActorTelemetryPort = 5557,
-    [ValidateSet("mambapy", "gru")]
+    [ValidateSet("gru", "mambapy")]
     [string]$TemporalCore = "gru",
     [string]$PythonVersion = "3.12"
 )

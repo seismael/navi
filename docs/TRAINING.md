@@ -86,6 +86,7 @@ entire promoted corpus before using benchmark results to judge the upgrade:
 
 # One-command bounded temporal comparison on the canonical trainer surface
 ./scripts/run-temporal-compare.ps1
+./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy')
 ```
 
 The qualification script now proves the bounded canonical flow end to end:
@@ -125,14 +126,17 @@ For a bounded like-for-like backend comparison on the canonical trainer surface:
 
 ```powershell
 ./scripts/run-temporal-compare.ps1
-./scripts/run-temporal-compare.ps1 -TotalSteps 256
+./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy')
+./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy') -TotalSteps 256
 ```
 
 The comparison wrapper runs each backend sequentially on the direct actor
 trainer surface with isolated per-repeat logs, checkpoints,
 and summary JSON files under one timestamped artifact root. The wrapper now
-defaults to `3` repeats per backend and records both mean and median aggregate
-metrics so local Windows variance does not decide the temporal-core conclusion.
+defaults to the canonical `gru` runtime on the active machine; pass
+`-TemporalCores @('gru','mambapy')` for an explicit like-for-like comparison run. The
+wrapper records both mean and median aggregate metrics so local Windows
+variance does not decide the temporal-core conclusion.
 Use `-ProfileCudaEvents` only for diagnostic comparison runs when you need
 median learner substage timings such as `backward_ms` or `gpu_backward_ms`.
 Compare runs by changing only the temporal-core selector unless a diagnostic

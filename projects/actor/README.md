@@ -123,14 +123,15 @@ Repository wrapper (writes a timestamped JSON artifact):
 ./scripts/run-temporal-bakeoff.ps1
 ```
 
-The bakeoff now benchmarks `mambapy` and `gru` by default. Use `-Candidates` to
-narrow the diagnostic set when needed.
+The bakeoff now benchmarks `gru` by default on the active Windows machine. Use
+`-Candidates gru mambapy` when you want an explicit comparison run.
 
 For bounded end-to-end canonical trainer comparisons instead of microbenchmarks,
 use:
 
 ```powershell
 ./scripts/run-temporal-compare.ps1
+./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy')
 ```
 
 CPU runs remain explicit diagnostics only:

@@ -106,6 +106,12 @@ Required acceptance style for the canonical compiler surface:
 - malformed `.gmdag` assets must fail before runtime traversal with errors attributable to header, bounds, or pointer-layout corruption
 - integrity tests must be able to localize a failure to compiler generation versus loader validation instead of returning one generic corruption failure
 
+Runtime load policy for canonical `.gmdag` assets:
+
+- full DAG pointer-layout traversal remains mandatory on explicit validation surfaces such as loader integrity tests, `check-sdfdag`, corpus validation, qualification, and nightly proofs
+- ordinary environment runtime startup and `bench-sdfdag` must not re-run that deep traversal on every backend construction once the asset is already on the validated canonical corpus path
+- runtime startup still validates header fields, payload length, bounds finiteness, and trailing-byte integrity during load; the skipped work is the repeated full DAG graph walk, not all binary checks
+
 ### 3.5 Dataset And Transform Validation
 
 Dataset-adapter behavior must be verified explicitly rather than described only
@@ -130,6 +136,7 @@ Required proof style:
 - compare against current baselines and current bottleneck interpretation
 - report end-to-end impact, not just isolated kernel numbers
 - prefer structured `bench-sdfdag --json` summaries when capturing benchmark artifacts for comparison
+- environment-layer benchmarks must measure backend stepping rather than spending most of the wall time in repeated pre-step binary integrity traversal of the same already-qualified asset
 
 ### 3.6.1 Validation Matrix
 

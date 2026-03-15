@@ -44,7 +44,7 @@ param(
     [int]$LogEvery = 100,
     [int]$RolloutLength = 512,
     [int]$ActorTelemetryPort = 5557,
-    [ValidateSet("mambapy", "gru")]
+    [ValidateSet("gru", "mambapy")]
     [string]$TemporalCore = "gru",
 
     # ── Inference-mode ZMQ addresses ──

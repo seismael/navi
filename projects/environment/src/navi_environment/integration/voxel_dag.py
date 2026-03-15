@@ -116,7 +116,11 @@ class GmDagRuntimeStatus:
     issues: tuple[str, ...]
 
 
-def probe_sdfdag_runtime(gmdag_path: Path | None = None) -> GmDagRuntimeStatus:
+def probe_sdfdag_runtime(
+    gmdag_path: Path | None = None,
+    *,
+    validate_asset_layout: bool = True,
+) -> GmDagRuntimeStatus:
     """Check compiler/runtime readiness and optionally inspect a `.gmdag` asset."""
     issues: list[str] = []
 
@@ -157,7 +161,7 @@ def probe_sdfdag_runtime(gmdag_path: Path | None = None) -> GmDagRuntimeStatus:
     if gmdag_path is not None:
         asset_path = gmdag_path.expanduser().resolve()
         try:
-            asset = load_gmdag_asset(asset_path)
+            asset = load_gmdag_asset(asset_path, validate_layout=validate_asset_layout)
         except (FileNotFoundError, RuntimeError) as exc:
             issues.append(str(exc))
         else:
@@ -183,7 +187,7 @@ def probe_sdfdag_runtime(gmdag_path: Path | None = None) -> GmDagRuntimeStatus:
     )
 
 
-def load_gmdag_asset(path: Path) -> GmDagAsset:
+def load_gmdag_asset(path: Path, *, validate_layout: bool = True) -> GmDagAsset:
     """Load a `.gmdag` binary into metadata plus a contiguous node array."""
     path = path.expanduser().resolve()
     if not path.exists():
@@ -231,7 +235,8 @@ def load_gmdag_asset(path: Path) -> GmDagAsset:
             msg = f"Invalid gmdag payload in {path}: trailing bytes detected"
             raise RuntimeError(msg)
 
-    _validate_gmdag_dag_layout(nodes)
+    if validate_layout:
+        _validate_gmdag_dag_layout(nodes)
 
     bbox_min = (float(bmin_x), float(bmin_y), float(bmin_z))
     extent = float(voxel_size) * int(resolution)

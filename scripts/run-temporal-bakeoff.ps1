@@ -22,8 +22,8 @@ param(
     [int]$DModel = 128,
     [int]$Repeats = 40,
     [int]$Warmup = 10,
-    [ValidateSet("mambapy", "gru")]
-    [string[]]$Candidates = @("mambapy", "gru"),
+    [ValidateSet("gru", "mambapy")]
+    [string[]]$Candidates = @("gru"),
     [ValidateSet("cpu", "cuda")]
     [string]$Device = "cuda",
     [switch]$AllowCpuDiagnostic,

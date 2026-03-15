@@ -52,13 +52,17 @@ def _build_backend(config: EnvironmentConfig) -> SimulatorBackend:
         )
         raise typer.Exit(code=1)
 
-    status = probe_sdfdag_runtime(Path(config.gmdag_file) if config.gmdag_file else None)
+    status = probe_sdfdag_runtime()
     if status.issues:
         for issue in status.issues:
             typer.echo(f"Error: {issue}", err=True)
         raise typer.Exit(code=1)
 
-    return SdfDagBackend(config)
+    try:
+        return SdfDagBackend(config)
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _benchmark_actions(*, actor_count: int, step_id: int) -> tuple[Action, ...]:

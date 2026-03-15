@@ -5,7 +5,7 @@ param(
     [int]$ElevationBins = 48,
     [ValidateSet("step", "async")]
     [string]$Mode = "",
-    [ValidateSet("mambapy", "gru")]
+    [ValidateSet("gru", "mambapy")]
     [string]$TemporalCore = "gru",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ForwardArgs

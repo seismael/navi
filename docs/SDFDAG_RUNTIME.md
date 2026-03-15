@@ -142,6 +142,16 @@ Not yet frozen as public format guarantees:
 
 Those remain benchmark-gated experiments.
 
+## 8.1 Runtime Load Validation Boundary
+
+Canonical runtime startup is not the same thing as corpus qualification.
+
+The current policy is:
+
+- `load_gmdag_asset()` always enforces header correctness, finite bounds, payload length, and trailing-byte integrity
+- full DAG graph traversal and pointer-layout validation remain mandatory on explicit integrity surfaces such as `check-sdfdag`, promoted-corpus validation, and dedicated loader tests
+- ordinary `SdfDagBackend` scene loads may skip that repeated deep traversal for already-qualified canonical assets so environment startup and benchmarks measure runtime behavior instead of re-qualifying the binary format on every load
+
 ## 9. Hot-Path Rules
 
 Performance work on this stack should assume:
