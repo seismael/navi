@@ -369,6 +369,67 @@ def test_postprocess_cast_outputs_preserves_oracle_house_profile() -> None:
     assert min_distances[0].item() == pytest.approx(float(np.min(metric[oracle.valid])))
 
 
+def test_materialize_step_result_rows_preserves_non_monotonic_env_order() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._torch = torch
+    backend._episode_ids = torch.tensor([101, 202, 303], dtype=torch.int64)
+    backend._episode_returns = torch.tensor([1.25, 2.5, 3.75], dtype=torch.float32)
+
+    rows = backend._materialize_step_result_rows(
+        local_rows=torch.tensor([1, 0], dtype=torch.int64),
+        env_ids=torch.tensor([2, 0], dtype=torch.int64),
+        actor_indices=torch.tensor([1, 2], dtype=torch.int64),
+        rewards=torch.tensor([0.5, -0.25], dtype=torch.float32),
+        truncated_mask=torch.tensor([True, False], dtype=torch.bool),
+    )
+
+    assert rows.shape == (2, 6)
+    np.testing.assert_allclose(rows[:, 0], np.array([1.0, 0.0], dtype=np.float32))
+    np.testing.assert_allclose(rows[:, 1], np.array([2.0, 0.0], dtype=np.float32))
+    np.testing.assert_allclose(rows[:, 2], np.array([202.0, 303.0], dtype=np.float32))
+    np.testing.assert_allclose(rows[:, 3], np.array([1.0, 0.0], dtype=np.float32))
+    np.testing.assert_allclose(rows[:, 4], np.array([0.5, -0.25], dtype=np.float32))
+    np.testing.assert_allclose(rows[:, 5], np.array([2.5, 3.75], dtype=np.float32))
+
+
+def test_materialize_reset_result_rows_preserves_selected_actor_order() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._torch = torch
+    backend._episode_ids = torch.tensor([7, 8, 9, 10], dtype=torch.int64)
+
+    rows = backend._materialize_reset_result_rows(
+        local_rows=torch.tensor([0, 1], dtype=torch.int64),
+        env_ids=torch.tensor([3, 1], dtype=torch.int64),
+        actor_indices=torch.tensor([0, 2], dtype=torch.int64),
+    )
+
+    assert rows.shape == (2, 3)
+    np.testing.assert_allclose(rows[:, 0], np.array([0.0, 1.0], dtype=np.float32))
+    np.testing.assert_allclose(rows[:, 1], np.array([3.0, 1.0], dtype=np.float32))
+    np.testing.assert_allclose(rows[:, 2], np.array([7.0, 9.0], dtype=np.float32))
+
+
+def test_coerce_batch_actor_indices_accepts_explicit_subset_order() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._torch = torch
+    backend._device = torch.device("cpu")
+    backend._n_actors = 6
+
+    indices = backend._coerce_batch_actor_indices(actor_count=3, actor_indices=[4, 1, 5])
+
+    assert torch.equal(indices, torch.tensor([4, 1, 5], dtype=torch.int64))
+
+
+def test_coerce_batch_actor_indices_rejects_duplicates() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._torch = torch
+    backend._device = torch.device("cpu")
+    backend._n_actors = 4
+
+    with pytest.raises(ValueError, match="must be unique"):
+        backend._coerce_batch_actor_indices(actor_count=2, actor_indices=[1, 1])
+
+
 def test_materialize_observation_preserves_oracle_house_arrays() -> None:
     backend = object.__new__(SdfDagBackend)
     backend._episode_ids = torch.tensor([17], dtype=torch.int64)

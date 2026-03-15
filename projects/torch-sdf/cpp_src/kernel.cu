@@ -6,6 +6,8 @@
 namespace toponav {
 namespace cuda {
 
+constexpr float kVoidAdvanceEpsilon = 1e-5f;
+
 __device__ inline bool point_in_bounds(
     float px,
     float py,
@@ -16,6 +18,18 @@ __device__ inline bool point_in_bounds(
     return px >= bmin[0] && px <= bmax[0] &&
            py >= bmin[1] && py <= bmax[1] &&
            pz >= bmin[2] && pz <= bmax[2];
+}
+
+__device__ inline bool point_in_bounds_strict(
+    float px,
+    float py,
+    float pz,
+    const float bmin[3],
+    const float bmax[3])
+{
+    return px > bmin[0] && px < bmax[0] &&
+           py > bmin[1] && py < bmax[1] &&
+           pz > bmin[2] && pz < bmax[2];
 }
 
 __device__ inline uint64_t load_dag_word(
@@ -37,16 +51,53 @@ __device__ inline int32_t decode_leaf_semantic(uint64_t node)
     return static_cast<int32_t>((node >> 16) & 0xFFFF);
 }
 
+__device__ inline float distance_to_bounds_exit(
+    float px,
+    float py,
+    float pz,
+    float dx,
+    float dy,
+    float dz,
+    const float bmin[3],
+    const float bmax[3])
+{
+    float exit_t = kOutsideDomainDistance;
+
+    if (dx > kDirectionNormEpsilon) {
+        exit_t = fminf(exit_t, (bmax[0] - px) / dx);
+    } else if (dx < -kDirectionNormEpsilon) {
+        exit_t = fminf(exit_t, (bmin[0] - px) / dx);
+    }
+
+    if (dy > kDirectionNormEpsilon) {
+        exit_t = fminf(exit_t, (bmax[1] - py) / dy);
+    } else if (dy < -kDirectionNormEpsilon) {
+        exit_t = fminf(exit_t, (bmin[1] - py) / dy);
+    }
+
+    if (dz > kDirectionNormEpsilon) {
+        exit_t = fminf(exit_t, (bmax[2] - pz) / dz);
+    } else if (dz < -kDirectionNormEpsilon) {
+        exit_t = fminf(exit_t, (bmin[2] - pz) / dz);
+    }
+
+    return fmaxf(exit_t, kVoidAdvanceEpsilon);
+}
+
 // --- Device Helper: Stackless DAG Query ---
 __device__ inline void query_dag_stackless(
     const uint64_t* __restrict__ dag_memory,
     const uint64_t* __restrict__ dag_cache,
     float px, float py, float pz,
+    float dx, float dy, float dz,
     const float bbox_min[3], const float bbox_max[3], int resolution,
     uint32_t& cached_ptr,
     float cached_bmin[3],
     float cached_bmax[3],
     bool& cache_valid,
+    float void_bmin[3],
+    float void_bmax[3],
+    bool& void_cache_valid,
     float leaf_bmin[3],
     float leaf_bmax[3],
     float& cached_leaf_dist,
@@ -126,7 +177,14 @@ __device__ inline void query_dag_stackless(
 
         uint8_t mask = static_cast<uint8_t>((node >> 55) & 0xFF);
         if ((mask & (1 << octant_idx)) == 0) {
-            out_dist = kOutsideDomainDistance;
+            void_bmin[0] = cur_bmin[0];
+            void_bmin[1] = cur_bmin[1];
+            void_bmin[2] = cur_bmin[2];
+            void_bmax[0] = cur_bmax[0];
+            void_bmax[1] = cur_bmax[1];
+            void_bmax[2] = cur_bmax[2];
+            void_cache_valid = true;
+            out_dist = distance_to_bounds_exit(px, py, pz, dx, dy, dz, void_bmin, void_bmax);
             out_semantic = 0;
             return;
         }
@@ -179,6 +237,9 @@ __global__ void sphere_trace_kernel(
     float cached_bmin[3] = {bmin_x, bmin_y, bmin_z};
     float cached_bmax[3] = {bmax_x, bmax_y, bmax_z};
     bool cache_valid = false;
+    float void_bmin[3] = {bmin_x, bmin_y, bmin_z};
+    float void_bmax[3] = {bmax_x, bmax_y, bmax_z};
+    bool void_cache_valid = false;
     float leaf_bmin[3] = {bmin_x, bmin_y, bmin_z};
     float leaf_bmax[3] = {bmax_x, bmax_y, bmax_z};
     float cached_leaf_dist = 0.0f;
@@ -193,28 +254,39 @@ __global__ void sphere_trace_kernel(
         float py = oy + current_t * dy;
         float pz = oz + current_t * dz;
 
-        query_dag_stackless(
-            dag_memory,
-            dag_cache,
-            px,
-            py,
-            pz,
-            float_bmin,
-            float_bmax,
-            resolution,
-            cached_ptr,
-            cached_bmin,
-            cached_bmax,
-            cache_valid,
-            leaf_bmin,
-            leaf_bmax,
-            cached_leaf_dist,
-            cached_leaf_semantic,
-            leaf_cache_valid,
-            dist,
-            semantic);
+        if (void_cache_valid && point_in_bounds_strict(px, py, pz, void_bmin, void_bmax)) {
+            dist = distance_to_bounds_exit(px, py, pz, dx, dy, dz, void_bmin, void_bmax);
+            semantic = 0;
+        } else {
+            query_dag_stackless(
+                dag_memory,
+                dag_cache,
+                px,
+                py,
+                pz,
+                dx,
+                dy,
+                dz,
+                float_bmin,
+                float_bmax,
+                resolution,
+                cached_ptr,
+                cached_bmin,
+                cached_bmax,
+                cache_valid,
+                void_bmin,
+                void_bmax,
+                void_cache_valid,
+                leaf_bmin,
+                leaf_bmax,
+                cached_leaf_dist,
+                cached_leaf_semantic,
+                leaf_cache_valid,
+                dist,
+                semantic);
+        }
 
-        if (dist < kHitEpsilon) {
+        if (semantic != 0 && dist < kHitEpsilon) {
             out_distances[idx] = current_t;
             out_semantics[idx] = semantic;
             return;

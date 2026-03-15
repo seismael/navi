@@ -29,11 +29,7 @@ def _normalize_advantages_once(advantages: Tensor) -> Tensor:
 
 
 class MultiTrajectoryBuffer:
-    """Buffer that manages multiple independent actor trajectories.
-
-    Prevents 'Cross-Actor Bleed' by keeping actor rollout sequences separate
-    during BPTT sampling.
-    """
+    """Canonical batched PPO buffer for multiple actor trajectories."""
 
     def __init__(
         self,
@@ -42,16 +38,12 @@ class MultiTrajectoryBuffer:
         gae_lambda: float = 0.95,
         capacity: int | None = None,
     ) -> None:
+        if capacity is None:
+            raise ValueError("MultiTrajectoryBuffer requires capacity on the canonical batched path")
         self._capacity = capacity
         self._n_actors = n_actors
         self._gamma = gamma
         self._gae_lambda = gae_lambda
-        self._buffers: dict[int, TrajectoryBuffer] | None = None
-        if not self._uses_batched_tensor_storage():
-            self._buffers = {
-                i: TrajectoryBuffer(gamma=gamma, gae_lambda=gae_lambda)
-                for i in range(n_actors)
-            }
         self._cache_valid = False
         self._all_obs: Tensor | None = None
         self._all_actions: Tensor | None = None
@@ -64,7 +56,7 @@ class MultiTrajectoryBuffer:
         self._all_aux: Tensor | None = None
         self._sequence_view_seq_len: int | None = None
         self._sequence_views: dict[str, Tensor] = {}
-        self._batched_step_count = 0
+        self._batched_actor_step_counts: Tensor | None = None
         self._has_aux_for_rollout = False
         self._batch_obs: Tensor | None = None
         self._batch_actions: Tensor | None = None
@@ -76,14 +68,6 @@ class MultiTrajectoryBuffer:
         self._batch_aux: Tensor | None = None
         self._batch_advantages: Tensor | None = None
         self._batch_returns: Tensor | None = None
-
-    def _uses_batched_tensor_storage(self) -> bool:
-        return self._capacity is not None
-
-    def _fallback_buffers(self) -> dict[int, TrajectoryBuffer]:
-        if self._buffers is None:
-            raise RuntimeError("Per-actor fallback buffers are unavailable on the canonical batched path")
-        return self._buffers
 
     def _invalidate_views(self) -> None:
         self._cache_valid = False
@@ -102,8 +86,6 @@ class MultiTrajectoryBuffer:
         truncateds: Tensor,
         aux_tensors: Tensor | None,
     ) -> None:
-        if self._capacity is None:
-            return
         if self._batch_obs is None:
             self._batch_obs = torch.empty(
                 (self._n_actors, self._capacity, *observations.shape[1:]),
@@ -146,10 +128,14 @@ class MultiTrajectoryBuffer:
                 dtype=aux_tensors.dtype,
                 device=aux_tensors.device,
             )
+        if self._batched_actor_step_counts is None:
+            self._batched_actor_step_counts = torch.zeros(
+                (self._n_actors,),
+                dtype=torch.int64,
+                device=observations.device,
+            )
 
     def _ensure_batched_advantage_storage(self, device: torch.device) -> None:
-        if self._capacity is None:
-            return
         if self._batch_advantages is None:
             self._batch_advantages = torch.empty(
                 (self._n_actors, self._capacity),
@@ -162,9 +148,39 @@ class MultiTrajectoryBuffer:
                 device=device,
             )
 
-    def append(self, actor_id: int, transition: PPOTransition) -> None:
-        self._fallback_buffers()[actor_id].append(transition)
-        self._invalidate_views()
+    def _coerce_actor_indices(self, actor_indices: Tensor | None, batch_size: int, *, device: torch.device) -> Tensor:
+        if actor_indices is None:
+            if batch_size != self._n_actors:
+                raise RuntimeError(
+                    f"append_batch without actor_indices requires batch size {self._n_actors}; got {batch_size}",
+                )
+            return torch.arange(self._n_actors, device=device, dtype=torch.int64)
+
+        indices = actor_indices.to(device=device, dtype=torch.int64).reshape(-1)
+        if int(indices.numel()) != batch_size:
+            raise RuntimeError(
+                f"actor_indices length {int(indices.numel())} does not match batch size {batch_size}",
+            )
+        if batch_size == 0:
+            return indices
+        if int(indices.min().item()) < 0 or int(indices.max().item()) >= self._n_actors:
+            raise RuntimeError(f"actor_indices must stay within [0, {self._n_actors - 1}]")
+        if int(torch.unique(indices).numel()) != batch_size:
+            raise RuntimeError("actor_indices must be unique within one append_batch call")
+        return indices
+
+    def _required_batched_rollout_len(self) -> int:
+        if self._batched_actor_step_counts is None:
+            return 0
+        if int(self._batched_actor_step_counts.numel()) == 0:
+            return 0
+        min_count = int(self._batched_actor_step_counts.min().item())
+        max_count = int(self._batched_actor_step_counts.max().item())
+        if min_count != max_count:
+            raise RuntimeError(
+                "MultiTrajectoryBuffer batched storage requires equal per-actor rollout lengths before PPO update",
+            )
+        return max_count
 
     def append_batch(
         self,
@@ -177,118 +193,97 @@ class MultiTrajectoryBuffer:
         dones: Tensor,
         truncateds: Tensor,
         aux_tensors: Tensor | None,
+        actor_indices: Tensor | None = None,
     ) -> None:
         """Append one rollout step for every actor without Python transition objects."""
-        if self._uses_batched_tensor_storage():
-            if self._capacity is None:
-                raise RuntimeError("Batched tensor storage requires a configured capacity")
-            if self._batched_step_count >= self._capacity:
-                raise RuntimeError("MultiTrajectoryBuffer capacity exceeded")
-            self._allocate_batched_storage(
-                observations=observations,
-                actions=actions,
-                log_probs=log_probs,
-                values=values,
-                rewards=rewards,
-                dones=dones,
-                truncateds=truncateds,
-                aux_tensors=aux_tensors,
-            )
-            assert self._batch_obs is not None
-            assert self._batch_actions is not None
-            assert self._batch_log_probs is not None
-            assert self._batch_values is not None
-            assert self._batch_rewards is not None
-            assert self._batch_dones is not None
-            assert self._batch_truncateds is not None
+        self._allocate_batched_storage(
+            observations=observations,
+            actions=actions,
+            log_probs=log_probs,
+            values=values,
+            rewards=rewards,
+            dones=dones,
+            truncateds=truncateds,
+            aux_tensors=aux_tensors,
+        )
+        assert self._batch_obs is not None
+        assert self._batch_actions is not None
+        assert self._batch_log_probs is not None
+        assert self._batch_values is not None
+        assert self._batch_rewards is not None
+        assert self._batch_dones is not None
+        assert self._batch_truncateds is not None
+        assert self._batched_actor_step_counts is not None
 
-            step_index = self._batched_step_count
-            self._batch_obs[:, step_index].copy_(observations.detach())
-            self._batch_actions[:, step_index].copy_(actions.detach())
-            self._batch_log_probs[:, step_index].copy_(log_probs.detach())
-            self._batch_values[:, step_index].copy_(values.detach())
-            self._batch_rewards[:, step_index].copy_(rewards.detach())
-            self._batch_dones[:, step_index].copy_(dones.detach())
-            self._batch_truncateds[:, step_index].copy_(truncateds.detach())
+        actor_indices_t = self._coerce_actor_indices(actor_indices, observations.shape[0], device=observations.device)
+        step_indices = self._batched_actor_step_counts.index_select(0, actor_indices_t)
+        if bool((step_indices >= self._capacity).any()):
+            raise RuntimeError("MultiTrajectoryBuffer capacity exceeded")
 
-            if aux_tensors is not None:
-                assert self._batch_aux is not None
-                self._batch_aux[:, step_index].copy_(aux_tensors.detach())
-                self._has_aux_for_rollout = True
-            elif self._batch_aux is not None:
-                self._batch_aux[:, step_index].zero_()
+        self._batch_obs[actor_indices_t, step_indices] = observations.detach()
+        self._batch_actions[actor_indices_t, step_indices] = actions.detach()
+        self._batch_log_probs[actor_indices_t, step_indices] = log_probs.detach()
+        self._batch_values[actor_indices_t, step_indices] = values.detach()
+        self._batch_rewards[actor_indices_t, step_indices] = rewards.detach()
+        self._batch_dones[actor_indices_t, step_indices] = dones.detach()
+        self._batch_truncateds[actor_indices_t, step_indices] = truncateds.detach()
 
-            self._batched_step_count += 1
-            self._invalidate_views()
-            return
+        if aux_tensors is not None:
+            assert self._batch_aux is not None
+            self._batch_aux[actor_indices_t, step_indices] = aux_tensors.detach()
+            self._has_aux_for_rollout = True
+        elif self._batch_aux is not None:
+            self._batch_aux[actor_indices_t, step_indices] = 0
 
-        for actor_id in range(self._n_actors):
-            aux_tensor = None if aux_tensors is None else aux_tensors[actor_id].detach().clone()
-            self._fallback_buffers()[actor_id].append_fields(
-                observation=observations[actor_id].detach().clone(),
-                action=actions[actor_id].detach().clone(),
-                log_prob=log_probs[actor_id].detach(),
-                value=values[actor_id].detach(),
-                reward=rewards[actor_id].detach(),
-                done=dones[actor_id].detach(),
-                truncated=truncateds[actor_id].detach(),
-                hidden_state=None,
-                aux_tensor=aux_tensor,
-            )
+        self._batched_actor_step_counts[actor_indices_t] = step_indices + 1
         self._invalidate_views()
 
     def compute_returns_and_advantages(self, last_values: Tensor) -> None:
         """Compute GAE for all buffers using per-actor bootstrap values."""
-        if self._uses_batched_tensor_storage() and self._batched_step_count > 0:
-            assert self._batch_rewards is not None
-            assert self._batch_values is not None
-            assert self._batch_dones is not None
-            assert self._batch_truncateds is not None
-            rollout_len = self._batched_step_count
-            device = self._batch_values.device
-            rewards = self._batch_rewards[:, :rollout_len].to(device=device, dtype=torch.float32)
-            values = self._batch_values[:, :rollout_len].to(device=device, dtype=torch.float32)
-            done_flags = self._batch_dones[:, :rollout_len].to(device=device)
-            truncated_flags = self._batch_truncateds[:, :rollout_len].to(device=device)
-            advantages = torch.zeros_like(rewards)
-            last_gae = torch.zeros((self._n_actors,), dtype=torch.float32, device=device)
-            prev_value = last_values.detach().to(device=device, dtype=torch.float32).reshape(self._n_actors)
-            continue_mask = (~done_flags & ~truncated_flags).to(dtype=torch.float32)
-            truncation_mask = (truncated_flags & ~done_flags).to(dtype=torch.float32)
-            done_mask = done_flags.to(dtype=torch.float32)
-
-            for t in reversed(range(rollout_len)):
-                reward_t = rewards[:, t]
-                value_t = values[:, t]
-                delta = reward_t + self._gamma * prev_value - value_t
-                terminal_delta = reward_t - value_t
-                continued_gae = delta + self._gamma * self._gae_lambda * last_gae
-                last_gae = (
-                    truncation_mask[:, t] * delta
-                    + done_mask[:, t] * terminal_delta
-                    + continue_mask[:, t] * continued_gae
-                )
-                advantages[:, t] = last_gae
-                prev_value = value_t
-
-            self._ensure_batched_advantage_storage(device)
-            assert self._batch_advantages is not None
-            assert self._batch_returns is not None
-            self._batch_advantages[:, :rollout_len].copy_(advantages)
-            self._batch_returns[:, :rollout_len].copy_(advantages + values)
+        assert self._batch_rewards is not None
+        assert self._batch_values is not None
+        assert self._batch_dones is not None
+        assert self._batch_truncateds is not None
+        rollout_len = self._required_batched_rollout_len()
+        if rollout_len == 0:
             self._invalidate_views()
             return
+        device = self._batch_values.device
+        rewards = self._batch_rewards[:, :rollout_len].to(device=device, dtype=torch.float32)
+        values = self._batch_values[:, :rollout_len].to(device=device, dtype=torch.float32)
+        done_flags = self._batch_dones[:, :rollout_len].to(device=device)
+        truncated_flags = self._batch_truncateds[:, :rollout_len].to(device=device)
+        advantages = torch.zeros_like(rewards)
+        last_gae = torch.zeros((self._n_actors,), dtype=torch.float32, device=device)
+        prev_value = last_values.detach().to(device=device, dtype=torch.float32).reshape(self._n_actors)
+        continue_mask = (~done_flags & ~truncated_flags).to(dtype=torch.float32)
+        truncation_mask = (truncated_flags & ~done_flags).to(dtype=torch.float32)
+        done_mask = done_flags.to(dtype=torch.float32)
 
-        fallback_buffers = self._fallback_buffers()
-        for i in range(self._n_actors):
-            fallback_buffers[i].compute_returns_and_advantages(last_value=last_values[i].detach())
+        for t in reversed(range(rollout_len)):
+            reward_t = rewards[:, t]
+            value_t = values[:, t]
+            delta = reward_t + self._gamma * prev_value - value_t
+            terminal_delta = reward_t - value_t
+            continued_gae = delta + self._gamma * self._gae_lambda * last_gae
+            last_gae = (
+                truncation_mask[:, t] * delta
+                + done_mask[:, t] * terminal_delta
+                + continue_mask[:, t] * continued_gae
+            )
+            advantages[:, t] = last_gae
+            prev_value = value_t
+
+        self._ensure_batched_advantage_storage(device)
+        assert self._batch_advantages is not None
+        assert self._batch_returns is not None
+        self._batch_advantages[:, :rollout_len].copy_(advantages)
+        self._batch_returns[:, :rollout_len].copy_(advantages + values)
         self._invalidate_views()
 
     def clear(self) -> None:
-        if self._buffers is not None:
-            for buf in self._buffers.values():
-                buf.clear()
-        self._batched_step_count = 0
+        if self._batched_actor_step_counts is not None:
+            self._batched_actor_step_counts.zero_()
         self._has_aux_for_rollout = False
         self._cache_valid = False
         self._all_obs = None
@@ -308,49 +303,35 @@ class MultiTrajectoryBuffer:
         if self._cache_valid:
             return
 
-        if self._uses_batched_tensor_storage() and self._batched_step_count > 0:
-            assert self._batch_obs is not None
-            assert self._batch_actions is not None
-            assert self._batch_log_probs is not None
-            assert self._batch_values is not None
-            assert self._batch_dones is not None
-            assert self._batch_advantages is not None
-            assert self._batch_returns is not None
-            rollout_len = self._batched_step_count
-            self._all_obs = self._batch_obs[:, :rollout_len]
-            self._all_actions = self._batch_actions[:, :rollout_len]
-            self._all_log_probs = self._batch_log_probs[:, :rollout_len]
-            self._all_values = self._batch_values[:, :rollout_len]
-            self._all_advantages = self._batch_advantages[:, :rollout_len]
-            self._all_returns = self._batch_returns[:, :rollout_len]
-            self._all_advantages_normalized = _normalize_advantages_once(self._all_advantages)
-            self._all_dones = self._batch_dones[:, :rollout_len]
-            self._all_aux = self._batch_aux[:, :rollout_len] if self._has_aux_for_rollout and self._batch_aux is not None else None
+        assert self._batch_obs is not None
+        assert self._batch_actions is not None
+        assert self._batch_log_probs is not None
+        assert self._batch_values is not None
+        assert self._batch_dones is not None
+        assert self._batch_advantages is not None
+        assert self._batch_returns is not None
+        rollout_len = self._required_batched_rollout_len()
+        if rollout_len == 0:
+            self._all_obs = None
+            self._all_actions = None
+            self._all_log_probs = None
+            self._all_values = None
+            self._all_advantages = None
+            self._all_returns = None
+            self._all_advantages_normalized = None
+            self._all_dones = None
+            self._all_aux = None
             self._cache_valid = True
             return
-
-        fallback_buffers = self._fallback_buffers()
-        for buf in fallback_buffers.values():
-            buf._build_tensor_cache()
-
-        self._all_obs = torch.stack([cast("Tensor", b._t_obs) for b in fallback_buffers.values()])
-        self._all_actions = torch.stack([cast("Tensor", b._t_actions) for b in fallback_buffers.values()])
-        self._all_log_probs = torch.stack([cast("Tensor", b._t_log_probs) for b in fallback_buffers.values()])
-        self._all_values = torch.stack([cast("Tensor", b._t_values) for b in fallback_buffers.values()])
-        self._all_advantages = torch.stack([b._advantages for b in fallback_buffers.values()])
+        self._all_obs = self._batch_obs[:, :rollout_len]
+        self._all_actions = self._batch_actions[:, :rollout_len]
+        self._all_log_probs = self._batch_log_probs[:, :rollout_len]
+        self._all_values = self._batch_values[:, :rollout_len]
+        self._all_advantages = self._batch_advantages[:, :rollout_len]
+        self._all_returns = self._batch_returns[:, :rollout_len]
         self._all_advantages_normalized = _normalize_advantages_once(self._all_advantages)
-        self._all_returns = torch.stack([b._returns for b in fallback_buffers.values()])
-        self._all_dones = torch.stack([cast("Tensor", b._t_dones) for b in fallback_buffers.values()])
-
-        first_aux = next((b._t_aux for b in fallback_buffers.values() if b._t_aux is not None), None)
-        if first_aux is not None:
-            self._all_aux = torch.stack([
-                b._t_aux if b._t_aux is not None else torch.zeros_like(first_aux)
-                for b in fallback_buffers.values()
-            ])
-        else:
-            self._all_aux = None
-
+        self._all_dones = self._batch_dones[:, :rollout_len]
+        self._all_aux = self._batch_aux[:, :rollout_len] if self._has_aux_for_rollout and self._batch_aux is not None else None
         self._cache_valid = True
 
     def _get_sequence_views(self, seq_len: int) -> dict[str, Tensor]:
@@ -493,11 +474,9 @@ class MultiTrajectoryBuffer:
                 )
 
     def __len__(self) -> int:
-        if self._uses_batched_tensor_storage() and (self._batched_step_count > 0 or self._batch_obs is not None):
-            return self._n_actors * self._batched_step_count
-        if self._buffers is None:
+        if self._batched_actor_step_counts is None:
             return 0
-        return sum(len(b) for b in self._buffers.values())
+        return int(self._batched_actor_step_counts.sum().item())
 
 
 @dataclass

@@ -199,6 +199,7 @@ for the canonical tensor path:
 - batch reset seeding should reuse one batched ray cast plus one batched state write for all reset actors in the tick
 - indexed CUDA state updates must use proper indexed assignment semantics rather than `.copy_()` on advanced-indexed temporary tensors
 - actor-index routing on the canonical tensor path should stay tensor-native through batch stepping, reset seeding, and observation casting; convert to Python only at the final public result or selected publish seam
+- final public `StepResult` materialization on the tensor path should use one packed host mirror for result rows rather than separate per-field `.cpu().tolist()` extractions
 - eager tensor micro-kernels around `torch_sdf.cast_rays()` should be fused with `torch.compile` on the canonical path when the helper graph remains pure PyTorch tensor code
 
 ## 5. Benchmark Gates
@@ -243,13 +244,14 @@ Accepted and already integrated:
 
 - fixed horizon alignment between `EnvironmentConfig.max_distance` and CUDA tracing termination
 - starvation and proximity shaping derived from existing spherical observations
+- two-group trainer-side CUDA stream overlap on the canonical PPO rollout tick, with actor subset routing and deferred episodic-memory adds so same-tick memory queries still observe the pre-add state across the full fleet
+- macro-cell empty-space caching in `projects/torch-sdf/cpp_src/kernel.cu`, where repeated samples inside the same empty DAG child cell reuse cached bounds and advance to the cell exit without a fresh root descent
 
 Benchmark-gated only:
 
 - compiler-side truncation metadata
 - alternate leaf-distance storage policies
 - Morton or other layout redesigns
-- stream-overlap or double-buffering changes that complicate the single canonical trainer
 
 ### 5.5 Nightly Validation Thresholds
 

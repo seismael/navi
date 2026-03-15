@@ -227,6 +227,17 @@ def test_reward_ema_batch_update_matches_sequential_actor_order() -> None:
     assert float(actual.detach().to(device="cpu", dtype=torch.float32)) == pytest.approx(expected)
 
 
+def test_active_actor_local_indices_preserve_selected_actor_order() -> None:
+    trainer = _make_trainer()
+
+    active_actor_indices = torch.tensor([3, 1], dtype=torch.int64, device=trainer._device)
+    selected_actor_indices = torch.tensor([1, 2, 3], dtype=torch.int64, device=trainer._device)
+
+    local_indices = trainer._active_actor_local_indices(active_actor_indices, selected_actor_indices)
+
+    assert torch.equal(local_indices, torch.tensor([1, 0], dtype=torch.int64, device=trainer._device))
+
+
 def test_run_ppo_update_bootstrap_ignores_hidden_state_on_canonical_core(monkeypatch: pytest.MonkeyPatch) -> None:
     """Canonical PPO bootstrap should not feed hidden state into the learner policy."""
     trainer = _make_trainer()
@@ -534,6 +545,7 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
             self.done_tensor = torch.tensor([False], dtype=torch.bool, device=trainer._device)
             self.truncated_tensor = torch.tensor([True], dtype=torch.bool, device=trainer._device)
             self.episode_id_tensor = torch.tensor([5], dtype=torch.int64, device=trainer._device)
+            self.env_id_tensor = torch.tensor([3], dtype=torch.int64, device=trainer._device)
             self.published_observations: dict[int, DistanceMatrix] = {}
 
     class FakeRuntime:
@@ -552,11 +564,15 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
             action_tensor: torch.Tensor,
             step_id: int,
             *,
+            actor_indices: torch.Tensor | None = None,
+            scratch_slot: int = 0,
             publish_actor_ids: tuple[int, ...] = (),
         ) -> tuple[FakeTensorBatch, tuple[object, ...]]:
-            del publish_actor_ids
+            del publish_actor_ids, scratch_slot
             assert action_tensor.shape == (1, 4)
             assert step_id == 19
+            assert actor_indices is not None
+            assert torch.equal(actor_indices, torch.tensor([3], dtype=torch.int64, device=trainer._device))
             result = type("FakeResult", (), {"episode_id": 5})()
             return FakeTensorBatch(), (result,)
 
@@ -571,6 +587,7 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
     payload = trainer._request_batch_step_tensor_actions(
         torch.ones((1, 4), device="cpu", dtype=torch.float32),
         19,
+        actor_indices=torch.tensor([3], device=trainer._device, dtype=torch.int64),
         publish_actor_ids=(0,),
     )
 
@@ -580,6 +597,7 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
     assert torch.equal(step_batch.done_tensor, torch.tensor([False], dtype=torch.bool, device=trainer._device))
     assert torch.equal(step_batch.truncated_tensor, torch.tensor([True], dtype=torch.bool, device=trainer._device))
     assert torch.equal(step_batch.episode_id_tensor, torch.tensor([5], dtype=torch.int64, device=trainer._device))
+    assert torch.equal(step_batch.env_id_tensor, torch.tensor([3], dtype=torch.int64, device=trainer._device))
     assert len(results) == 1
     assert step_batch.published_observations == {}
 
@@ -909,12 +927,14 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
     trainer = PpoTrainer(cfg)
 
     class FakeTensorStepBatch:
-        def __init__(self, device: torch.device) -> None:
-            self.observation_tensor = torch.ones((4, 3, 8, 4), dtype=torch.float32, device=device)
-            self.reward_tensor = torch.ones((4,), dtype=torch.float32, device=device)
-            self.done_tensor = torch.zeros((4,), dtype=torch.bool, device=device)
-            self.truncated_tensor = torch.zeros((4,), dtype=torch.bool, device=device)
-            self.episode_id_tensor = torch.zeros((4,), dtype=torch.int64, device=device)
+        def __init__(self, device: torch.device, actor_indices: torch.Tensor) -> None:
+            actor_count = int(actor_indices.shape[0])
+            self.observation_tensor = torch.ones((actor_count, 3, 8, 4), dtype=torch.float32, device=device)
+            self.reward_tensor = torch.ones((actor_count,), dtype=torch.float32, device=device)
+            self.done_tensor = torch.zeros((actor_count,), dtype=torch.bool, device=device)
+            self.truncated_tensor = torch.zeros((actor_count,), dtype=torch.bool, device=device)
+            self.episode_id_tensor = torch.zeros((actor_count,), dtype=torch.int64, device=device)
+            self.env_id_tensor = actor_indices.clone()
             self.reward_component_tensor = None
             self.published_observations: dict[int, DistanceMatrix] = {}
 
@@ -938,13 +958,17 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
             action_tensor: torch.Tensor,
             step_id: int,
             *,
+            actor_indices: torch.Tensor | None = None,
+            scratch_slot: int = 0,
             publish_actor_ids: tuple[int, ...] = (),
         ) -> tuple[FakeTensorStepBatch, tuple[object, ...]]:
-            del publish_actor_ids
-            assert action_tensor.shape == (4, 4)
+            del publish_actor_ids, scratch_slot
+            assert actor_indices is not None
+            actor_count = int(actor_indices.shape[0])
+            assert action_tensor.shape == (actor_count, 4)
             self.step_calls += 1
             result = type("FakeResult", (), {"episode_id": 0})()
-            return FakeTensorStepBatch(self._device), (result, result, result, result)
+            return FakeTensorStepBatch(self._device, actor_indices), tuple(result for _ in range(actor_count))
 
         def perf_snapshot(self) -> object:
             return type(
@@ -991,5 +1015,5 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
     metrics = trainer.train(total_steps=8, log_every=0)
 
     assert metrics.total_steps == 8
-    assert trainer._runtime.step_calls == 2  # type: ignore[union-attr]
+    assert trainer._runtime.step_calls == 4  # type: ignore[union-attr]
     assert update_calls == [8]

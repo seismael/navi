@@ -22,6 +22,9 @@ runtime limits, not a claim of literal constant-time cost per ray.
 
 *   **Bounded Stackless Traversal**: Iterative DAG descent with explicit
 	`max_steps`, horizon, and hit-epsilon semantics.
+*   **Macro-Cell Void Cache**: Reuses the last empty child-cell bounds so
+	repeated samples in the same void region can advance to the cell boundary
+	without another root DAG traversal.
 *   **Zero-Copy Execution**: Directly reads/writes PyTorch CUDA tensors using
 	raw pointers, avoiding avoidable CPU staging.
 *   **Strict CUDA Backend**: Fail-fast validation for CUDA placement, dtype,
@@ -51,6 +54,8 @@ Explicit runtime rules:
 Current kernel semantics:
 
 * a hit is accepted when local clearance falls below the internal hit epsilon
+* repeated samples inside one cached empty child cell advance to that cell's
+	exit boundary without a fresh DAG descent
 * rays that leave the compiled domain or exceed the configured horizon return a
 	miss semantic (`0`)
 * misses are bounded by the configured iteration limit and horizon rather than a

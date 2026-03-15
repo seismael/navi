@@ -53,6 +53,8 @@ class CanonicalRuntime(Protocol):
         action_tensor: torch.Tensor,
         step_id: int,
         *,
+        actor_indices: torch.Tensor | None = None,
+        scratch_slot: int = 0,
         publish_actor_ids: tuple[int, ...] = (),
     ) -> tuple[SdfDagTensorStepBatch, tuple[Any, ...]]: ...
 
@@ -195,6 +197,26 @@ class _CompletedEpisodeHostBatch:
     episode_length_tensor: torch.Tensor
 
 
+@dataclass(frozen=True)
+class _PendingRolloutGroup:
+    """One rollout subgroup launched asynchronously on its own CUDA stream."""
+
+    group_slot: int
+    actor_indices: torch.Tensor
+    observations: torch.Tensor
+    aux_tensor: torch.Tensor
+    actions: torch.Tensor
+    embeddings: torch.Tensor
+    log_probs: torch.Tensor
+    values: torch.Tensor
+    intrinsic_rewards: torch.Tensor
+    step_batch: SdfDagTensorStepBatch
+    results: tuple[Any, ...]
+    step_telemetry_local_indices: torch.Tensor
+    fwd_ms: float
+    step_ms: float
+
+
 class PpoTrainer:
     """Single canonical PPO rollout/update trainer.
 
@@ -318,14 +340,13 @@ class PpoTrainer:
                 "CUDA event profiling is enabled: PPO learner stage timings are synchronized diagnostic timings and throughput will be reduced.",
             )
 
-        # Multi-Trajectory buffers
-        self._multi_buffer_a = MultiTrajectoryBuffer(
+        # Canonical batched rollout buffer
+        self._multi_buffers = MultiTrajectoryBuffer(
             n_actors=self._n_actors,
             gamma=config.gamma,
             gae_lambda=config.gae_lambda,
             capacity=config.rollout_length,
         )
-        self._multi_buffers = self._multi_buffer_a
 
         self._sim_steps_during_opt: int = 0
         self._total_sim_steps: int = 0
@@ -340,6 +361,23 @@ class PpoTrainer:
         # Phase 11: Async Telemetry
         self._telemetry_queue: queue.Queue[tuple[str, bytes, str] | None] = queue.Queue(maxsize=1024)
         self._telemetry_thread: threading.Thread | None = None
+        self._rollout_group_count = 2 if self._n_actors >= 2 else 1
+        self._rollout_group_indices = tuple(
+            group.contiguous()
+            for group in torch.chunk(
+                torch.arange(self._n_actors, dtype=torch.int64, device=self._device),
+                self._rollout_group_count,
+            )
+            if int(group.numel()) > 0
+        )
+        self._rollout_group_actor_ids = tuple(
+            tuple(int(actor_id) for actor_id in group.detach().to(device="cpu", dtype=torch.int64).tolist())
+            for group in self._rollout_group_indices
+        )
+        self._rollout_streams = tuple(
+            torch.cuda.Stream(device=self._device)  # type: ignore[no-untyped-call]
+            for _ in self._rollout_group_indices
+        )
 
     def _telemetry_worker(self) -> None:
         """Background thread for non-blocking ZMQ telemetry emission (Phase 11)."""
@@ -618,15 +656,79 @@ class PpoTrainer:
         action_tensor: torch.Tensor,
         step_id: int,
         *,
+        actor_indices: torch.Tensor | None = None,
+        scratch_slot: int = 0,
         publish_actor_ids: tuple[int, ...] = (),
     ) -> tuple[SdfDagTensorStepBatch, tuple[Any, ...]]:
         runtime = self._require_tensor_runtime()
         step_batch, results = runtime.batch_step_tensor_actions(
             action_tensor,
             step_id,
+            actor_indices=actor_indices,
+            scratch_slot=scratch_slot,
             publish_actor_ids=publish_actor_ids,
         )
         return step_batch, results
+
+    def _launch_rollout_group(
+        self,
+        *,
+        group_slot: int,
+        actor_indices: torch.Tensor,
+        current_obs_batch: torch.Tensor,
+        aux_states: torch.Tensor,
+        step_id: int,
+        publish_actor_ids: tuple[int, ...],
+        publish_step_telemetry: bool,
+    ) -> _PendingRolloutGroup:
+        stream = self._rollout_streams[group_slot]
+        observations = self._select_actor_rows(current_obs_batch, actor_indices)
+        aux_tensor = self._select_actor_rows(aux_states, actor_indices)
+        telemetry_actor_indices = self._selected_step_telemetry_actor_indices() if publish_step_telemetry else None
+        step_telemetry_local_indices = self._active_actor_local_indices(actor_indices, telemetry_actor_indices)
+        actor_id_filter = set(self._rollout_group_actor_ids[group_slot])
+        group_publish_actor_ids = tuple(actor_id for actor_id in publish_actor_ids if actor_id in actor_id_filter)
+
+        with torch.cuda.stream(stream), torch.no_grad():
+            self._rollout_policy.eval()
+            t_fwd_start = time.perf_counter()
+            actions, log_probs, values, _hidden, embeddings = self._rollout_policy.forward(
+                observations,
+                None,
+                aux_tensor=aux_tensor,
+            )
+            if self._config.enable_reward_shaping:
+                intrinsic_rewards = self._rnd.intrinsic_reward(embeddings)
+            else:
+                intrinsic_rewards = torch.zeros((embeddings.shape[0],), dtype=torch.float32, device=embeddings.device)
+            fwd_ms = (time.perf_counter() - t_fwd_start) * 1000
+
+            t_step_start = time.perf_counter()
+            step_batch, results = self._request_batch_step_tensor_actions(
+                actions.detach(),
+                step_id,
+                actor_indices=actor_indices,
+                scratch_slot=group_slot,
+                publish_actor_ids=group_publish_actor_ids,
+            )
+            step_ms = (time.perf_counter() - t_step_start) * 1000
+
+        return _PendingRolloutGroup(
+            group_slot=group_slot,
+            actor_indices=actor_indices,
+            observations=observations,
+            aux_tensor=aux_tensor,
+            actions=actions,
+            embeddings=embeddings,
+            log_probs=log_probs,
+            values=values,
+            intrinsic_rewards=intrinsic_rewards,
+            step_batch=step_batch,
+            results=results,
+            step_telemetry_local_indices=step_telemetry_local_indices,
+            fwd_ms=fwd_ms,
+            step_ms=step_ms,
+        )
 
     def _load_initial_observation_batch(
         self,
@@ -964,6 +1066,35 @@ class PpoTrainer:
             return torch.arange(self._n_actors, dtype=torch.int64, device=self._device)
         return torch.tensor([int(self._config.telemetry_actor_id)], dtype=torch.int64, device=self._device)
 
+    def _active_actor_local_indices(
+        self,
+        active_actor_indices: torch.Tensor,
+        selected_actor_indices: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Map selected global actor ids onto local batch rows for one rollout step."""
+        if selected_actor_indices is None or int(selected_actor_indices.numel()) == 0:
+            return torch.empty((0,), dtype=torch.int64, device=active_actor_indices.device)
+
+        matches = selected_actor_indices.unsqueeze(1).eq(active_actor_indices.unsqueeze(0))
+        present_mask = matches.any(dim=1)
+        if not bool(present_mask.any()):
+            return torch.empty((0,), dtype=torch.int64, device=active_actor_indices.device)
+        return matches[present_mask].to(dtype=torch.int64).argmax(dim=1)
+
+    def _select_actor_rows(self, tensor: torch.Tensor, actor_indices: torch.Tensor) -> torch.Tensor:
+        return tensor.index_select(0, actor_indices)
+
+    def _write_actor_rows(self, tensor: torch.Tensor, actor_indices: torch.Tensor, values: torch.Tensor) -> None:
+        tensor[actor_indices] = values
+
+    def _accumulate_actor_rows(self, tensor: torch.Tensor, actor_indices: torch.Tensor, values: torch.Tensor) -> None:
+        tensor[actor_indices] = tensor.index_select(0, actor_indices) + values
+
+    def _zero_actor_rows(self, tensor: torch.Tensor, actor_indices: torch.Tensor) -> None:
+        if int(actor_indices.numel()) == 0:
+            return
+        tensor.index_fill_(0, actor_indices, 0)
+
     def train(self, total_steps: int, *, log_every: int = 100, checkpoint_every: int = 0, checkpoint_dir: str = "checkpoints") -> PpoTrainingMetrics:
         n = self._n_actors
         rl, ep, mb, sl = self._config.rollout_length, self._config.ppo_epochs, self._config.minibatch_size, self._config.bptt_len
@@ -974,7 +1105,6 @@ class PpoTrainer:
         episode_returns = torch.zeros((n,), dtype=torch.float32, device=self._device)
         episode_lengths = torch.zeros((n,), dtype=torch.int32, device=self._device)
         aux_states = torch.zeros((n, 3), dtype=torch.float32, device=self._device)
-
         current_obs_batch, obs_dict = self._load_initial_observation_batch()
         self._publish_dashboard_observations(obs_dict)
 
@@ -1003,216 +1133,232 @@ class PpoTrainer:
                 if (not unbounded) and step_id >= total_steps:
                     break
                 t_tick = time.perf_counter()
-                o_batch = current_obs_batch
-                aux_batch = aux_states
-
-                t_fwd_start = time.perf_counter()
-                with torch.no_grad():
-                    self._rollout_policy.eval()
-                    a_t, lp_t, v_t, _n_h_batch, z_t = self._rollout_policy.forward(
-                        o_batch,
-                        None,
-                        aux_tensor=aux_batch,
-                    )
-                    if self._config.enable_reward_shaping:
-                        intr_r = self._rnd.intrinsic_reward(z_t)
-                    else:
-                        intr_r = torch.zeros((z_t.shape[0],), dtype=torch.float32, device=z_t.device)
-                fwd_ms = (time.perf_counter() - t_fwd_start) * 1000
-
+                fwd_ms = 0.0
+                pack_ms = 0.0
+                step_ms = 0.0
+                mem_ms = 0.0
+                trans_ms = 0.0
+                shape_ms = 0.0
+                memory_add_ms = 0.0
+                buffer_ms = 0.0
+                host_extract_ms = 0.0
+                telemetry_ms = 0.0
                 publish_actor_ids: tuple[int, ...] = ()
                 publish_step_telemetry = bool(
                     self._config.emit_training_telemetry and log_every > 0 and step_id % log_every == 0
                 )
-                step_telemetry_actor_indices = (
-                    self._selected_step_telemetry_actor_indices()
-                    if publish_step_telemetry
-                    else None
-                )
                 publish_observations = self._should_publish_dashboard_observation()
                 if publish_observations:
                     publish_actor_ids = self._observation_publish_actor_ids()
-
-                t_step_start = time.perf_counter()
-                step_batch, res_results = self._request_batch_step_tensor_actions(
-                    a_t.detach(),
-                    step_id,
-                    publish_actor_ids=publish_actor_ids,
-                )
-                next_obs_batch = step_batch.observation_tensor
-                published_observations = step_batch.published_observations
-                reward_component_tensor = step_batch.reward_component_tensor
-                step_ms = (time.perf_counter() - t_step_start) * 1000
-
-                t_pack_start = time.perf_counter()
-                host_batch = self._pack_rollout_host_batch(
-                    actions=a_t,
-                    embeddings=z_t,
-                    log_probs=lp_t,
-                    values=v_t,
-                    intrinsic_rewards=intr_r,
-                    aux_batch=aux_batch,
-                    action_cpu_actor_indices=step_telemetry_actor_indices,
-                )
-                pack_ms = (time.perf_counter() - t_pack_start) * 1000
-
-                t_mem_start = time.perf_counter()
-                if self._config.enable_episodic_memory:
-                    normalized_memory_batch = self._memory.normalize_batch_tensor(host_batch.embedding_tensor)
-                    # Keep similarities on-device for shaping and batch-copy once for logging/accounting.
-                    loop_similarities, _ = self._memory.query_normalized_batch_tensor(normalized_memory_batch)
-                else:
-                    normalized_memory_batch = None
-                    loop_similarities = torch.zeros(
-                        (n,),
-                        dtype=torch.float32,
-                        device=host_batch.embedding_tensor.device,
+                pending_groups = [
+                    self._launch_rollout_group(
+                        group_slot=group_slot,
+                        actor_indices=actor_indices,
+                        current_obs_batch=current_obs_batch,
+                        aux_states=aux_states,
+                        step_id=step_id,
+                        publish_actor_ids=publish_actor_ids,
+                        publish_step_telemetry=publish_step_telemetry,
                     )
-                mem_ms = (time.perf_counter() - t_mem_start) * 1000
+                    for group_slot, actor_indices in enumerate(self._rollout_group_indices)
+                ]
 
-                t_shape_start = time.perf_counter()
-                reward_device = host_batch.action_tensor.device
-                raw_rewards = step_batch.reward_tensor.to(device=reward_device, dtype=torch.float32)
-                dones = step_batch.done_tensor.to(device=reward_device, dtype=torch.bool)
-                intrinsic_rewards = host_batch.intrinsic_reward_tensor.to(device=reward_device, dtype=torch.float32)
-                if self._config.enable_reward_shaping:
-                    shaped_rewards = self._reward_shaper.shape_batch(
+                deferred_memory_batches: list[torch.Tensor] = []
+                for pending in pending_groups:
+                    torch.cuda.current_stream(self._device).wait_stream(self._rollout_streams[pending.group_slot])
+                    fwd_ms += pending.fwd_ms
+                    step_ms += pending.step_ms
+
+                    t_pack_start = time.perf_counter()
+                    host_batch = self._pack_rollout_host_batch(
+                        actions=pending.actions,
+                        embeddings=pending.embeddings,
+                        log_probs=pending.log_probs,
+                        values=pending.values,
+                        intrinsic_rewards=pending.intrinsic_rewards,
+                        aux_batch=pending.aux_tensor,
+                        action_cpu_actor_indices=pending.step_telemetry_local_indices,
+                    )
+                    pack_ms += (time.perf_counter() - t_pack_start) * 1000
+
+                    group_size = int(pending.actor_indices.shape[0])
+                    t_mem_start = time.perf_counter()
+                    if self._config.enable_episodic_memory:
+                        normalized_memory_batch = self._memory.normalize_batch_tensor(host_batch.embedding_tensor)
+                        loop_similarities, _ = self._memory.query_normalized_batch_tensor(normalized_memory_batch)
+                        deferred_memory_batches.append(normalized_memory_batch)
+                    else:
+                        normalized_memory_batch = None
+                        loop_similarities = torch.zeros(
+                            (group_size,),
+                            dtype=torch.float32,
+                            device=host_batch.embedding_tensor.device,
+                        )
+                    mem_ms += (time.perf_counter() - t_mem_start) * 1000
+
+                    t_shape_start = time.perf_counter()
+                    reward_device = host_batch.action_tensor.device
+                    raw_rewards = pending.step_batch.reward_tensor.to(device=reward_device, dtype=torch.float32)
+                    dones = pending.step_batch.done_tensor.to(device=reward_device, dtype=torch.bool)
+                    intrinsic_rewards = host_batch.intrinsic_reward_tensor.to(device=reward_device, dtype=torch.float32)
+                    if self._config.enable_reward_shaping:
+                        shaped_rewards = self._reward_shaper.shape_batch(
+                            raw_rewards=raw_rewards,
+                            dones=dones,
+                            forward_velocities=host_batch.action_tensor[:, 0],
+                            angular_velocities=host_batch.action_tensor[:, 3],
+                            intrinsic_rewards=intrinsic_rewards,
+                            loop_similarities=loop_similarities,
+                        )
+                        self._reward_shaper.step_batch(group_size)
+                    else:
+                        shaped_rewards = raw_rewards
+                    shape_ms += (time.perf_counter() - t_shape_start) * 1000
+                    truncateds = pending.step_batch.truncated_tensor.to(device=reward_device, dtype=torch.bool)
+                    done_or_truncated = dones | truncateds
+
+                    t_host_start = time.perf_counter()
+                    host_scalar_batch = self._extract_host_rollout_scalars(
                         raw_rewards=raw_rewards,
-                        dones=dones,
-                        forward_velocities=host_batch.action_tensor[:, 0],
-                        angular_velocities=host_batch.action_tensor[:, 3],
-                        intrinsic_rewards=intrinsic_rewards,
+                        shaped_rewards=shaped_rewards,
+                        intrinsic_rewards=host_batch.intrinsic_reward_tensor,
                         loop_similarities=loop_similarities,
+                        done_flags=done_or_truncated,
+                        actor_indices=pending.step_telemetry_local_indices,
                     )
-                    self._reward_shaper.step_batch(n)
-                else:
-                    shaped_rewards = raw_rewards
-                shape_ms = (time.perf_counter() - t_shape_start) * 1000
-                truncateds = step_batch.truncated_tensor.to(device=reward_device, dtype=torch.bool)
-                done_or_truncated = dones | truncateds
+                    host_extract_ms += (time.perf_counter() - t_host_start) * 1000
 
-                t_host_start = time.perf_counter()
-                host_scalar_batch = self._extract_host_rollout_scalars(
-                    raw_rewards=raw_rewards,
-                    shaped_rewards=shaped_rewards,
-                    intrinsic_rewards=host_batch.intrinsic_reward_tensor,
-                    loop_similarities=loop_similarities,
-                    done_flags=done_or_truncated,
-                    actor_indices=step_telemetry_actor_indices,
-                )
-                host_extract_ms = (time.perf_counter() - t_host_start) * 1000
-
-                t_trans_start = time.perf_counter()
-                buffer_ms = 0.0
-                telemetry_ms = 0.0
-                t_buffer_start = time.perf_counter()
-                self._multi_buffers.append_batch(
-                    observations=o_batch,
-                    actions=host_batch.action_tensor,
-                    log_probs=host_batch.log_prob_tensor,
-                    values=host_batch.value_tensor,
-                    rewards=shaped_rewards,
-                    dones=dones,
-                    truncateds=truncateds,
-                    aux_tensors=host_batch.aux_tensor,
-                )
-                buffer_ms += (time.perf_counter() - t_buffer_start) * 1000
-                reward_sum_tensor.add_(raw_rewards.detach().sum())
-                r_ema = self._update_reward_ema(r_ema, shaped_rewards)
-                episode_returns.add_(shaped_rewards.detach())
-                episode_lengths.add_(1)
-                aux_states[:, 0].copy_(shaped_rewards.detach())
-                aux_states[:, 1].copy_(loop_similarities.detach())
-                aux_states[:, 2].copy_(host_batch.intrinsic_reward_tensor.detach())
-
-                if publish_step_telemetry:
-                    if host_batch.action_cpu_tensor is None:
-                        raise RuntimeError("action_cpu_tensor is required for telemetry emission")
-                    if (
-                        host_scalar_batch.raw_reward_tensor is None
-                        or host_scalar_batch.shaped_reward_tensor is None
-                        or host_scalar_batch.intrinsic_reward_tensor is None
-                        or host_scalar_batch.loop_similarity_tensor is None
-                        or host_scalar_batch.done_tensor is None
-                    ):
-                        raise RuntimeError("telemetry scalar extraction is required for step telemetry emission")
-                    if step_telemetry_actor_indices is None:
-                        raise RuntimeError("step_telemetry_actor_indices is required for telemetry emission")
-                    selected_actor_ids = step_telemetry_actor_indices.detach().to(device="cpu", dtype=torch.int64).tolist()
-                    for row, actor_id in enumerate(selected_actor_ids):
-                        loop_similarity = float(host_scalar_batch.loop_similarity_tensor[row])
-                        reward_components = None
-                        if reward_component_tensor is not None:
-                            reward_components = reward_component_tensor[actor_id]
-                        t_tel_start = time.perf_counter()
-                        self._publish_step_telemetry(
-                            step_id=step_id,
-                            episode_id=int(res_results[actor_id].episode_id),
-                            actor_id=actor_id,
-                            raw_reward=float(host_scalar_batch.raw_reward_tensor[row]),
-                            shaped_reward=float(host_scalar_batch.shaped_reward_tensor[row]),
-                            intrinsic_reward=float(host_scalar_batch.intrinsic_reward_tensor[row]),
-                            loop_similarity=loop_similarity,
-                            is_loop=(loop_similarity > self._config.loop_threshold),
-                            beta=self._reward_shaper.beta,
-                            done=bool(host_scalar_batch.done_tensor[row]),
-                            forward_vel=float(host_batch.action_cpu_tensor[row, 0]),
-                            yaw_vel=float(host_batch.action_cpu_tensor[row, 3]),
-                            exploration_reward=0.0 if reward_components is None else float(reward_components[0]),
-                            progress_reward=0.0 if reward_components is None else float(reward_components[1]),
-                            clearance_reward=0.0 if reward_components is None else float(reward_components[2]),
-                            starvation_penalty=0.0 if reward_components is None else float(reward_components[3]),
-                            proximity_penalty=0.0 if reward_components is None else float(reward_components[4]),
-                            structure_reward=0.0 if reward_components is None else float(reward_components[5]),
-                            forward_structure_reward=0.0 if reward_components is None else float(reward_components[6]),
-                            inspection_reward=0.0 if reward_components is None else float(reward_components[7]),
-                            collision_reward=0.0 if reward_components is None else float(reward_components[8]),
-                        )
-                        telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
-
-                done_indices = torch.nonzero(done_or_truncated, as_tuple=False).flatten()
-                if int(done_indices.numel()) > 0:
-                    ep_cnt += int(done_indices.numel())
-                    selected_episode_indices = self._selected_episode_telemetry_actor_indices(done_indices)
-                    completed_episode_batch = self._extract_completed_episode_host_batch(
-                        actor_indices=selected_episode_indices,
-                        episode_returns=episode_returns,
-                        episode_lengths=episode_lengths,
+                    t_trans_start = time.perf_counter()
+                    step_actor_indices = pending.step_batch.env_id_tensor.to(device=self._device, dtype=torch.int64)
+                    reward_component_tensor = pending.step_batch.reward_component_tensor
+                    t_buffer_start = time.perf_counter()
+                    self._multi_buffers.append_batch(
+                        observations=pending.observations,
+                        actions=host_batch.action_tensor,
+                        log_probs=host_batch.log_prob_tensor,
+                        values=host_batch.value_tensor,
+                        rewards=shaped_rewards,
+                        dones=dones,
+                        truncateds=truncateds,
+                        aux_tensors=host_batch.aux_tensor,
+                        actor_indices=step_actor_indices,
                     )
-                else:
-                    completed_episode_batch = None
+                    buffer_ms += (time.perf_counter() - t_buffer_start) * 1000
+                    reward_sum_tensor.add_(raw_rewards.detach().sum())
+                    r_ema = self._update_reward_ema(r_ema, shaped_rewards)
+                    self._accumulate_actor_rows(episode_returns, step_actor_indices, shaped_rewards.detach())
+                    self._accumulate_actor_rows(
+                        episode_lengths,
+                        step_actor_indices,
+                        torch.ones_like(step_actor_indices, dtype=episode_lengths.dtype),
+                    )
+                    self._write_actor_rows(current_obs_batch, step_actor_indices, pending.step_batch.observation_tensor)
+                    self._write_actor_rows(aux_states[:, 0:1], step_actor_indices, shaped_rewards.detach().unsqueeze(1))
+                    self._write_actor_rows(aux_states[:, 1:2], step_actor_indices, loop_similarities.detach().unsqueeze(1))
+                    self._write_actor_rows(
+                        aux_states[:, 2:3],
+                        step_actor_indices,
+                        host_batch.intrinsic_reward_tensor.detach().unsqueeze(1),
+                    )
 
-                if completed_episode_batch is not None:
-                    done_actor_ids = completed_episode_batch.actor_id_tensor.tolist()
-                    for row, actor_id in enumerate(done_actor_ids):
-                        t_tel_start = time.perf_counter()
-                        self._publish_episode_telemetry(
-                            step_id=step_id,
-                            episode_id=int(res_results[actor_id].episode_id),
-                            actor_id=actor_id,
-                            episode_return=float(completed_episode_batch.episode_return_tensor[row]),
-                            episode_length=int(completed_episode_batch.episode_length_tensor[row]),
+                    if publish_step_telemetry and int(pending.step_telemetry_local_indices.numel()) > 0:
+                        if host_batch.action_cpu_tensor is None:
+                            raise RuntimeError("action_cpu_tensor is required for telemetry emission")
+                        if (
+                            host_scalar_batch.raw_reward_tensor is None
+                            or host_scalar_batch.shaped_reward_tensor is None
+                            or host_scalar_batch.intrinsic_reward_tensor is None
+                            or host_scalar_batch.loop_similarity_tensor is None
+                            or host_scalar_batch.done_tensor is None
+                        ):
+                            raise RuntimeError("telemetry scalar extraction is required for step telemetry emission")
+                        selected_local_rows = pending.step_telemetry_local_indices.detach().to(device="cpu", dtype=torch.int64).tolist()
+                        selected_actor_ids = step_actor_indices.index_select(0, pending.step_telemetry_local_indices).detach().to(device="cpu", dtype=torch.int64).tolist()
+                        telemetry_reward_components = (
+                            reward_component_tensor.index_select(0, pending.step_telemetry_local_indices)
+                            if reward_component_tensor is not None
+                            else None
                         )
-                        telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
-                if int(done_indices.numel()) > 0:
-                    episode_returns.index_fill_(0, done_indices, 0.0)
-                    episode_lengths.index_fill_(0, done_indices, 0)
-                    aux_states.index_fill_(0, done_indices, 0.0)
+                        for row, actor_id in enumerate(selected_actor_ids):
+                            loop_similarity = float(host_scalar_batch.loop_similarity_tensor[row])
+                            reward_components = None
+                            if telemetry_reward_components is not None:
+                                reward_components = telemetry_reward_components[row]
+                            t_tel_start = time.perf_counter()
+                            self._publish_step_telemetry(
+                                step_id=step_id,
+                                episode_id=int(pending.results[selected_local_rows[row]].episode_id),
+                                actor_id=actor_id,
+                                raw_reward=float(host_scalar_batch.raw_reward_tensor[row]),
+                                shaped_reward=float(host_scalar_batch.shaped_reward_tensor[row]),
+                                intrinsic_reward=float(host_scalar_batch.intrinsic_reward_tensor[row]),
+                                loop_similarity=loop_similarity,
+                                is_loop=(loop_similarity > self._config.loop_threshold),
+                                beta=self._reward_shaper.beta,
+                                done=bool(host_scalar_batch.done_tensor[row]),
+                                forward_vel=float(host_batch.action_cpu_tensor[row, 0]),
+                                yaw_vel=float(host_batch.action_cpu_tensor[row, 3]),
+                                exploration_reward=0.0 if reward_components is None else float(reward_components[0]),
+                                progress_reward=0.0 if reward_components is None else float(reward_components[1]),
+                                clearance_reward=0.0 if reward_components is None else float(reward_components[2]),
+                                starvation_penalty=0.0 if reward_components is None else float(reward_components[3]),
+                                proximity_penalty=0.0 if reward_components is None else float(reward_components[4]),
+                                structure_reward=0.0 if reward_components is None else float(reward_components[5]),
+                                forward_structure_reward=0.0 if reward_components is None else float(reward_components[6]),
+                                inspection_reward=0.0 if reward_components is None else float(reward_components[7]),
+                                collision_reward=0.0 if reward_components is None else float(reward_components[8]),
+                            )
+                            telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
 
-                if publish_observations:
-                    t_tel_start = time.perf_counter()
-                    self._publish_dashboard_observations(published_observations)
-                    telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
+                    done_local_indices = torch.nonzero(done_or_truncated, as_tuple=False).flatten()
+                    done_actor_indices = (
+                        step_actor_indices.index_select(0, done_local_indices)
+                        if int(done_local_indices.numel()) > 0
+                        else done_local_indices
+                    )
+                    if int(done_actor_indices.numel()) > 0:
+                        ep_cnt += int(done_actor_indices.numel())
+                        selected_episode_indices = self._selected_episode_telemetry_actor_indices(done_actor_indices)
+                        completed_episode_batch = self._extract_completed_episode_host_batch(
+                            actor_indices=selected_episode_indices,
+                            episode_returns=episode_returns,
+                            episode_lengths=episode_lengths,
+                        )
+                        done_actor_ids_all = done_actor_indices.detach().to(device="cpu", dtype=torch.int64).tolist()
+                        done_episode_ids_all = pending.step_batch.episode_id_tensor.index_select(0, done_local_indices).detach().to(device="cpu", dtype=torch.int64).tolist()
+                        done_episode_by_actor = dict(zip(done_actor_ids_all, done_episode_ids_all, strict=True))
+                    else:
+                        completed_episode_batch = None
+                        done_episode_by_actor = {}
+
+                    if completed_episode_batch is not None:
+                        done_actor_ids = completed_episode_batch.actor_id_tensor.tolist()
+                        for row, actor_id in enumerate(done_actor_ids):
+                            t_tel_start = time.perf_counter()
+                            self._publish_episode_telemetry(
+                                step_id=step_id,
+                                episode_id=int(done_episode_by_actor[actor_id]),
+                                actor_id=actor_id,
+                                episode_return=float(completed_episode_batch.episode_return_tensor[row]),
+                                episode_length=int(completed_episode_batch.episode_length_tensor[row]),
+                            )
+                            telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
+                    if int(done_actor_indices.numel()) > 0:
+                        self._zero_actor_rows(episode_returns, done_actor_indices)
+                        self._zero_actor_rows(episode_lengths, done_actor_indices)
+                        self._zero_actor_rows(aux_states, done_actor_indices)
+
+                    if publish_observations:
+                        t_tel_start = time.perf_counter()
+                        self._publish_dashboard_observations(pending.step_batch.published_observations)
+                        telemetry_ms += (time.perf_counter() - t_tel_start) * 1000
+                    trans_ms += (time.perf_counter() - t_trans_start) * 1000
+
                 if self._config.enable_episodic_memory:
-                    t_memory_add_start = time.perf_counter()
-                    if normalized_memory_batch is None:
-                        raise RuntimeError("normalized_memory_batch is required when episodic memory is enabled")
-                    self._memory.add_normalized_batch_tensor(normalized_memory_batch)
-                    memory_add_ms = (time.perf_counter() - t_memory_add_start) * 1000
-                else:
-                    memory_add_ms = 0.0
-                trans_ms = (time.perf_counter() - t_trans_start) * 1000
-                current_obs_batch = next_obs_batch
+                    for normalized_memory_batch in deferred_memory_batches:
+                        t_memory_add_start = time.perf_counter()
+                        self._memory.add_normalized_batch_tensor(normalized_memory_batch)
+                        memory_add_ms += (time.perf_counter() - t_memory_add_start) * 1000
 
                 step_id += n
                 self._total_sim_steps += n

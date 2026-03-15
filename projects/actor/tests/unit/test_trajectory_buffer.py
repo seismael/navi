@@ -148,8 +148,6 @@ def test_preallocated_buffer_caches_normalized_advantages_once() -> None:
 def test_multi_trajectory_sampling_normalizes_advantages_once() -> None:
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 
-    assert buffer._buffers is None
-
     buffer.append_batch(
         observations=torch.randn(2, 3, 16, 8),
         actions=torch.randn(2, 4),
@@ -367,8 +365,6 @@ def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None
 def test_multi_trajectory_batched_storage_reuses_allocations_across_clear() -> None:
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 
-    assert buffer._buffers is None
-
     buffer.append_batch(
         observations=torch.randn(2, 3, 16, 8),
         actions=torch.randn(2, 4),
@@ -405,11 +401,92 @@ def test_multi_trajectory_batched_storage_reuses_allocations_across_clear() -> N
     assert buffer._all_aux is None
 
 
-def test_multi_trajectory_fallback_buffers_exist_only_without_capacity() -> None:
-    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95)
+def test_multi_trajectory_append_batch_supports_sparse_actor_indices() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=4, gamma=0.99, gae_lambda=0.95, capacity=2)
 
-    assert buffer._buffers is not None
-    assert len(buffer._buffers) == 2
+    buffer.append_batch(
+        observations=torch.full((2, 3, 16, 8), 1.0),
+        actions=torch.full((2, 4), 1.0),
+        log_probs=torch.tensor([0.1, 0.2]),
+        values=torch.tensor([0.3, 0.4]),
+        rewards=torch.tensor([1.0, 2.0]),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+        actor_indices=torch.tensor([2, 0], dtype=torch.int64),
+    )
+    buffer.append_batch(
+        observations=torch.full((2, 3, 16, 8), 2.0),
+        actions=torch.full((2, 4), 2.0),
+        log_probs=torch.tensor([0.5, 0.6]),
+        values=torch.tensor([0.7, 0.8]),
+        rewards=torch.tensor([3.0, 4.0]),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+        actor_indices=torch.tensor([1, 3], dtype=torch.int64),
+    )
+    buffer.append_batch(
+        observations=torch.full((2, 3, 16, 8), 3.0),
+        actions=torch.full((2, 4), 3.0),
+        log_probs=torch.tensor([0.9, 1.0]),
+        values=torch.tensor([1.1, 1.2]),
+        rewards=torch.tensor([5.0, 6.0]),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+        actor_indices=torch.tensor([2, 0], dtype=torch.int64),
+    )
+    buffer.append_batch(
+        observations=torch.full((2, 3, 16, 8), 4.0),
+        actions=torch.full((2, 4), 4.0),
+        log_probs=torch.tensor([1.3, 1.4]),
+        values=torch.tensor([1.5, 1.6]),
+        rewards=torch.tensor([7.0, 8.0]),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+        actor_indices=torch.tensor([1, 3], dtype=torch.int64),
+    )
+
+    buffer.compute_returns_and_advantages(last_values=torch.zeros(4))
+    buffer._ensure_batch_cache()
+
+    assert buffer._all_obs is not None
+    assert buffer._all_obs.shape[:2] == (4, 2)
+    assert torch.allclose(buffer._all_obs[0, 0], torch.full((3, 16, 8), 1.0))
+    assert torch.allclose(buffer._all_obs[0, 1], torch.full((3, 16, 8), 3.0))
+    assert torch.allclose(buffer._all_obs[1, 0], torch.full((3, 16, 8), 2.0))
+    assert torch.allclose(buffer._all_obs[1, 1], torch.full((3, 16, 8), 4.0))
+    assert len(buffer) == 8
+
+
+def test_multi_trajectory_sparse_append_requires_equal_rollout_lengths_before_finalize() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+
+    buffer.append_batch(
+        observations=torch.randn(1, 3, 16, 8),
+        actions=torch.randn(1, 4),
+        log_probs=torch.randn(1),
+        values=torch.randn(1),
+        rewards=torch.randn(1),
+        dones=torch.zeros(1, dtype=torch.bool),
+        truncateds=torch.zeros(1, dtype=torch.bool),
+        aux_tensors=None,
+        actor_indices=torch.tensor([0], dtype=torch.int64),
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="equal per-actor rollout lengths"):
+        buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
+
+
+def test_multi_trajectory_requires_explicit_capacity_on_canonical_path() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="requires capacity"):
+        MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95)
 
 
 def test_trajectory_buffer_sequence_sampling_exposes_tensor_native_sequence_views() -> None:

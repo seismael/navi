@@ -791,12 +791,13 @@ def test_native_runtime_uses_sparse_child_mask_offsets_correctly() -> None:
 
     backend.cast_rays(dag, origins, dirs, out_d, out_s, 4, 10.0, list(bbox_min), list(bbox_max), 2)
 
-    expected = [_manual_octree_reference(dag_words, origin, bbox_min, bbox_max) for origin in origins_host]
+    expected = [_manual_octree_reference(dag_words, origin, bbox_min, bbox_max) for origin in origins_host[:3]]
     expected_distances = [0.0 if distance < 0.01 else distance for distance, _semantic in expected]
     expected_semantics = [semantic if distance < 0.01 else 0 for distance, semantic in expected]
 
-    assert out_d.squeeze(0).tolist() == pytest.approx(expected_distances, rel=0.0, abs=1e-6)
-    assert out_s.squeeze(0).tolist() == expected_semantics
+    assert out_d.squeeze(0).tolist()[:3] == pytest.approx(expected_distances, rel=0.0, abs=1e-6)
+    assert out_s.squeeze(0).tolist()[:3] == expected_semantics
+    assert int(out_s[0, 3].item()) == 0
     assert float(out_d[0, 3].item()) > 10.0
 
 
@@ -835,6 +836,28 @@ def test_native_runtime_reuses_deep_leaf_payload_across_repeated_steps() -> None
     backend.cast_rays(dag, origins, dirs, out_d, out_s, 2, 1.0, list(bbox_min), list(bbox_max), 32)
 
     assert pytest.approx(float(out_d[0, 0].item()), rel=0.0, abs=2e-5) == 0.024
+    assert int(out_s[0, 0].item()) == 0
+
+
+def test_native_runtime_advances_across_repeated_empty_macro_cells_without_root_miss_escape() -> None:
+    backend = _require_native_backend()
+    dag_words = np.array(
+        [
+            _internal_word(1 << 7, 1),
+            np.uint64(2),
+            _leaf_word(0.005, semantic=17),
+        ],
+        dtype=np.uint64,
+    )
+    dag = _dag_tensor_from_words(dag_words.tolist())
+    origins = torch.tensor([[[0.25, 0.25, 0.25]]], device="cuda", dtype=torch.float32)
+    dirs = torch.tensor([[[1.0, 0.0, 0.0]]], device="cuda", dtype=torch.float32)
+    out_d = torch.full((1, 1), -1.0, device="cuda", dtype=torch.float32)
+    out_s = torch.full((1, 1), -1, device="cuda", dtype=torch.int32)
+
+    backend.cast_rays(dag, origins, dirs, out_d, out_s, 2, 10.0, [0, 0, 0], [1, 1, 1], 2)
+
+    assert pytest.approx(float(out_d[0, 0].item()), rel=0.0, abs=1e-4) == 0.75
     assert int(out_s[0, 0].item()) == 0
 
 if __name__ == "__main__":

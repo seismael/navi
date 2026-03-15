@@ -51,6 +51,7 @@ _SPAWN_CANDIDATES_PER_AXIS: int = 3
 _SPAWN_HEIGHT_SAMPLES: int = 5
 _PERF_EMA_ALPHA: float = 0.1
 _RAY_DIRECTION_NORM_EPS: float = 1e-4
+_SCRATCH_SLOT_COUNT: int = 2
 
 
 def _obstacle_clearance_reward(
@@ -284,6 +285,7 @@ class SdfDagTensorStepBatch:
     done_tensor: Any
     truncated_tensor: Any
     episode_id_tensor: Any
+    env_id_tensor: Any
     published_observations: dict[int, DistanceMatrix]
     reward_component_tensor: Any | None = None
 
@@ -393,19 +395,20 @@ class SdfDagBackend(SimulatorBackend):
 
         self._ray_dirs_local = self._build_ray_directions().to(self._device)
         _validate_unit_direction_tensor(self._torch, self._ray_dirs_local, name="ray_dirs_local")
+        self._scratch_slot_count = _SCRATCH_SLOT_COUNT
         self._ray_origins = self._torch.empty(
-            (self._n_actors, self._n_rays, 3),
+            (self._scratch_slot_count, self._n_actors, self._n_rays, 3),
             device=self._device,
             dtype=self._torch.float32,
         )
         self._ray_dirs_world = self._torch.empty_like(self._ray_origins)
         self._out_distances = self._torch.empty(
-            (self._n_actors, self._n_rays),
+            (self._scratch_slot_count, self._n_actors, self._n_rays),
             device=self._device,
             dtype=self._torch.float32,
         )
         self._out_semantics = self._torch.empty(
-            (self._n_actors, self._n_rays),
+            (self._scratch_slot_count, self._n_actors, self._n_rays),
             device=self._device,
             dtype=self._torch.int32,
         )
@@ -726,7 +729,7 @@ class SdfDagBackend(SimulatorBackend):
                 self._actor_steps[actor_id] += 1
                 truncated = bool(self._actor_steps[actor_id] >= self._max_steps_per_episode)
 
-                # Single actor reward for compatibility in non-tensor path
+                # Single actor reward for the environment service surface
                 reward, _reward_components = self._compute_reward(
                     actor_id=actor_id,
                     previous_pose=previous_pose,
@@ -752,214 +755,6 @@ class SdfDagBackend(SimulatorBackend):
                     done=False,
                     truncated=truncated,
                     reward=reward,
-                    episode_return=float(self._episode_returns[actor_id]),
-                    timestamp=time.time(),
-                )
-
-        ordered_observations: list[DistanceMatrix] = []
-        ordered_results: list[StepResult] = []
-        for idx, action in enumerate(actions):
-            actor_id = int(action.env_ids[0]) if len(action.env_ids) > 0 else idx
-            ordered_observations.append(observations_by_actor[actor_id])
-            ordered_results.append(results_by_actor[actor_id])
-
-        self._record_perf_sample(
-            batch_seconds=time.perf_counter() - batch_started_at,
-            actor_count=len(actions),
-        )
-        return tuple(ordered_observations), tuple(ordered_results)
-
-    def _consume_observation_batch(
-        self,
-        *,
-        actor_indices: Any,
-        depth_batch: Any,    # (B, Az, El)
-        semantic_batch: Any, # (B, Az, El)
-        valid_batch: Any,    # (B, Az, El)
-        current_clearances: Any, # (B,)
-    ) -> tuple[Any, Any]: # (obs_batch, deltas_batch)
-        """Vectorized observation state update (Phase 4)."""
-        prev_depths = self._prev_depth_tensors.index_select(0, actor_indices)
-
-        deltas = depth_batch - prev_depths
-        # Update state
-        self._prev_depth_tensors[actor_indices] = depth_batch
-        self._prev_min_distances[actor_indices] = current_clearances
-
-        obs_batch = self._torch.stack([
-            depth_batch,
-            semantic_batch.to(dtype=self._torch.float32),
-            valid_batch.to(dtype=self._torch.float32)
-        ], dim=1) # (B, 3, Az, El)
-
-        return obs_batch, deltas
-
-    def _compute_observation_ratios(
-        self,
-        *,
-        depth_batch: Any,
-        valid_batch: Any,
-    ) -> tuple[Any, Any, Any, Any]:
-        """Compute starvation, proximity, and structure ratios in one CUDA pass."""
-        proximity_distance_threshold = float(
-            getattr(self, "_proximity_distance_threshold", _PROXIMITY_DISTANCE_THRESHOLD)
-        )
-        structure_band_min_distance = float(
-            getattr(self, "_structure_band_min_distance", _STRUCTURE_BAND_MIN_DISTANCE)
-        )
-        structure_band_max_distance = float(
-            getattr(self, "_structure_band_max_distance", _STRUCTURE_BAND_MAX_DISTANCE)
-        )
-        starvation_ratios = valid_batch.logical_not().to(dtype=self._torch.float32).mean(dim=(1, 2))
-        proximity_threshold = proximity_distance_threshold / self._max_distance if self._max_distance > 0 else 0.0
-        proximity_ratios = (
-            depth_batch.le(proximity_threshold)
-            .logical_and(valid_batch)
-            .to(dtype=self._torch.float32)
-            .mean(dim=(1, 2))
-        )
-        metric_depth_batch = depth_batch * self._max_distance
-        structure_mask = (
-            metric_depth_batch.ge(structure_band_min_distance)
-            .logical_and(metric_depth_batch.le(structure_band_max_distance))
-            .logical_and(valid_batch)
-        )
-        structure_band_ratios = structure_mask.to(dtype=self._torch.float32).mean(dim=(1, 2))
-        forward_half_bins = max(1, self._az_bins // 6)
-        forward_sector = self._torch.cat(
-            (structure_mask[:, :forward_half_bins, :], structure_mask[:, -forward_half_bins:, :]),
-            dim=1,
-        )
-        forward_structure_ratios = forward_sector.to(dtype=self._torch.float32).mean(dim=(1, 2))
-        return starvation_ratios, proximity_ratios, structure_band_ratios, forward_structure_ratios
-
-    def _postprocess_cast_outputs_impl(
-        self,
-        out_distances: Any,
-        out_semantics: Any,
-    ) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
-        actor_count = int(out_distances.shape[0])
-        distances = out_distances.clamp(min=0.0, max=self._max_distance)
-        valid_batch = out_distances <= self._max_distance
-        depth_batch = distances.div(self._max_distance).reshape(actor_count, self._az_bins, self._el_bins)
-        semantic_batch = out_semantics.reshape(actor_count, self._az_bins, self._el_bins)
-        valid_batch = valid_batch.reshape(actor_count, self._az_bins, self._el_bins)
-        min_distances = depth_batch.amin(dim=(1, 2)).mul(self._max_distance)
-        starvation_ratios, proximity_ratios, structure_band_ratios, forward_structure_ratios = self._compute_observation_ratios(
-            depth_batch=depth_batch,
-            valid_batch=valid_batch,
-        )
-        return (
-            depth_batch,
-            semantic_batch,
-            valid_batch,
-            min_distances,
-            starvation_ratios,
-            proximity_ratios,
-            structure_band_ratios,
-            forward_structure_ratios,
-        )
-
-    def _postprocess_cast_outputs(
-        self,
-        out_distances: Any,
-        out_semantics: Any,
-    ) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
-        impl = getattr(self, "_postprocess_cast_outputs_compiled", self._postprocess_cast_outputs_impl)
-        return impl(out_distances, out_semantics)
-
-    def _extract_step_result_scalars(
-        self,
-        *,
-        actor_indices: Any,
-        rewards: Any,
-        truncated_mask: Any,
-    ) -> tuple[list[int], list[bool], list[float], list[float]]:
-        """Batch-extract result scalars once instead of per-actor `.item()` syncs."""
-        episode_ids = self._episode_ids[actor_indices].detach().cpu().tolist()
-        truncated_values = truncated_mask.detach().cpu().tolist()
-        reward_values = rewards.detach().cpu().tolist()
-        episode_returns = self._episode_returns[actor_indices].detach().cpu().tolist()
-        return episode_ids, truncated_values, reward_values, episode_returns
-
-    def _materialize_selected_observations(
-        self,
-        *,
-        actor_ids: list[int],
-        row_indices: list[int],
-        step_id: int,
-        depth_batch: Any,
-        delta_batch: Any,
-        semantic_batch: Any,
-        valid_batch: Any,
-        published_observations: dict[int, DistanceMatrix],
-    ) -> None:
-        """Batch materialize selected observations for dashboard publication only."""
-        if not actor_ids:
-            return
-
-        row_index_tensor = self._torch.as_tensor(row_indices, device=self._device, dtype=self._torch.long)
-        depth_cpu = depth_batch[row_index_tensor].detach().cpu().numpy().astype(np.float32, copy=False)
-        delta_cpu = delta_batch[row_index_tensor].detach().cpu().numpy().astype(np.float32, copy=False)
-        semantic_cpu = semantic_batch[row_index_tensor].detach().cpu().numpy().astype(np.int32, copy=False)
-        valid_cpu = valid_batch[row_index_tensor].detach().cpu().numpy().astype(np.bool_, copy=False)
-
-        for offset, actor_id in enumerate(actor_ids):
-            published_observations[actor_id] = self._materialize_observation(
-                actor_id=actor_id,
-                step_id=step_id,
-                depth_2d=depth_cpu[offset],
-                delta_2d=delta_cpu[offset],
-                semantic_2d=semantic_cpu[offset],
-                valid_2d=valid_cpu[offset],
-            )
-
-    def batch_step_tensor(
-        self,
-        actions: tuple[Action, ...],
-        step_id: int,
-        *,
-        publish_actor_ids: tuple[int, ...] = (),
-    ) -> tuple[SdfDagTensorStepBatch, tuple[StepResult, ...]]:
-        """Step actors and return a CUDA observation batch for canonical training."""
-        batch_started_at = time.perf_counter()
-        published_observations: dict[int, DistanceMatrix] = {}
-        observation_tensors_by_actor: dict[int, Any] = {}
-        results_by_actor: dict[int, StepResult] = {}
-        reward_components_by_actor: dict[int, Any] = {}
-
-        active_actor_ids: list[int] = []
-        publish_actor_set = set(publish_actor_ids)
-
-        for idx, action in enumerate(actions):
-            actor_id = int(action.env_ids[0]) if len(action.env_ids) > 0 else idx
-            if self._needs_reset_mask[actor_id]:
-                obs_tensor, published = self.reset_tensor(
-                    int(self._episode_ids[actor_id]) + 1,
-                    actor_id=actor_id,
-                    materialize=actor_id in publish_actor_set,
-                )
-                observation_tensors_by_actor[actor_id] = obs_tensor
-                if published is not None:
-                    published_observations[actor_id] = published
-                results_by_actor[actor_id] = StepResult(
-                    step_id=step_id,
-                    env_id=actor_id,
-                    episode_id=int(self._episode_ids[actor_id]),
-                    done=False,
-                    truncated=False,
-                    reward=0.0,
-                    episode_return=0.0,
-                    timestamp=time.time(),
-                )
-                continue
-
-            active_actor_ids.append(actor_id)
-
-        if active_actor_ids:
-            actor_indices_t = self._torch.as_tensor(active_actor_ids, device=self._device, dtype=self._torch.long)
-            previous_positions_t = self._actor_positions[actor_indices_t].clone()
-            previous_yaws_t = self._actor_yaws[actor_indices_t].clone()
 
             # Vectorized kinematics
             lin_actions_list = []
@@ -988,16 +783,16 @@ class SdfDagBackend(SimulatorBackend):
             cos_yaw = self._torch.cos(yaws).unsqueeze(1)
             sin_yaw = self._torch.sin(yaws).unsqueeze(1)
             base_dirs = self._ray_dirs_local.unsqueeze(0).expand(actor_count, -1, -1)
-            dirs_world = self._ray_dirs_world[:actor_count]
+            origins, dirs_world, out_distances, out_semantics = self._scratch_slot_views(
+                scratch_slot=0,
+                actor_count=actor_count,
+            )
             dirs_world[..., 0] = base_dirs[..., 0] * cos_yaw + base_dirs[..., 2] * sin_yaw
             dirs_world[..., 1] = base_dirs[..., 1]
             dirs_world[..., 2] = -base_dirs[..., 0] * sin_yaw + base_dirs[..., 2] * cos_yaw
 
-            origins = self._ray_origins[:actor_count]
             origins.copy_(positions.unsqueeze(1).expand(-1, self._n_rays, -1))
 
-            out_distances = self._out_distances[:actor_count]
-            out_semantics = self._out_semantics[:actor_count]
             dag_tensor = self._require_dag_tensor()
             self._torch_sdf.cast_rays(
                 dag_tensor,
@@ -1045,11 +840,11 @@ class SdfDagBackend(SimulatorBackend):
                 dirs_coll[..., 1] = base_coll[..., 1]
                 dirs_coll[..., 2] = -base_coll[..., 0] * sin_coll + base_coll[..., 2] * cos_coll
 
-                origins_coll = self._ray_origins[:coll_actor_count] # reuse scratch
+                origins_coll, _dirs_world_coll_unused, out_dist_coll, out_sem_coll = self._scratch_slot_views(
+                    scratch_slot=0,
+                    actor_count=coll_actor_count,
+                )
                 origins_coll.copy_(pos_coll.unsqueeze(1).expand(-1, self._n_rays, -1))
-
-                out_dist_coll = self._out_distances[:coll_actor_count] # reuse scratch
-                out_sem_coll = self._out_semantics[:coll_actor_count] # reuse scratch
 
                 self._torch_sdf.cast_rays(
                     dag_tensor, origins_coll, dirs_coll, out_dist_coll, out_sem_coll,
@@ -1099,7 +894,8 @@ class SdfDagBackend(SimulatorBackend):
             self._prev_structure_band_ratios[actor_indices_t] = structure_band_ratios_t
             self._prev_forward_structure_ratios[actor_indices_t] = forward_structure_ratios_t
 
-            episode_ids_cpu, truncated_cpu, rewards_cpu, episode_returns_cpu = self._extract_step_result_scalars(
+            result_rows = self._materialize_step_result_rows(
+                env_ids=actor_indices_t,
                 actor_indices=actor_indices_t,
                 rewards=rewards_t,
                 truncated_mask=truncated_mask_t,
@@ -1108,17 +904,18 @@ class SdfDagBackend(SimulatorBackend):
             publish_rows: list[int] = []
             publish_actor_ids_list: list[int] = []
 
-            for i, actor_id in enumerate(active_actor_ids):
+            for i, row in enumerate(result_rows):
+                actor_id = int(row[0])
                 observation_tensors_by_actor[actor_id] = obs_batch_t[i]
                 reward_components_by_actor[actor_id] = components_t[i]
                 results_by_actor[actor_id] = StepResult(
                     step_id=step_id,
                     env_id=actor_id,
-                    episode_id=episode_ids_cpu[i],
+                    episode_id=int(row[1]),
                     done=False,
-                    truncated=bool(truncated_cpu[i]),
-                    reward=float(rewards_cpu[i]),
-                    episode_return=float(episode_returns_cpu[i]),
+                    truncated=bool(row[2]),
+                    reward=float(row[3]),
+                    episode_return=float(row[4]),
                     timestamp=time.time(),
                 )
 
@@ -1144,7 +941,7 @@ class SdfDagBackend(SimulatorBackend):
             ordered_observations.append(observation_tensors_by_actor[actor_id])
             ordered_results.append(results_by_actor[actor_id])
 
-        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(ordered_results)
+        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor, env_id_tensor = self._build_result_tensors(ordered_results)
 
         # Reward component tensor packing
         reward_component_tensor = self._torch.zeros((len(actions), 9), device=self._device, dtype=self._torch.float32)
@@ -1165,6 +962,7 @@ class SdfDagBackend(SimulatorBackend):
                 done_tensor=done_tensor,
                 truncated_tensor=truncated_tensor,
                 episode_id_tensor=episode_id_tensor,
+                env_id_tensor=env_id_tensor,
                 reward_component_tensor=reward_component_tensor,
                 published_observations=published_observations,
             ),
@@ -1176,6 +974,8 @@ class SdfDagBackend(SimulatorBackend):
         action_tensor: Any,
         step_id: int,
         *,
+        actor_indices: Any | None = None,
+        scratch_slot: int = 0,
         publish_actor_ids: tuple[int, ...] = (),
     ) -> tuple[SdfDagTensorStepBatch, tuple[StepResult, ...]]:
         """Step actors from a tensor/array command batch without Python Action objects."""
@@ -1187,18 +987,20 @@ class SdfDagBackend(SimulatorBackend):
         if actor_count > self._n_actors:
             msg = f"action_tensor batch size {actor_count} exceeds configured actors {self._n_actors}"
             raise ValueError(msg)
+        batch_actor_indices_t = self._coerce_batch_actor_indices(actor_count=actor_count, actor_indices=actor_indices)
 
         ordered_observations: list[Any | None] = [None] * actor_count
         ordered_results: list[StepResult | None] = [None] * actor_count
         reward_component_tensor = self._torch.zeros((actor_count, 9), device=self._device, dtype=self._torch.float32)
-        batch_actor_indices_t = self._torch.arange(actor_count, device=self._device, dtype=self._torch.long)
-        reset_local_indices_t = self._needs_reset_mask[batch_actor_indices_t].nonzero(as_tuple=False).flatten()
+        reset_local_indices_t = self._needs_reset_mask.index_select(0, batch_actor_indices_t).nonzero(as_tuple=False).flatten()
         if reset_local_indices_t.numel() > 0:
             self._advance_reset_bookkeeping(int(reset_local_indices_t.numel()))
-            reset_local_indices_t = self._needs_reset_mask[batch_actor_indices_t].nonzero(as_tuple=False).flatten()
+            reset_local_indices_t = self._needs_reset_mask.index_select(0, batch_actor_indices_t).nonzero(as_tuple=False).flatten()
             if reset_local_indices_t.numel() > 0:
                 self._reset_tensor_actor_batch(
                     actor_indices=batch_actor_indices_t.index_select(0, reset_local_indices_t),
+                    local_rows=reset_local_indices_t,
+                    scratch_slot=scratch_slot,
                     step_id=step_id,
                     publish_actor_set=publish_actor_set,
                     ordered_observations=ordered_observations,
@@ -1206,7 +1008,7 @@ class SdfDagBackend(SimulatorBackend):
                     published_observations=published_observations,
                 )
 
-        active_local_indices_t = self._needs_reset_mask[batch_actor_indices_t].logical_not().nonzero(as_tuple=False).flatten()
+        active_local_indices_t = self._needs_reset_mask.index_select(0, batch_actor_indices_t).logical_not().nonzero(as_tuple=False).flatten()
         if active_local_indices_t.numel() > 0:
             actor_indices_t = batch_actor_indices_t.index_select(0, active_local_indices_t)
             previous_positions_t = self._actor_positions.index_select(0, actor_indices_t).clone()
@@ -1229,16 +1031,16 @@ class SdfDagBackend(SimulatorBackend):
             cos_yaw = self._torch.cos(yaws).unsqueeze(1)
             sin_yaw = self._torch.sin(yaws).unsqueeze(1)
             base_dirs = self._ray_dirs_local.unsqueeze(0).expand(active_count, -1, -1)
-            dirs_world = self._ray_dirs_world[:active_count]
+            origins, dirs_world, out_distances, out_semantics = self._scratch_slot_views(
+                scratch_slot=scratch_slot,
+                actor_count=active_count,
+            )
             dirs_world[..., 0] = base_dirs[..., 0] * cos_yaw + base_dirs[..., 2] * sin_yaw
             dirs_world[..., 1] = base_dirs[..., 1]
             dirs_world[..., 2] = -base_dirs[..., 0] * sin_yaw + base_dirs[..., 2] * cos_yaw
 
-            origins = self._ray_origins[:active_count]
             origins.copy_(positions.unsqueeze(1).expand(-1, self._n_rays, -1))
 
-            out_distances = self._out_distances[:active_count]
-            out_semantics = self._out_semantics[:active_count]
             self._torch_sdf.cast_rays(
                 self._require_dag_tensor(),
                 origins,
@@ -1299,26 +1101,29 @@ class SdfDagBackend(SimulatorBackend):
             self._prev_structure_band_ratios[actor_indices_t] = structure_band_ratios_t
             self._prev_forward_structure_ratios[actor_indices_t] = forward_structure_ratios_t
 
-            episode_ids_cpu, truncated_cpu, rewards_cpu, episode_returns_cpu = self._extract_step_result_scalars(
+            result_rows = self._materialize_step_result_rows(
+                local_rows=active_local_indices_t,
+                env_ids=actor_indices_t,
                 actor_indices=actor_indices_t,
                 rewards=rewards_t,
                 truncated_mask=truncated_mask_t,
             )
             reward_component_tensor[active_local_indices_t] = components_t
 
-            active_local_indices_cpu = active_local_indices_t.detach().cpu().tolist()
             publish_rows: list[int] = []
             publish_actor_ids_list: list[int] = []
-            for i, actor_id in enumerate(active_local_indices_cpu):
-                ordered_observations[actor_id] = obs_batch_t[i]
-                ordered_results[actor_id] = StepResult(
+            for i, row in enumerate(result_rows):
+                local_row = int(row[0])
+                actor_id = int(row[1])
+                ordered_observations[local_row] = obs_batch_t[i]
+                ordered_results[local_row] = StepResult(
                     step_id=step_id,
                     env_id=actor_id,
-                    episode_id=episode_ids_cpu[i],
+                    episode_id=int(row[2]),
                     done=False,
-                    truncated=bool(truncated_cpu[i]),
-                    reward=float(rewards_cpu[i]),
-                    episode_return=float(episode_returns_cpu[i]),
+                    truncated=bool(row[3]),
+                    reward=float(row[4]),
+                    episode_return=float(row[5]),
                     timestamp=time.time(),
                 )
                 if actor_id in publish_actor_set:
@@ -1342,7 +1147,7 @@ class SdfDagBackend(SimulatorBackend):
             msg = "tensor action step did not populate all actor outputs"
             raise RuntimeError(msg)
 
-        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor = self._build_result_tensors(finalized_results)
+        reward_tensor, done_tensor, truncated_tensor, episode_id_tensor, env_id_tensor = self._build_result_tensors(finalized_results)
 
         self._record_perf_sample(
             batch_seconds=time.perf_counter() - batch_started_at,
@@ -1356,6 +1161,7 @@ class SdfDagBackend(SimulatorBackend):
                 done_tensor=done_tensor,
                 truncated_tensor=truncated_tensor,
                 episode_id_tensor=episode_id_tensor,
+                env_id_tensor=env_id_tensor,
                 reward_component_tensor=reward_component_tensor,
                 published_observations=published_observations,
             ),
@@ -1374,6 +1180,8 @@ class SdfDagBackend(SimulatorBackend):
         self,
         *,
         actor_indices: Any,
+        local_rows: Any,
+        scratch_slot: int,
         step_id: int,
         publish_actor_set: set[int],
         ordered_observations: list[Any | None],
@@ -1399,7 +1207,10 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_angular_vels[actor_indices] = 0.0
         self._needs_reset_mask[actor_indices] = False
 
-        depth_batch, semantic_batch, valid_batch = self._cast_actor_batch_indexed_tensors(actor_indices)
+        depth_batch, semantic_batch, valid_batch = self._cast_actor_batch_indexed_tensors(
+            actor_indices,
+            scratch_slot=scratch_slot,
+        )
         current_clearances = depth_batch.amin(dim=(1, 2)).mul(self._max_distance)
         obs_batch_t, deltas_batch_t = self._consume_observation_batch(
             actor_indices=actor_indices,
@@ -1415,16 +1226,21 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_structure_band_ratios[actor_indices] = structure_band_ratios_t
         self._prev_forward_structure_ratios[actor_indices] = forward_structure_ratios_t
 
-        actor_ids = actor_indices.detach().cpu().tolist()
-        episode_ids_cpu = self._episode_ids.index_select(0, actor_indices).detach().cpu().tolist()
+        result_rows = self._materialize_reset_result_rows(
+            local_rows=local_rows,
+            env_ids=actor_indices,
+            actor_indices=actor_indices,
+        )
         publish_rows: list[int] = []
         publish_actor_ids_list: list[int] = []
-        for i, actor_id in enumerate(actor_ids):
-            ordered_observations[actor_id] = obs_batch_t[i]
-            ordered_results[actor_id] = StepResult(
+        for i, row in enumerate(result_rows):
+            local_row = int(row[0])
+            actor_id = int(row[1])
+            ordered_observations[local_row] = obs_batch_t[i]
+            ordered_results[local_row] = StepResult(
                 step_id=step_id,
                 env_id=actor_id,
-                episode_id=episode_ids_cpu[i],
+                episode_id=int(row[2]),
                 done=False,
                 truncated=False,
                 reward=0.0,
@@ -1459,13 +1275,13 @@ class SdfDagBackend(SimulatorBackend):
     def _build_result_tensors(
         self,
         ordered_results: list[StepResult],
-    ) -> tuple[Any, Any, Any, Any]:
+    ) -> tuple[Any, Any, Any, Any, Any]:
         """Pack per-actor step outcomes into canonical tensor-native rollout fields."""
         if not ordered_results:
             empty_f32 = self._torch.empty((0,), device=self._device, dtype=self._torch.float32)
             empty_bool = self._torch.empty((0,), device=self._device, dtype=self._torch.bool)
             empty_i64 = self._torch.empty((0,), device=self._device, dtype=self._torch.int64)
-            return empty_f32, empty_bool, empty_bool, empty_i64
+            return empty_f32, empty_bool, empty_bool, empty_i64, empty_i64
 
         reward_tensor = self._torch.tensor(
             [result.reward for result in ordered_results],
@@ -1487,7 +1303,12 @@ class SdfDagBackend(SimulatorBackend):
             device=self._device,
             dtype=self._torch.int64,
         )
-        return reward_tensor, done_tensor, truncated_tensor, episode_id_tensor
+        env_id_tensor = self._torch.tensor(
+            [result.env_id for result in ordered_results],
+            device=self._device,
+            dtype=self._torch.int64,
+        )
+        return reward_tensor, done_tensor, truncated_tensor, episode_id_tensor, env_id_tensor
 
     def close(self) -> None:
         self._dag_tensor = None
@@ -1827,6 +1648,30 @@ class SdfDagBackend(SimulatorBackend):
     def _build_ray_directions(self) -> Any:
         return self._torch.from_numpy(build_spherical_ray_directions(self._az_bins, self._el_bins))
 
+    def _scratch_slot_views(
+        self,
+        *,
+        scratch_slot: int,
+        actor_count: int,
+    ) -> tuple[Any, Any, Any, Any]:
+        scratch_slot_count = getattr(self, "_scratch_slot_count", _SCRATCH_SLOT_COUNT)
+        if scratch_slot < 0 or scratch_slot >= scratch_slot_count:
+            msg = f"scratch_slot must stay within [0, {scratch_slot_count - 1}]"
+            raise ValueError(msg)
+        if self._ray_origins.ndim == 3:
+            return (
+                self._ray_origins[:actor_count],
+                self._ray_dirs_world[:actor_count],
+                self._out_distances[:actor_count],
+                self._out_semantics[:actor_count],
+            )
+        return (
+            self._ray_origins[scratch_slot, :actor_count],
+            self._ray_dirs_world[scratch_slot, :actor_count],
+            self._out_distances[scratch_slot, :actor_count],
+            self._out_semantics[scratch_slot, :actor_count],
+        )
+
     def _validate_cast_rays_inputs(
         self,
         dag_tensor: Any,
@@ -1897,6 +1742,8 @@ class SdfDagBackend(SimulatorBackend):
     def _cast_actor_batch_tensors(
         self,
         actor_ids: tuple[int, ...],
+        *,
+        scratch_slot: int = 0,
     ) -> tuple[Any, Any, Any]:
         actor_count = len(actor_ids)
         yaws = self._actor_yaws[list(actor_ids)]
@@ -1905,16 +1752,16 @@ class SdfDagBackend(SimulatorBackend):
         cos_yaw = self._torch.cos(yaws).unsqueeze(1)
         sin_yaw = self._torch.sin(yaws).unsqueeze(1)
         base_dirs = self._ray_dirs_local.unsqueeze(0).expand(actor_count, -1, -1)
-        dirs_world = self._ray_dirs_world[:actor_count]
+        origins, dirs_world, out_distances, out_semantics = self._scratch_slot_views(
+            scratch_slot=scratch_slot,
+            actor_count=actor_count,
+        )
         dirs_world[..., 0] = base_dirs[..., 0] * cos_yaw + base_dirs[..., 2] * sin_yaw
         dirs_world[..., 1] = base_dirs[..., 1]
         dirs_world[..., 2] = -base_dirs[..., 0] * sin_yaw + base_dirs[..., 2] * cos_yaw
 
-        origins = self._ray_origins[:actor_count]
         origins.copy_(positions.unsqueeze(1).expand(-1, self._n_rays, -1))
 
-        out_distances = self._out_distances[:actor_count]
-        out_semantics = self._out_semantics[:actor_count]
         dag_tensor = self._require_dag_tensor()
         self._validate_cast_rays_inputs(dag_tensor, origins, dirs_world, out_distances, out_semantics)
         self._torch_sdf.cast_rays(
@@ -1936,6 +1783,8 @@ class SdfDagBackend(SimulatorBackend):
     def _cast_actor_batch_indexed_tensors(
         self,
         actor_indices: Any,
+        *,
+        scratch_slot: int = 0,
     ) -> tuple[Any, Any, Any]:
         actor_count = int(actor_indices.shape[0])
         yaws = self._actor_yaws.index_select(0, actor_indices)
@@ -1944,16 +1793,16 @@ class SdfDagBackend(SimulatorBackend):
         cos_yaw = self._torch.cos(yaws).unsqueeze(1)
         sin_yaw = self._torch.sin(yaws).unsqueeze(1)
         base_dirs = self._ray_dirs_local.unsqueeze(0).expand(actor_count, -1, -1)
-        dirs_world = self._ray_dirs_world[:actor_count]
+        origins, dirs_world, out_distances, out_semantics = self._scratch_slot_views(
+            scratch_slot=scratch_slot,
+            actor_count=actor_count,
+        )
         dirs_world[..., 0] = base_dirs[..., 0] * cos_yaw + base_dirs[..., 2] * sin_yaw
         dirs_world[..., 1] = base_dirs[..., 1]
         dirs_world[..., 2] = -base_dirs[..., 0] * sin_yaw + base_dirs[..., 2] * cos_yaw
 
-        origins = self._ray_origins[:actor_count]
         origins.copy_(positions.unsqueeze(1).expand(-1, self._n_rays, -1))
 
-        out_distances = self._out_distances[:actor_count]
-        out_semantics = self._out_semantics[:actor_count]
         dag_tensor = self._require_dag_tensor()
         self._validate_cast_rays_inputs(dag_tensor, origins, dirs_world, out_distances, out_semantics)
         self._torch_sdf.cast_rays(
