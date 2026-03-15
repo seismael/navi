@@ -9,7 +9,6 @@ the engine's canonical ``(B, 3, Az, El)`` DistanceMatrix input.
 """
 
 from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 

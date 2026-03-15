@@ -40,6 +40,7 @@ class ImagePanel(pg.GraphicsLayoutWidget):
         self._view.setMenuEnabled(False)
 
         self._img_item = pg.ImageItem()
+        self._img_item.setAutoDownsample(False)
         self._view.addItem(self._img_item)
 
         # Action intention arrow overlay

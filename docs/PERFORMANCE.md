@@ -59,6 +59,8 @@ Forbidden patterns on the canonical hot path:
 - new transport hops inserted into direct trainer stepping
 - per-step allocation churn when reusable buffers are practical
 - collision-triggered subset re-casts when rollback to the previous safe pose already preserves the non-terminal wall-contact signal the actor needs
+- viewer-driven observation remaps, re-normalization, or contract branching inside environment or actor hot-path code
+- dashboard-required CPU materialization or cadence checks that alter rollout math instead of staying inside passive publication seams
 
 ### 3.3 Treat PPO Update As Part Of The Hot Path
 
@@ -130,6 +132,8 @@ Human-facing tooling may consume data, but it must not shape the runtime.
 - dashboards may receive coarse heartbeat republishing during optimizer windows
 - those heartbeats are diagnostic-only, not new environment steps
 - frame dropping is allowed; training stall is not
+- observation publication is optional and passive; canonical training and inference must remain correct and throughput-safe when the auditor is absent
+- viewer requirements must be implemented by observer-side transforms over the published spherical contract, not by changing core math or environment semantics
 
 ## 4. Current Bottleneck Interpretation
 
@@ -202,6 +206,7 @@ for the canonical tensor path:
 - final public `StepResult` materialization on the tensor path should use one packed host mirror for result rows rather than separate per-field `.cpu().tolist()` extractions
 - canonical trainer-facing tensor steps should not request `StepResult` materialization at all; reward, truncation, env-id, and episode-id columns must stay on-device and drive rollout bookkeeping directly unless a non-training caller explicitly needs public result objects
 - eager tensor micro-kernels around `torch_sdf.cast_rays()` should be fused with `torch.compile` on the canonical path when the helper graph remains pure PyTorch tensor code
+- canonical environment helper compilation should target pure tensor functions with explicit scalar parameters rather than bound instance methods so the compiled surface does not depend on Python object state capture in the rollout hot path
 
 ## 5. Benchmark Gates
 

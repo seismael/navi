@@ -167,7 +167,7 @@ class PpoTrainingMetrics:
 
 @dataclass(frozen=True)
 class _RolloutHostBatch:
-    """Detached rollout tensors plus optional sparse CPU action mirrors."""
+    """Detached rollout tensors retained on device for rollout bookkeeping."""
 
     embedding_tensor: torch.Tensor
     action_tensor: torch.Tensor
@@ -175,18 +175,31 @@ class _RolloutHostBatch:
     log_prob_tensor: torch.Tensor
     value_tensor: torch.Tensor
     intrinsic_reward_tensor: torch.Tensor
-    action_cpu_tensor: torch.Tensor | None
 
 
 @dataclass(frozen=True)
-class _RolloutHostScalarBatch:
-    """CPU mirrors for the small scalar subset still needed by Python bookkeeping."""
+class _RolloutScalarBatch:
+    """Selected rollout telemetry tensors retained on device until materialization."""
 
     raw_reward_tensor: torch.Tensor | None
     shaped_reward_tensor: torch.Tensor | None
     intrinsic_reward_tensor: torch.Tensor | None
     loop_similarity_tensor: torch.Tensor | None
     done_tensor: torch.Tensor | None
+
+
+@dataclass(frozen=True)
+class _StepTelemetryHostBatch:
+    """One packed CPU mirror for sparse step telemetry publication."""
+
+    raw_reward_tensor: torch.Tensor | None
+    shaped_reward_tensor: torch.Tensor | None
+    intrinsic_reward_tensor: torch.Tensor | None
+    loop_similarity_tensor: torch.Tensor | None
+    done_tensor: torch.Tensor | None
+    forward_velocity_tensor: torch.Tensor | None
+    yaw_velocity_tensor: torch.Tensor | None
+    reward_component_tensor: torch.Tensor | None
 
 
 @dataclass(frozen=True)
@@ -812,7 +825,12 @@ class PpoTrainer:
         """Return the actor ids whose low-rate dashboard observations may be published."""
         if not self._config.emit_observation_stream:
             return ()
-        return tuple(range(self._n_actors))
+        if self._config.telemetry_all_actors:
+            return tuple(range(self._n_actors))
+        selected_actor = int(self._config.telemetry_actor_id)
+        if selected_actor < 0 or selected_actor >= self._n_actors:
+            return ()
+        return (selected_actor,)
 
     def _should_publish_actor_telemetry(self, actor_id: int) -> bool:
         if self._config.telemetry_all_actors:
@@ -963,15 +981,11 @@ class PpoTrainer:
         values: torch.Tensor,
         intrinsic_rewards: torch.Tensor,
         aux_batch: torch.Tensor,
-        action_cpu_actor_indices: torch.Tensor | None,
     ) -> _RolloutHostBatch:
-        """Detach rollout tensors while mirroring only sparse telemetry actions to CPU."""
+        """Detach rollout tensors while keeping sparse telemetry actions on device."""
         action_tensor = actions.detach()
         embedding_tensor = embeddings.detach()
         aux_tensor = aux_batch.detach()
-        action_cpu_tensor = None
-        if action_cpu_actor_indices is not None and int(action_cpu_actor_indices.numel()) > 0:
-            action_cpu_tensor = action_tensor.index_select(0, action_cpu_actor_indices).to(device="cpu", dtype=torch.float32)
 
         return _RolloutHostBatch(
             embedding_tensor=embedding_tensor,
@@ -980,7 +994,6 @@ class PpoTrainer:
             log_prob_tensor=log_probs.detach(),
             value_tensor=values.detach(),
             intrinsic_reward_tensor=intrinsic_rewards.detach(),
-            action_cpu_tensor=action_cpu_tensor,
         )
 
     def _extract_host_rollout_scalars(
@@ -992,33 +1005,79 @@ class PpoTrainer:
         loop_similarities: torch.Tensor,
         done_flags: torch.Tensor,
         actor_indices: torch.Tensor | None,
-    ) -> _RolloutHostScalarBatch:
-        """Batch the unavoidable device-to-host scalar transfer for one rollout tick."""
+    ) -> _RolloutScalarBatch:
+        """Select sparse telemetry tensors while keeping them on device."""
         if actor_indices is not None and int(actor_indices.numel()) > 0:
-            packed = torch.stack(
-                (
-                    raw_rewards.index_select(0, actor_indices),
-                    shaped_rewards.index_select(0, actor_indices),
-                    intrinsic_rewards.index_select(0, actor_indices),
-                    loop_similarities.index_select(0, actor_indices),
-                    done_flags.index_select(0, actor_indices).to(dtype=torch.float32),
-                ),
-                dim=1,
-            ).detach().to(device="cpu", dtype=torch.float32)
-            return _RolloutHostScalarBatch(
-                raw_reward_tensor=packed[:, 0],
-                shaped_reward_tensor=packed[:, 1],
-                intrinsic_reward_tensor=packed[:, 2],
-                loop_similarity_tensor=packed[:, 3],
-                done_tensor=packed[:, 4] > 0.5,
+            return _RolloutScalarBatch(
+                raw_reward_tensor=raw_rewards.index_select(0, actor_indices).detach(),
+                shaped_reward_tensor=shaped_rewards.index_select(0, actor_indices).detach(),
+                intrinsic_reward_tensor=intrinsic_rewards.index_select(0, actor_indices).detach(),
+                loop_similarity_tensor=loop_similarities.index_select(0, actor_indices).detach(),
+                done_tensor=done_flags.index_select(0, actor_indices).detach(),
             )
 
-        return _RolloutHostScalarBatch(
+        return _RolloutScalarBatch(
             raw_reward_tensor=None,
             shaped_reward_tensor=None,
             intrinsic_reward_tensor=None,
             loop_similarity_tensor=None,
             done_tensor=None,
+        )
+
+    def _materialize_step_telemetry_host_batch(
+        self,
+        *,
+        scalar_batch: _RolloutScalarBatch,
+        action_tensor: torch.Tensor,
+        reward_component_tensor: torch.Tensor | None,
+        actor_indices: torch.Tensor,
+    ) -> _StepTelemetryHostBatch:
+        """Batch one sparse telemetry host transfer immediately before publication."""
+        if (
+            scalar_batch.raw_reward_tensor is None
+            or scalar_batch.shaped_reward_tensor is None
+            or scalar_batch.intrinsic_reward_tensor is None
+            or scalar_batch.loop_similarity_tensor is None
+            or scalar_batch.done_tensor is None
+            or int(actor_indices.numel()) == 0
+        ):
+            return _StepTelemetryHostBatch(
+                raw_reward_tensor=None,
+                shaped_reward_tensor=None,
+                intrinsic_reward_tensor=None,
+                loop_similarity_tensor=None,
+                done_tensor=None,
+                forward_velocity_tensor=None,
+                yaw_velocity_tensor=None,
+                reward_component_tensor=None,
+            )
+
+        column_tensors = [
+            scalar_batch.raw_reward_tensor.to(dtype=torch.float32),
+            scalar_batch.shaped_reward_tensor.to(dtype=torch.float32),
+            scalar_batch.intrinsic_reward_tensor.to(dtype=torch.float32),
+            scalar_batch.loop_similarity_tensor.to(dtype=torch.float32),
+            scalar_batch.done_tensor.to(dtype=torch.float32),
+            action_tensor.index_select(0, actor_indices)[:, 0].detach().to(dtype=torch.float32),
+            action_tensor.index_select(0, actor_indices)[:, 3].detach().to(dtype=torch.float32),
+        ]
+        component_count = 0
+        if reward_component_tensor is not None:
+            selected_components = reward_component_tensor.index_select(0, actor_indices).detach().to(dtype=torch.float32)
+            component_count = int(selected_components.shape[1])
+            column_tensors.extend(selected_components[:, idx] for idx in range(component_count))
+
+        packed = torch.stack(column_tensors, dim=1).detach().to(device="cpu", dtype=torch.float32)
+        reward_components_cpu = packed[:, 7 : 7 + component_count] if component_count > 0 else None
+        return _StepTelemetryHostBatch(
+            raw_reward_tensor=packed[:, 0],
+            shaped_reward_tensor=packed[:, 1],
+            intrinsic_reward_tensor=packed[:, 2],
+            loop_similarity_tensor=packed[:, 3],
+            done_tensor=packed[:, 4] > 0.5,
+            forward_velocity_tensor=packed[:, 5],
+            yaw_velocity_tensor=packed[:, 6],
+            reward_component_tensor=reward_components_cpu,
         )
 
     def _extract_completed_episode_host_batch(
@@ -1175,7 +1234,6 @@ class PpoTrainer:
                         values=pending.values,
                         intrinsic_rewards=pending.intrinsic_rewards,
                         aux_batch=pending.aux_tensor,
-                        action_cpu_actor_indices=pending.step_telemetry_local_indices,
                     )
                     pack_ms += (time.perf_counter() - t_pack_start) * 1000
 
@@ -1215,8 +1273,7 @@ class PpoTrainer:
                     truncateds = pending.step_batch.truncated_tensor.to(device=reward_device, dtype=torch.bool)
                     done_or_truncated = dones | truncateds
 
-                    t_host_start = time.perf_counter()
-                    host_scalar_batch = self._extract_host_rollout_scalars(
+                    selected_scalar_batch = self._extract_host_rollout_scalars(
                         raw_rewards=raw_rewards,
                         shaped_rewards=shaped_rewards,
                         intrinsic_rewards=host_batch.intrinsic_reward_tensor,
@@ -1224,7 +1281,6 @@ class PpoTrainer:
                         done_flags=done_or_truncated,
                         actor_indices=pending.step_telemetry_local_indices,
                     )
-                    host_extract_ms += (time.perf_counter() - t_host_start) * 1000
 
                     t_trans_start = time.perf_counter()
                     step_actor_indices = pending.step_batch.env_id_tensor.to(device=self._device, dtype=torch.int64)
@@ -1260,24 +1316,26 @@ class PpoTrainer:
                     )
 
                     if publish_step_telemetry and int(pending.step_telemetry_local_indices.numel()) > 0:
-                        if host_batch.action_cpu_tensor is None:
-                            raise RuntimeError("action_cpu_tensor is required for telemetry emission")
                         if (
-                            host_scalar_batch.raw_reward_tensor is None
-                            or host_scalar_batch.shaped_reward_tensor is None
-                            or host_scalar_batch.intrinsic_reward_tensor is None
-                            or host_scalar_batch.loop_similarity_tensor is None
-                            or host_scalar_batch.done_tensor is None
+                            selected_scalar_batch.raw_reward_tensor is None
+                            or selected_scalar_batch.shaped_reward_tensor is None
+                            or selected_scalar_batch.intrinsic_reward_tensor is None
+                            or selected_scalar_batch.loop_similarity_tensor is None
+                            or selected_scalar_batch.done_tensor is None
                         ):
                             raise RuntimeError("telemetry scalar extraction is required for step telemetry emission")
+                        t_host_start = time.perf_counter()
+                        host_scalar_batch = self._materialize_step_telemetry_host_batch(
+                            scalar_batch=selected_scalar_batch,
+                            action_tensor=host_batch.action_tensor,
+                            reward_component_tensor=reward_component_tensor,
+                            actor_indices=pending.step_telemetry_local_indices,
+                        )
+                        host_extract_ms += (time.perf_counter() - t_host_start) * 1000
                         selected_local_rows = pending.step_telemetry_local_indices.detach().to(device="cpu", dtype=torch.int64).tolist()
                         selected_actor_ids = step_actor_indices.index_select(0, pending.step_telemetry_local_indices).detach().to(device="cpu", dtype=torch.int64).tolist()
                         selected_episode_ids = pending.step_batch.episode_id_tensor.index_select(0, pending.step_telemetry_local_indices).detach().to(device="cpu", dtype=torch.int64).tolist()
-                        telemetry_reward_components = (
-                            reward_component_tensor.index_select(0, pending.step_telemetry_local_indices).detach().to(device="cpu", dtype=torch.float32)
-                            if reward_component_tensor is not None
-                            else None
-                        )
+                        telemetry_reward_components = host_scalar_batch.reward_component_tensor
                         for row, actor_id in enumerate(selected_actor_ids):
                             loop_similarity = float(host_scalar_batch.loop_similarity_tensor[row])
                             reward_components = None
@@ -1295,8 +1353,8 @@ class PpoTrainer:
                                 is_loop=(loop_similarity > self._config.loop_threshold),
                                 beta=self._reward_shaper.beta,
                                 done=bool(host_scalar_batch.done_tensor[row]),
-                                forward_vel=float(host_batch.action_cpu_tensor[row, 0]),
-                                yaw_vel=float(host_batch.action_cpu_tensor[row, 3]),
+                                forward_vel=float(host_scalar_batch.forward_velocity_tensor[row]),
+                                yaw_vel=float(host_scalar_batch.yaw_velocity_tensor[row]),
                                 exploration_reward=0.0 if reward_components is None else float(reward_components[0]),
                                 progress_reward=0.0 if reward_components is None else float(reward_components[1]),
                                 clearance_reward=0.0 if reward_components is None else float(reward_components[2]),

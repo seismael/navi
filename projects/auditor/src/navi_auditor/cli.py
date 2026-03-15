@@ -485,7 +485,6 @@ def _capture_dashboard_frame(
                 960,
                 720,
                 pitch=msg.robot_pose.pitch,
-                max_distance_m=max_distance_m,
             )
             raw_img = depth_to_viridis(raw_depth.T, raw_valid.T)
             raw_img = cv2.resize(raw_img, (960, 240), interpolation=cv2.INTER_NEAREST)

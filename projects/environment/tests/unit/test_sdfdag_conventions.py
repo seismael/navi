@@ -196,6 +196,73 @@ def test_reset_uses_precomputed_spawn_yaw() -> None:
     assert float(backend._actor_yaws[0]) == pytest.approx(1.25)
 
 
+def test_reset_tensor_uses_tensor_ratios_when_materialization_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._initial_resets_remaining = 0
+    backend._maybe_rotate_scene = lambda *, is_natural: False  # type: ignore[method-assign]
+    backend._spawn_positions = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
+    backend._spawn_yaws = torch.tensor([0.25], dtype=torch.float32)
+    backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
+    backend._actor_yaws = torch.zeros((1,), dtype=torch.float32)
+    backend._episode_ids = torch.zeros((1,), dtype=torch.int64)
+    backend._actor_steps = torch.zeros((1,), dtype=torch.int32)
+    backend._prev_depth_tensors = torch.zeros((1, 2, 2), dtype=torch.float32)
+    backend._prev_min_distances = torch.zeros((1,), dtype=torch.float32)
+    backend._prev_structure_band_ratios = torch.zeros((1,), dtype=torch.float32)
+    backend._prev_forward_structure_ratios = torch.zeros((1,), dtype=torch.float32)
+    backend._episode_returns = torch.zeros((1,), dtype=torch.float32)
+    backend._visit_grid = torch.zeros((1, 1, 1), dtype=torch.uint8)
+    backend._prev_linear_vels = torch.zeros((1, 3), dtype=torch.float32)
+    backend._prev_angular_vels = torch.zeros((1, 3), dtype=torch.float32)
+    backend._needs_reset_mask = torch.zeros((1,), dtype=torch.bool)
+    backend._max_distance = 10.0
+    backend._proximity_distance_threshold = 1.0
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
+    backend._cast_actor_batch_tensors = lambda actor_ids: (  # type: ignore[method-assign]
+        torch.tensor([[[0.2, 0.3], [0.4, 0.5]]], dtype=torch.float32),
+        torch.zeros((1, 2, 2), dtype=torch.int32),
+        torch.ones((1, 2, 2), dtype=torch.bool),
+    )
+    backend._consume_actor_observation = lambda **kwargs: (  # type: ignore[method-assign]
+        torch.ones((3, 2, 2), dtype=torch.float32),
+        None,
+        torch.zeros((2, 2), dtype=torch.float32),
+    )
+    backend._compute_observation_ratios = lambda *, depth_batch, valid_batch: (  # type: ignore[method-assign]
+        torch.tensor([0.1], dtype=torch.float32),
+        torch.tensor([0.2], dtype=torch.float32),
+        torch.tensor([0.3], dtype=torch.float32),
+        torch.tensor([0.4], dtype=torch.float32),
+    )
+    backend._materialize_observation = lambda **kwargs: (_ for _ in ()).throw(AssertionError("not used"))  # type: ignore[method-assign]
+
+    monkeypatch.setattr(
+        "navi_environment.backends.sdfdag_backend._observation_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected numpy profile call")),
+    )
+
+    obs_tensor, published = backend.reset_tensor(episode_id=7, actor_id=0, materialize=False)
+
+    assert published is None
+    assert obs_tensor.shape == (3, 2, 2)
+    assert float(backend._prev_structure_band_ratios[0]) == pytest.approx(0.3)
+    assert float(backend._prev_forward_structure_ratios[0]) == pytest.approx(0.4)
+
+
+def test_select_publish_rows_returns_only_selected_actor_rows() -> None:
+    backend = object.__new__(SdfDagBackend)
+    backend._torch = torch
+
+    rows, actor_ids = backend._select_publish_rows(
+        actor_indices=torch.tensor([3, 1, 2, 0], dtype=torch.int64),
+        publish_actor_ids=(2, 0),
+    )
+
+    assert rows == [2, 3]
+    assert actor_ids == [2, 0]
+
+
 def test_starvation_penalty_triggers_only_beyond_threshold() -> None:
     assert _starvation_penalty(0.7, ratio_threshold=0.8, penalty_scale=1.5) < 0.0
     assert _starvation_penalty(0.9, ratio_threshold=0.8, penalty_scale=1.5) < 0.0

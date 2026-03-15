@@ -297,12 +297,12 @@ def train(
     telemetry_all_actors: bool = typer.Option(False, help="Emit telemetry for all actors (higher overhead)."),
     emit_observation_stream: bool = typer.Option(
         True,
-        help="Emit low-volume DistanceMatrix frames for the dashboard.",
+        help="Emit low-volume DistanceMatrix frames for the selected telemetry actor; use --telemetry-all-actors for diagnostic fan-out.",
     ),
     dashboard_observation_hz: float = typer.Option(
         10.0,
         min=1.0,
-        help="Target passive dashboard observation cadence in Hz for selector-visible actors.",
+        help="Target passive dashboard observation cadence in Hz for published observation actors.",
     ),
     emit_training_telemetry: bool = typer.Option(
         True,

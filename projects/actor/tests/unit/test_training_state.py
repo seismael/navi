@@ -344,7 +344,7 @@ def test_selected_step_telemetry_actor_indices_filter_to_selected_actor() -> Non
 
 
 def test_extract_host_rollout_scalars_uses_selected_actor_subset() -> None:
-    """Sparse rollout scalar extraction should mirror only the requested actor subset."""
+    """Sparse rollout scalar extraction should select only the requested actor subset on device."""
     trainer = _make_trainer()
     batch = trainer._extract_host_rollout_scalars(
         raw_rewards=torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=trainer._device),
@@ -360,6 +360,11 @@ def test_extract_host_rollout_scalars_uses_selected_actor_subset() -> None:
     assert batch.intrinsic_reward_tensor is not None
     assert batch.loop_similarity_tensor is not None
     assert batch.done_tensor is not None
+    assert batch.raw_reward_tensor.device == trainer._device
+    assert batch.shaped_reward_tensor.device == trainer._device
+    assert batch.intrinsic_reward_tensor.device == trainer._device
+    assert batch.loop_similarity_tensor.device == trainer._device
+    assert batch.done_tensor.device == trainer._device
     assert torch.equal(batch.raw_reward_tensor, torch.tensor([2.0, 4.0], dtype=torch.float32))
     assert torch.equal(batch.shaped_reward_tensor, torch.tensor([2.5, 4.5], dtype=torch.float32))
     assert torch.equal(batch.intrinsic_reward_tensor, torch.tensor([0.2, 0.4], dtype=torch.float32))
@@ -688,8 +693,8 @@ def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
     assert published[0].step_id == 0
 
 
-def test_observation_publish_actor_ids_publish_all_actors_for_selector_visibility() -> None:
-    """Canonical trainer should publish low-rate observation frames for every actor."""
+def test_observation_publish_actor_ids_defaults_to_selected_actor_only() -> None:
+    """Canonical trainer should default observation publication to the selected actor."""
     trainer = _make_trainer()
     trainer._n_actors = 4
     trainer._config.emit_observation_stream = False
@@ -698,7 +703,7 @@ def test_observation_publish_actor_ids_publish_all_actors_for_selector_visibilit
     trainer._config.emit_observation_stream = True
     trainer._config.telemetry_all_actors = False
     trainer._config.telemetry_actor_id = 2
-    assert trainer._observation_publish_actor_ids() == (0, 1, 2, 3)
+    assert trainer._observation_publish_actor_ids() == (2,)
 
     trainer._config.telemetry_all_actors = True
     assert trainer._observation_publish_actor_ids() == (0, 1, 2, 3)
@@ -847,7 +852,7 @@ def test_extract_host_rollout_scalars_skips_telemetry_columns_when_not_needed() 
 
 
 def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() -> None:
-    """Canonical trainer should batch the unavoidable scalar host copy for telemetry ticks."""
+    """Canonical trainer should keep selected telemetry scalars on device until final materialization."""
     trainer = _make_trainer()
 
     payload = trainer._extract_host_rollout_scalars(
@@ -863,16 +868,68 @@ def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() ->
     assert payload.intrinsic_reward_tensor is not None
     assert payload.loop_similarity_tensor is not None
     assert payload.done_tensor is not None
-    assert payload.raw_reward_tensor.device.type == "cpu"
-    assert payload.shaped_reward_tensor.device.type == "cpu"
-    assert payload.intrinsic_reward_tensor.device.type == "cpu"
-    assert payload.loop_similarity_tensor.device.type == "cpu"
-    assert payload.done_tensor.device.type == "cpu"
+    assert payload.raw_reward_tensor.device == trainer._device
+    assert payload.shaped_reward_tensor.device == trainer._device
+    assert payload.intrinsic_reward_tensor.device == trainer._device
+    assert payload.loop_similarity_tensor.device == trainer._device
+    assert payload.done_tensor.device == trainer._device
     assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32))
     assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
     assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32))
     assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32))
     assert torch.equal(payload.done_tensor, torch.tensor([True, False], dtype=torch.bool))
+
+
+def test_materialize_step_telemetry_host_batch_packs_selected_columns_once() -> None:
+    """Step telemetry host materialization should batch selected scalars, actions, and reward components once."""
+    trainer = _make_trainer()
+
+    scalar_batch = trainer._extract_host_rollout_scalars(
+        raw_rewards=torch.tensor([0.5, 1.5], dtype=torch.float32, device=trainer._device),
+        shaped_rewards=torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device),
+        intrinsic_rewards=torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device),
+        loop_similarities=torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device),
+        done_flags=torch.tensor([True, False], dtype=torch.bool, device=trainer._device),
+        actor_indices=torch.tensor([0, 1], dtype=torch.int64, device=trainer._device),
+    )
+
+    payload = trainer._materialize_step_telemetry_host_batch(
+        scalar_batch=scalar_batch,
+        action_tensor=torch.tensor(
+            [[7.0, 0.0, 0.0, 8.0], [9.0, 0.0, 0.0, 10.0]],
+            dtype=torch.float32,
+            device=trainer._device,
+        ),
+        reward_component_tensor=torch.tensor(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            dtype=torch.float32,
+            device=trainer._device,
+        ),
+        actor_indices=torch.tensor([0, 1], dtype=torch.int64, device=trainer._device),
+    )
+
+    assert payload.raw_reward_tensor is not None
+    assert payload.shaped_reward_tensor is not None
+    assert payload.intrinsic_reward_tensor is not None
+    assert payload.loop_similarity_tensor is not None
+    assert payload.done_tensor is not None
+    assert payload.forward_velocity_tensor is not None
+    assert payload.yaw_velocity_tensor is not None
+    assert payload.reward_component_tensor is not None
+    assert payload.raw_reward_tensor.device.type == "cpu"
+    assert payload.forward_velocity_tensor.device.type == "cpu"
+    assert payload.reward_component_tensor.device.type == "cpu"
+    assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32))
+    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
+    assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32))
+    assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32))
+    assert torch.equal(payload.done_tensor, torch.tensor([True, False], dtype=torch.bool))
+    assert torch.allclose(payload.forward_velocity_tensor, torch.tensor([7.0, 9.0], dtype=torch.float32))
+    assert torch.allclose(payload.yaw_velocity_tensor, torch.tensor([8.0, 10.0], dtype=torch.float32))
+    assert torch.allclose(
+        payload.reward_component_tensor,
+        torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=torch.float32),
+    )
 
 
 def test_extract_completed_episode_host_batch_returns_none_when_no_actor_finished() -> None:
@@ -968,7 +1025,7 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
             publish_actor_ids: tuple[int, ...] = (),
             materialize_results: bool = False,
         ) -> tuple[FakeTensorStepBatch, tuple[object, ...]]:
-            del publish_actor_ids, scratch_slot, materialize_results
+            del publish_actor_ids, scratch_slot
             assert actor_indices is not None
             assert materialize_results is False
             actor_count = int(actor_indices.shape[0])

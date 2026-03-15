@@ -46,7 +46,7 @@ class TestDepthToViridis:
 
 
 class TestDepthToObserverPalette:
-    """Tests for the observer-facing red/yellow/green/blue palette."""
+    """Tests for the observer-facing muted collision-to-distance palette."""
 
     def test_output_shape_matches_input(self) -> None:
         depth = np.random.rand(16, 8).astype(np.float32)
@@ -65,6 +65,18 @@ class TestDepthToObserverPalette:
         assert near[2] > near[0]
         assert far[0] > far[2]
 
+    def test_midrange_bins_stay_more_muted_than_collision_red(self) -> None:
+        depth = np.linspace(0.0, 1.0, 9, dtype=np.float32).reshape(1, 9)
+        valid = np.ones((1, 9), dtype=bool)
+        result = depth_to_observer_palette(depth, valid)
+
+        near = result[0, 0].astype(np.int32)
+        mid = result[0, 4].astype(np.int32)
+
+        near_spread = int(near.max() - near.min())
+        mid_spread = int(mid.max() - mid.min())
+        assert mid_spread < near_spread
+
     def test_invalid_regions_get_fog_of_war(self) -> None:
         depth = np.ones((16, 8), dtype=np.float32) * 0.5
         valid = np.zeros((16, 8), dtype=bool)
@@ -74,7 +86,7 @@ class TestDepthToObserverPalette:
 
 
 class TestRenderFirstPerson:
-    """Tests for first-person dense projection."""
+    """Tests for the centered half-sphere heatmap actor view."""
 
     def test_output_shape(self) -> None:
         depth = np.random.rand(32, 16).astype(np.float32)
@@ -90,7 +102,7 @@ class TestRenderFirstPerson:
         valid = np.zeros((32, 16), dtype=bool)
         img, dist = render_first_person(depth, semantic, valid, 320, 240)
         assert img.shape == (240, 320, 3)
-        assert dist >= 9.0  # Should be VIEW_RANGE_M
+        assert dist == 0.0
         assert float(np.mean(img)) > 5.0
 
     def test_dense_coverage_with_valid_data(self) -> None:
@@ -99,8 +111,9 @@ class TestRenderFirstPerson:
         semantic = np.ones((85, 128), dtype=np.int32)  # WALL
         valid = np.ones((85, 128), dtype=bool)
         img, _dist = render_first_person(depth, semantic, valid, 320, 240)
-        # With full valid data, almost the full panel should be visibly populated.
-        non_black = np.any(img > 20, axis=-1)
+        # The padded panel contains a bordered viewport; coverage should be high inside it.
+        viewport = img[24:212, 16:304]
+        non_black = np.any(viewport > 20, axis=-1)
         coverage = float(np.mean(non_black))
         assert coverage > 0.9, f"Expected >90% coverage, got {coverage:.1%}"
 
@@ -120,7 +133,7 @@ class TestRenderFirstPerson:
         valid = np.zeros((0, 0), dtype=bool)
         img, dist = render_first_person(depth, semantic, valid, 320, 240)
         assert img.shape == (240, 320, 3)
-        assert dist >= 9.0
+        assert dist == 0.0
 
     def test_oracle_house_doorway_changes_center_projection_against_closed_baseline(self) -> None:
         oracle = house_observation()
@@ -236,6 +249,15 @@ class TestPanoramaAlignment:
         assert fov_depth.shape[0] == 4
         assert np.count_nonzero(~fov_valid[:, 1:]) >= 2
         assert np.count_nonzero(~fov_valid[:2, :2]) >= 1
+
+    def test_canonical_half_sphere_extracts_exact_128x48_front_slice(self) -> None:
+        depth = np.zeros((256, 48), dtype=np.float32)
+        valid = np.ones((256, 48), dtype=bool)
+
+        fov_depth, fov_valid = extract_forward_fov(depth, valid, fov_degrees=180.0)
+
+        assert fov_depth.shape == (128, 48)
+        assert fov_valid.shape == (128, 48)
 
 
 class TestRenderBevOccupancy:

@@ -18,6 +18,10 @@ Default behavior:
 - staged overwrite-first corpus refresh when explicitly requested
 - compiled-corpus reuse by default after refresh, even if raw source downloads were cleaned
 
+Canonical training is valid with no dashboard attached. When the auditor is
+attached, it remains a passive consumer of low-rate published observations and
+must not alter trainer cadence, environment semantics, or observation math.
+
 ## 2. Prerequisites
 
 - Python `3.12`
@@ -74,6 +78,9 @@ entire promoted corpus before using benchmark results to judge the upgrade:
 
 # Full stack training launcher
 ./scripts/run-ghost-stack.ps1 -Train
+
+# Full stack training launcher with explicit passive dashboard attach
+./scripts/run-ghost-stack.ps1 -Train -WithDashboard
 
 # Full stack training launcher with Mambapy selected explicitly
 ./scripts/run-ghost-stack.ps1 -Train -TemporalCore mambapy
@@ -156,6 +163,10 @@ Example:
 
 ## 6. Dashboard Attach
 
+`run-ghost-stack.ps1 -Train` now keeps the dashboard detached by default so the
+canonical training wrapper does not imply a viewer dependency. Use
+`-WithDashboard` only when a live passive observer is explicitly needed.
+
 ```powershell
 ./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560
 ```
@@ -193,7 +204,8 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - canonical geometry-foraging shaping positively values mid-range structure visibility, forward-sector structure reacquisition, and controlled inspection turns that reveal more geometry instead of less
 - use explicit overrides only for deliberate experiments; temporal-core comparisons should change only `TemporalCore` or `--temporal-core` while holding all other canonical settings fixed
 - dashboard mode detection stays on low-volume telemetry to avoid rollout stalls
-- the dashboard observation stream publishes a passive `10 Hz` selector-visible frame for every actor so operators can switch actors live without restarting training
-- widening full training telemetry beyond those low-rate observation frames remains a deliberate high-overhead diagnostic mode and should be enabled only when the operator explicitly requests all-actor telemetry fan-out
+- the dashboard observation stream publishes a passive `10 Hz` frame for the selected telemetry actor by default
+- widening observation streaming or full training telemetry to all actors remains a deliberate high-overhead diagnostic mode and should be enabled only when the operator explicitly requests all-actor fan-out
+- those observation frames reuse the canonical spherical contract; any half-sphere or other display transform belongs in auditor code only
 - PPO update-loss scalar materialization is diagnostic-only on the canonical hot path: the trainer still emits coarse `actor.training.ppo.update` events for mode/status detection by default, but full PPO loss fields are populated only when explicit update-loss telemetry is enabled
 - when a supported fused Mamba-2 environment is ready later, re-promotion must be proven by rerunning the canonical temporal profile and bounded canonical training surfaces before the active docs and scripts are switched away from GRU

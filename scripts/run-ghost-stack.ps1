@@ -3,14 +3,17 @@
 
     Two modes:
         1. Inference (default)  — canonical sdfdag Environment + Actor + Dashboard as 3 processes.
-        2. Training  (-Train)   — canonical sdfdag train (in-process env+actor) + Dashboard.
+                2. Training  (-Train)   — canonical sdfdag train (in-process env+actor), with dashboard attach optional.
 
 .EXAMPLE
     # Inference on the canonical compiled runtime
     .\run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
 
-    # Canonical PPO training on the full discovered corpus with live dashboard
+    # Canonical PPO training on the full discovered corpus without the dashboard
     .\run-ghost-stack.ps1 -Train
+
+    # Canonical PPO training with an explicit passive dashboard attach
+    .\run-ghost-stack.ps1 -Train -WithDashboard
 
     # Canonical PPO training with an explicit scene override and refresh
     .\run-ghost-stack.ps1 -Train -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag
@@ -34,6 +37,7 @@ param(
     [string]$PythonVersion = "3.12",
     [switch]$NoPreKill,
     [switch]$NoDashboard,
+    [switch]$WithDashboard,
 
     # ── Training params ──
     [string]$Manifest = "",
@@ -341,9 +345,15 @@ if (-not $NoPreKill) {
 }
 
 # ═══════════════════════════════════════════════════════════════════
-# Canonical training launch: train (in-process env+actor) + dashboard
+# Canonical training launch: train (in-process env+actor), dashboard optional
 # ═══════════════════════════════════════════════════════════════════
 if ($Train) {
+    if ($NoDashboard -and $WithDashboard) {
+        throw "-NoDashboard and -WithDashboard cannot be used together."
+    }
+
+    $dashboardEnabled = $WithDashboard -and (-not $NoDashboard)
+
     $sceneOverride = if (-not [string]::IsNullOrWhiteSpace($Scene)) {
         $Scene
     }
@@ -440,7 +450,7 @@ if ($Train) {
         Write-Host "  Temporal   : $TemporalCore"
         Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
-        Write-Host "  Dashboard  : $(if ($NoDashboard) { 'disabled' } else { 'enabled' })"
+        Write-Host "  Dashboard  : $(if ($dashboardEnabled) { 'enabled (passive observer)' } else { 'disabled by default for canonical training' })"
         Write-Host "========================================================"
 
         Write-Host "`nStarting canonical train (background)..."
@@ -472,7 +482,7 @@ if ($Train) {
             Write-Host "  OK: actor telemetry is ready ($($trainingReady.Reason))."
         }
 
-        if (-not $NoDashboard) {
+        if ($dashboardEnabled) {
             # The canonical trainer only guarantees actor telemetry. The auditor
             # remains resilient when matrix/step streams are absent.
             Write-Host "`nWaiting for actor telemetry before launching dashboard..."
@@ -495,8 +505,9 @@ if ($Train) {
                 --passive
         }
         else {
-            Write-Host "`nDashboard disabled. Training runs in background."
+            Write-Host "`nDashboard not launched. Canonical training runs without observer attachment by default."
             Write-Host "  Tail logs: Get-Content '$trainUnifiedLog' -Wait"
+            Write-Host "  Attach:    .\scripts\run-dashboard.ps1 --actor-sub tcp://localhost:$ActorTelemetryPort"
             Write-Host "  Stop:      Stop-Process -Id $($trainProc.Id) -Force"
 
             # In no-dashboard mode, wait for canonical train to finish naturally.

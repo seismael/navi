@@ -75,6 +75,11 @@ boundary. The actor is allowed to instantiate or drive the environment backend
 only inside the single production training entrypoint. That does not widen the
 service import graph and does not create a new cross-package dependency surface.
 
+The observer boundary is equally strict. Auditor requirements may change how a
+received observation is cropped, colorized, or laid out for humans, but they do
+not authorize changes to environment stepping, tensor seams, observation
+normalization, or actor/runtime contracts.
+
 ## 5. Responsibilities By Domain
 
 ### 5.1 Contracts Domain
@@ -156,6 +161,10 @@ The auditor domain is passive by policy. It may:
 - record and replay telemetry and matrices
 - render diagnostics from received contracts
 
+It owns presentation transforms only. Half-sphere extraction, dashboard layout,
+and other human-facing reshaping stay in auditor code and must not leak back
+into environment or actor behavior.
+
 It may not become a mandatory dependency of the training path.
 
 ## 6. Mathematical Foundations
@@ -182,6 +191,8 @@ The actor's observation boundary remains spherical and stable.
 - external arrays remain `(1, Az, El)` per environment
 - the internal trainer seam may use `(B, 3, Az, El)` CUDA tensors
 - azimuth bin `0` is forward along local `-Z`
+- observer tools may center, crop, or rescale that sphere locally, but they do
+  not change the canonical observation contract
 
 This is the key architectural bridge between old and new runtime work: the
 runtime beneath the contract may change, but the actor's observation semantics

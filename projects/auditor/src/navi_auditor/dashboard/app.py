@@ -244,7 +244,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             960,
             540,
             pitch=float(dm.robot_pose.pitch),
-            max_distance_m=self._max_distance_m,
         )
         panel.set_image(actor_img)
 

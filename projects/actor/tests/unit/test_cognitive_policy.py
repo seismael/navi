@@ -13,8 +13,6 @@ from navi_actor.cognitive_policy import CognitiveMambaPolicy
 from navi_actor.config import TemporalCoreName
 from navi_actor.gru_core import GRUTemporalCore
 from navi_actor.mambapy_core import MambapyTemporalCore
-
-
 def _make_policy(*, temporal_core: TemporalCoreName = "gru") -> CognitiveMambaPolicy:
     return CognitiveMambaPolicy(
         embedding_dim=128,
@@ -56,7 +54,6 @@ def test_act_returns_list() -> None:
     assert isinstance(action_list, list)
     assert len(action_list) == 4
     assert all(isinstance(x, float) for x in action_list)
-
 
 def test_encode_returns_embedding() -> None:
     """encode() should return spatial embedding without temporal processing."""

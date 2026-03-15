@@ -72,6 +72,9 @@ class DistanceMatrix:
   consumed only by the Gallery Layer — it never enters the training engine.
   It is the sole visualization-adjacent field permitted in the wire contract,
   included for diagnostic convenience. It carries no semantic training data.
+- viewer layers are consumers, not contract authors: dashboard layout,
+  half-sphere extraction, axis rolling for display, or palette choice must not
+  change `DistanceMatrix` shape, normalization, semantic meaning, or wire fields.
 
 ### 1.3. Action
 
@@ -238,6 +241,10 @@ Current canonical observation tensor:
 
 This seam exists to keep the hot path on CUDA.
 It does not replace the external `DistanceMatrix` contract.
+
+Observer tools may materialize, crop, or colorize tensors after publication,
+but they do not change this seam's channel meaning, normalization, or axis
+ordering.
 
 ### 4.3 Materialization Rule
 

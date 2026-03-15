@@ -58,6 +58,7 @@ Key runtime properties:
 - the CUDA ray tracer stops at the configured environment horizon
 - `DistanceMatrix` materialization is preserved for service mode and passive tooling
 - the canonical trainer may consume equivalent CUDA tensors directly
+- observer requirements do not change the environment's tensor math, observation normalization, or step semantics
 
 ## 4. Corpus Preparation
 
@@ -92,6 +93,10 @@ The environment publishes the actor's required contract unchanged:
 Wire arrays remain shaped `(1, Az, El)`.
 The tensor-native trainer seam may use the equivalent CUDA observation tensor
 `[depth, semantic, valid]` with shape `(3, Az, El)` per actor.
+
+This contract is viewer-invariant. Dashboard FOV choice, half-sphere extraction,
+palette, or other observer presentation preferences must be applied after
+publication and must not alter the environment contract or tensor stepping path.
 
 ### 5.2 Fixed-Horizon Policy
 
@@ -167,6 +172,7 @@ runtime paths.
 - training-time dashboard usage must remain actor-stream-first and passive
 - environment control sockets are for service mode and explicit diagnostics, not canonical training dependency
 - frame dropping is acceptable if it preserves rollout throughput
+- environment publication is a passive seam; canonical reset and batch-step logic must remain correct with no attached observer
 
 ### 7.3 Dataset QA Direction
 

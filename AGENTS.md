@@ -152,6 +152,8 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Canonical rollout loops MUST minimize avoidable CUDA-to-CPU synchronization (`.item()`, `.cpu()`, `.numpy()`) inside per-step per-actor sections.
 - Canonical rollout loops MUST not convert batched CUDA ray outputs into CPU `numpy`/Python observation objects and then back into CUDA tensors during training; tensor-native runtime seams are mandatory once the backend is already GPU-resident.
 - Canonical tensor-step training surfaces MUST keep per-step reward, truncation, env-id, and episode-id bookkeeping in tensors; rebuilding Python `StepResult` objects during every rollout tick is forbidden unless an explicit diagnostic or public-result caller requests materialization.
+- Canonical observation shape, axis ordering, normalization, and stepping semantics MUST remain viewer-invariant; dashboard, recorder, replay, or other observer requirements MUST NOT change environment/core math or contract behavior.
+- Any observation publication or telemetry materialization required for live viewing MUST remain a passive seam outside the core rollout math and MUST NOT become a prerequisite for canonical training or inference.
 - Tensor-only actor helper graphs such as reward shaping SHOULD use `torch.compile` on supported GPU/compiler stacks when they remain on the PyTorch side of the rollout hot path; unsupported stacks MUST fall back cleanly to eager execution with explicit attribution visibility.
 - Canonical PPO update code MUST avoid redundant tensor device copies, allocator churn, and repeated optimizer-side host sync when minibatch tensors already reside on CUDA.
 - Canonical PPO update code MUST keep the temporal-core sequence path inside precompiled backend operators such as cuDNN GRU on the active path; Python-level sequence unrolling, dispatcher-heavy scan decomposition, and large autograd-graph construction are forbidden on the production hot path.
@@ -186,8 +188,12 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Tools MUST handle missing ZMQ streams gracefully, displaying a `WAITING` state instead of crashing.
 - During canonical training, the Dashboard MUST run in passive actor-only mode: subscribe to the actor PUB stream only and MUST NOT open environment REP/manual-step control paths or depend on environment PUB availability.
 - Dashboard heartbeats during optimizer windows MUST reuse the same passive observation cadence policy as live observation publication instead of falling back to a slower hidden rate.
+- Observer-side slicing, half-sphere extraction, palette choice, labels, or other presentation transforms MUST remain inside the Auditor domain and MUST NOT be implemented by changing environment or actor contracts.
 - **Default Selector:** UI defaults to selector-enabled actor discovery so operators can switch the observed actor without relaunching the dashboard.
 - **Initial Focus:** The dashboard MAY still start focused on actor `0`, but live operator switching MUST be available by default.
+- **Actor View Geometry:** The primary actor panel MUST render a direct centered `180` degree half-sphere slice from the canonical `256x48` spherical observation, which is an exact `128x48` forward hemisphere before viewport scaling.
+- **No Dashboard Range Cap:** The primary actor panel MUST colorize the published distance matrix directly and MUST NOT overlay dashboard-specific range caps such as fixed `RANGE`, `CTR`, or `HFOV` meter labels.
+- **Heading Guides:** The actor heading remains the center column; LEFT and RIGHT labels MUST sit on the horizontal midline of the actor panel rather than the bottom edge.
 - **UI Throughput:** Processing (ZMQ polling, heavy rendering) MUST NOT block the UI thread for > 16ms per tick. Ingestion MUST be capped or moved to a background thread to maintain 60 FPS responsiveness.
 - UI components MUST be non-blocking during stream connection attempts.
 

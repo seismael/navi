@@ -35,6 +35,10 @@ Current implementation characteristics include:
 The dashboard is intentionally visual-only by default and should remain
 non-blocking with respect to the trainer.
 
+The auditor is not an authority over the observation contract. It receives the
+published sphere and may reshape it locally for display, but it must never
+require environment or actor changes for view convenience.
+
 ## 4. Rendering Model
 
 The current renderer stack is more concrete than the imported web-first design.
@@ -45,6 +49,15 @@ It uses:
 - Viridis and Turbo-style depth colormaps
 - forward-centered spherical slicing for actor view panels
 - orientation guides and semantic coloring for diagnostic readability
+
+Canonical primary actor-panel rule:
+
+- the main dashboard actor view is a direct centered `180` degree half-sphere heatmap
+- for the canonical `256x48` observation contract this means an exact forward `128x48` slice before viewport scaling
+- the panel must not add its own `30m` range cap, `CTR`, or `HFOV` meter overlays
+- LEFT and RIGHT labels belong on the horizontal midline because the center column is the actor heading
+- the actor-view palette should stay muted: collision-near bins may use restrained red, most ordinary structure should read as light green/grey, and farther surroundings should fade toward light blue rather than a saturated rainbow
+- these are observer-side rendering rules only; they do not change the environment, actor, or contract layers
 
 This matters because rendering logic remains testable without requiring the full
 UI layer.
@@ -69,6 +82,7 @@ The auditor layer must obey strict throughput rules:
 - it may drop frames rather than backpressure producers
 - its ingestion must be capped per UI tick
 - actor-stream-only passive operation must remain supported during training
+- any crop, roll, half-sphere extraction, or display-only reinterpretation must happen in the auditor after receipt of the published contract
 
 Dashboard heartbeat republishing from the trainer is allowed only as a coarse,
 diagnostic convenience during optimizer windows.
@@ -154,6 +168,7 @@ Reasonable roadmap surfaces include:
 - hardware-utilization summaries
 
 These should remain passive and optional.
+They must not widen the wire contract or force extra training-time host work.
 
 ## 9. Optional Web Surfaces
 
