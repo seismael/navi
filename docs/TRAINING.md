@@ -106,7 +106,17 @@ entire promoted corpus before using benchmark results to judge the upgrade:
 # One-command bounded temporal comparison on the canonical trainer surface
 ./scripts/run-temporal-compare.ps1
 ./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy')
+
+# One-command bounded observation-resolution comparison on the canonical trainer surface
+./scripts/run-resolution-compare.ps1
+./scripts/run-resolution-compare.ps1 -Profiles @('256x48','512x96','768x144') -Repeats 2 -TotalSteps 2048
 ```
+
+The resolution comparison wrapper runs repeated bounded trainer passes on the
+same canonical `sdfdag` path and emits per-run logs plus summary JSON/CSV under
+`artifacts/benchmarks/resolution-compare/`. Profiles are specified as
+`AzimuthxElevation`. Remember that doubling both dimensions is a `4x` ray-count
+increase and tripling both dimensions is a `9x` ray-count increase.
 
 For durable long-running training with explicit fleet size control, use the
 direct actor CLI instead of the wrapper:

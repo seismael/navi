@@ -248,6 +248,7 @@ investigation. Only one rule matters for canonical comparison:
 Environment-layer benchmark captures should prefer the structured `uv run navi-environment bench-sdfdag --json ...` summary so actor count, warmup, resolution, and measured throughput are recorded explicitly in one machine-readable artifact.
 When run-to-run variance is non-trivial on the local machine, canonical environment comparison should prefer `bench-sdfdag --repeats N --json` and compare the reported median `measured_sps` rather than a single run.
 The same rule now applies to bounded temporal-core comparisons: `scripts/run-temporal-compare.ps1` should prefer repeated direct-trainer runs and compare the emitted median `steady_sps` and median `ppo_update_ms` rather than one wrapper pass.
+The same repeated-run rule applies to observation-resolution scaling: `scripts/run-resolution-compare.ps1` should compare median `steady_sps` and median `ppo_update_ms` across repeated bounded trainer runs for each `AzimuthxElevation` profile rather than judging one pass.
 When `-ProfileCudaEvents` is used on that surface, comparison artifacts should also compare median learner `backward_ms` and median `gpu_backward_ms` before attributing the remaining stall to the active temporal runtime.
 
 ### 5.4 Experimental Work Classification
