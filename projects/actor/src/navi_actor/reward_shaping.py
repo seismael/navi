@@ -78,12 +78,12 @@ class RewardShaper:
         self,
         *,
         collision_penalty: float = 0.0,
-        existential_tax: float = -0.01,
-        velocity_weight: float = 0.0,
+        existential_tax: float = -0.02,
+        velocity_weight: float = 0.1,
         intrinsic_coeff_init: float = 1.0,
         intrinsic_coeff_final: float = 0.01,
         intrinsic_anneal_steps: int = 500_000,
-        loop_penalty_coeff: float = 0.5,
+        loop_penalty_coeff: float = 2.0,
         loop_threshold: float = 0.85,
         torch_compile: bool = True,
     ) -> None:
@@ -100,33 +100,45 @@ class RewardShaper:
         self._torch_compile_enabled = False
         self._shape_batch_fn = _shape_batch_impl
         if self._torch_compile_requested:
-            compile_fn = getattr(torch, "compile", None)
-            if compile_fn is None:
-                _LOGGER.warning(
-                    "RewardShaper: torch.compile requested but unavailable; using eager batch shaping path",
-                )
-            elif not torch.cuda.is_available():
+            if not torch.cuda.is_available():
                 _LOGGER.info(
-                    "RewardShaper: torch.compile requested but CUDA is unavailable; using eager batch shaping path",
+                    "RewardShaper: compilation requested but CUDA is unavailable; using eager batch shaping path",
                 )
             else:
-                capability = tuple(int(value) for value in torch.cuda.get_device_capability())
-                if capability < (7, 0):
-                    _LOGGER.warning(
-                        "RewardShaper: torch.compile requested but disabled on %s (sm_%d%d); using eager batch shaping path",
-                        torch.cuda.get_device_name(),
-                        capability[0],
-                        capability[1],
-                    )
+                compiled = False
+                # 1. Try torch.compile (requires Triton, SM >= 7.0 + C++ compiler)
+                _compile_ok = False
+                try:
+                    from torch._inductor.cpp_builder import get_cpp_compiler
+                    get_cpp_compiler()
+                    _compile_ok = True
+                except Exception:
+                    _compile_ok = False
+                if _compile_ok:
+                    compile_fn = getattr(torch, "compile", None)
+                    if compile_fn is not None:
+                        try:
+                            self._shape_batch_fn = compile_fn(
+                                _shape_batch_impl,
+                                fullgraph=True,
+                                dynamic=False,
+                                mode="reduce-overhead",
+                            )
+                            compiled = True
+                            self._torch_compile_enabled = True
+                            _LOGGER.info("RewardShaper: torch.compile enabled for tensor-only batch shaping path")
+                        except Exception as exc:
+                            _LOGGER.info("RewardShaper: torch.compile unavailable (%s), trying torch.jit.script", exc)
                 else:
-                    self._shape_batch_fn = compile_fn(
-                        _shape_batch_impl,
-                        fullgraph=False,
-                        dynamic=False,
-                        mode="reduce-overhead",
-                    )
-                    self._torch_compile_enabled = True
-                    _LOGGER.info("RewardShaper: torch.compile enabled for tensor-only batch shaping path")
+                    _LOGGER.info("RewardShaper: no C++ compiler available, skipping torch.compile")
+                # 2. Try torch.jit.script (works on all CUDA SMs)
+                if not compiled:
+                    try:
+                        self._shape_batch_fn = torch.jit.script(_shape_batch_impl)
+                        self._torch_compile_enabled = True
+                        _LOGGER.info("RewardShaper: torch.jit.script enabled for tensor-only batch shaping path")
+                    except Exception as exc:
+                        _LOGGER.warning("RewardShaper: torch.jit.script failed (%s); using eager path", exc)
 
     @property
     def torch_compile_requested(self) -> bool:

@@ -8,10 +8,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 import typer
 
-from navi_contracts import Action, setup_logging
+from navi_contracts import setup_logging
 from navi_environment.config import EnvironmentConfig
 from navi_environment.integration.corpus import (
     prepare_training_scene_corpus,
@@ -65,22 +64,14 @@ def _build_backend(config: EnvironmentConfig) -> SimulatorBackend:
         raise typer.Exit(code=1) from exc
 
 
-def _benchmark_actions(*, actor_count: int, step_id: int) -> tuple[Action, ...]:
-    actions: list[Action] = []
-    timestamp = time.time()
-    for actor_id in range(actor_count):
-        yaw_direction = -0.15 if actor_id % 2 else 0.15
-        actions.append(
-            Action(
-                env_ids=np.array([actor_id], dtype=np.int32),
-                linear_velocity=np.array([[1.5, 0.0, 0.0]], dtype=np.float32),
-                angular_velocity=np.array([[0.0, 0.0, yaw_direction]], dtype=np.float32),
-                policy_id="bench-sdfdag",
-                step_id=step_id,
-                timestamp=timestamp,
-            ),
-        )
-    return tuple(actions)
+def _benchmark_actions_tensor(*, actor_count: int, device: object) -> object:
+    """Build tensor-native benchmark actions: (actors, 4) = [fwd, vert, lat, yaw]."""
+    import torch
+    actions = torch.zeros(actor_count, 4, device=device, dtype=torch.float32)
+    actions[:, 0] = 1.5  # forward
+    actions[::2, 3] = 0.15   # even actors yaw right
+    actions[1::2, 3] = -0.15  # odd actors yaw left
+    return actions
 
 
 def _run_bench_iteration(
@@ -90,17 +81,20 @@ def _run_bench_iteration(
     steps: int,
     warmup_steps: int,
 ) -> dict[str, float | int]:
+    import torch
     backend = _build_backend(config)
+    device = torch.device("cuda")
     try:
         for actor_id in range(actors):
-            backend.reset(episode_id=0, actor_id=actor_id)
+            backend.reset_tensor(episode_id=0, actor_id=actor_id)
 
+        actions = _benchmark_actions_tensor(actor_count=actors, device=device)
         for step_id in range(warmup_steps):
-            backend.batch_step(_benchmark_actions(actor_count=actors, step_id=step_id), step_id)
+            backend.batch_step_tensor_actions(actions, step_id)
 
         started_at = time.perf_counter()
         for step_id in range(warmup_steps, warmup_steps + steps):
-            backend.batch_step(_benchmark_actions(actor_count=actors, step_id=step_id), step_id)
+            backend.batch_step_tensor_actions(actions, step_id)
         elapsed = time.perf_counter() - started_at
         snapshot = backend.perf_snapshot()
     finally:

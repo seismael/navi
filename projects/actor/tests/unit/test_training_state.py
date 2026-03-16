@@ -387,11 +387,11 @@ def test_extract_host_rollout_scalars_uses_selected_actor_subset() -> None:
     _assert_same_device(batch.intrinsic_reward_tensor.device, trainer._device)
     _assert_same_device(batch.loop_similarity_tensor.device, trainer._device)
     _assert_same_device(batch.done_tensor.device, trainer._device)
-    assert torch.equal(batch.raw_reward_tensor, torch.tensor([2.0, 4.0], dtype=torch.float32))
-    assert torch.equal(batch.shaped_reward_tensor, torch.tensor([2.5, 4.5], dtype=torch.float32))
-    assert torch.equal(batch.intrinsic_reward_tensor, torch.tensor([0.2, 0.4], dtype=torch.float32))
-    assert torch.equal(batch.loop_similarity_tensor, torch.tensor([0.9, 0.8], dtype=torch.float32))
-    assert torch.equal(batch.done_tensor, torch.tensor([True, True], dtype=torch.bool))
+    assert torch.equal(batch.raw_reward_tensor, torch.tensor([2.0, 4.0], dtype=torch.float32, device=trainer._device))
+    assert torch.equal(batch.shaped_reward_tensor, torch.tensor([2.5, 4.5], dtype=torch.float32, device=trainer._device))
+    assert torch.equal(batch.intrinsic_reward_tensor, torch.tensor([0.2, 0.4], dtype=torch.float32, device=trainer._device))
+    assert torch.equal(batch.loop_similarity_tensor, torch.tensor([0.9, 0.8], dtype=torch.float32, device=trainer._device))
+    assert torch.equal(batch.done_tensor, torch.tensor([True, True], dtype=torch.bool, device=trainer._device))
 
 
 def test_extract_completed_episode_host_batch_uses_selected_actor_subset() -> None:
@@ -989,11 +989,11 @@ def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() ->
     _assert_same_device(payload.intrinsic_reward_tensor.device, trainer._device)
     _assert_same_device(payload.loop_similarity_tensor.device, trainer._device)
     _assert_same_device(payload.done_tensor.device, trainer._device)
-    assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32))
-    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
-    assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32))
-    assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32))
-    assert torch.equal(payload.done_tensor, torch.tensor([True, False], dtype=torch.bool))
+    assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32, device=trainer._device))
+    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device))
+    assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device))
+    assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device))
+    assert torch.equal(payload.done_tensor, torch.tensor([True, False], dtype=torch.bool, device=trainer._device))
 
 
 def test_materialize_step_telemetry_host_batch_packs_selected_columns_once() -> None:

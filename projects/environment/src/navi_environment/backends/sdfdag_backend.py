@@ -298,22 +298,40 @@ def _maybe_compile_callable(
 ) -> Any:
     if not enabled:
         return fn
+    # 1. Try torch.compile (requires Triton, SM >= 7.0)
     compile_fn = getattr(torch_module, "compile", None)
-    if compile_fn is None:
-        msg = f"torch.compile is required for {name} when NAVI_SDFDAG_TORCH_COMPILE is enabled"
-        raise RuntimeError(msg)
-    return compile_fn(fn, fullgraph=False, dynamic=False, mode="reduce-overhead")
+    if compile_fn is not None:
+        try:
+            compiled = compile_fn(fn, fullgraph=True, dynamic=False, mode="reduce-overhead")
+            _LOG.info("torch.compile enabled for %s", name)
+            return compiled
+        except Exception as exc:
+            _LOG.info("torch.compile unavailable for %s (%s), trying torch.jit.script", name, exc)
+    # 2. Try torch.jit.script (works on all CUDA SMs)
+    jit_mod = getattr(torch_module, "jit", None)
+    if jit_mod is not None:
+        script_fn = getattr(jit_mod, "script", None)
+        if script_fn is not None:
+            try:
+                scripted = script_fn(fn)
+                _LOG.info("torch.jit.script enabled for %s", name)
+                return scripted
+            except Exception as exc:
+                _LOG.warning("torch.jit.script failed for %s: %s", name, exc)
+    # 3. Eager fallback
+    _LOG.warning("No compilation backend available for %s; using eager path", name)
+    return fn
 
 
 def _compute_observation_ratios_tensor(
-    depth_batch: Any,
-    valid_batch: Any,
+    depth_batch: torch.Tensor,
+    valid_batch: torch.Tensor,
     *,
     max_distance: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
     proximity_distance_threshold: float,
-) -> tuple[Any, Any, Any, Any]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     valid_f = valid_batch.to(dtype=torch.float32)
     starvation_ratios = 1.0 - valid_f.mean(dim=(1, 2))
     structure_band_ratios = torch.zeros_like(starvation_ratios)
@@ -343,8 +361,8 @@ def _compute_observation_ratios_tensor(
 
 
 def _postprocess_cast_outputs_tensor(
-    out_distances: Any,
-    out_semantics: Any,
+    out_distances: torch.Tensor,
+    out_semantics: torch.Tensor,
     *,
     az_bins: int,
     el_bins: int,
@@ -352,7 +370,7 @@ def _postprocess_cast_outputs_tensor(
     structure_band_min_distance: float,
     structure_band_max_distance: float,
     proximity_distance_threshold: float,
-) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     actor_count = int(out_distances.shape[0])
     metric_distances = out_distances.reshape(actor_count, az_bins, el_bins)
     semantic_batch = out_semantics.reshape(actor_count, az_bins, el_bins).to(dtype=torch.int32)
@@ -390,19 +408,21 @@ def _postprocess_cast_outputs_tensor(
 
 
 def _reward_components_tensor(
-    exploration_rewards: Any,
-    previous_positions: Any,
-    current_positions: Any,
-    collisions: Any,
-    previous_clearances: Any,
-    current_clearances: Any,
-    starvation_ratios: Any,
-    proximity_ratios: Any,
-    current_structure_band_ratios: Any,
-    current_forward_structure_ratios: Any,
-    prev_struct: Any,
-    prev_fwd: Any,
+    exploration_rewards: torch.Tensor,
+    previous_positions: torch.Tensor,
+    current_positions: torch.Tensor,
+    collisions: torch.Tensor,
+    previous_clearances: torch.Tensor,
+    current_clearances: torch.Tensor,
+    starvation_ratios: torch.Tensor,
+    proximity_ratios: torch.Tensor,
+    current_structure_band_ratios: torch.Tensor,
+    current_forward_structure_ratios: torch.Tensor,
+    prev_struct: torch.Tensor,
+    prev_fwd: torch.Tensor,
     *,
+    progress_reward_scale: float,
+    collision_penalty: float,
     obstacle_clearance_window: float,
     obstacle_clearance_reward_scale: float,
     starvation_ratio_threshold: float,
@@ -412,9 +432,9 @@ def _reward_components_tensor(
     forward_structure_reward_scale: float,
     inspection_activation_threshold: float,
     inspection_reward_scale: float,
-) -> tuple[Any, Any]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     progress_rewards = torch.linalg.vector_norm(current_positions - previous_positions, dim=-1)
-    progress_rewards = progress_rewards * _PROGRESS_REWARD_SCALE
+    progress_rewards = progress_rewards * progress_reward_scale
     clearance_rewards = torch.zeros_like(current_clearances)
     if obstacle_clearance_window > 0.0:
         within_window_mask = (previous_clearances <= obstacle_clearance_window) | (
@@ -443,7 +463,7 @@ def _reward_components_tensor(
     inspection_rewards = (activation >= inspection_activation_threshold).float()
     inspection_rewards = inspection_rewards * gain_deltas.clamp(min=-1.0, max=1.0)
     inspection_rewards = inspection_rewards * inspection_reward_scale
-    collision_penalties = collisions.float() * _COLLISION_PENALTY
+    collision_penalties = collisions.float() * collision_penalty
     components = torch.stack(
         [
             exploration_rewards,
@@ -462,13 +482,13 @@ def _reward_components_tensor(
 
 
 def _step_kinematics_tensor(
-    previous_depths: Any,
-    actions_linear: Any,
-    actions_angular: Any,
-    previous_linear: Any,
-    previous_angular: Any,
-    positions: Any,
-    yaws: Any,
+    previous_depths: torch.Tensor,
+    actions_linear: torch.Tensor,
+    actions_angular: torch.Tensor,
+    previous_linear: torch.Tensor,
+    previous_angular: torch.Tensor,
+    positions: torch.Tensor,
+    yaws: torch.Tensor,
     *,
     max_distance: float,
     speed_fwd: float,
@@ -477,7 +497,7 @@ def _step_kinematics_tensor(
     speed_yaw: float,
     smoothing: float,
     dt: float,
-) -> tuple[Any, Any, Any, Any]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     actor_count = int(previous_depths.shape[0])
     span = max(1, int(previous_depths.shape[1]) // 8)
     front_left = previous_depths[:, :span, :].reshape(actor_count, -1).amin(dim=1)
@@ -558,16 +578,6 @@ class SdfDagBackend(SimulatorBackend):
         self._device = self._torch.device("cuda")
         self._sdfdag_torch_compile_requested = bool(getattr(config, "sdfdag_torch_compile", True))
         self._sdfdag_torch_compile = self._sdfdag_torch_compile_requested
-        if self._sdfdag_torch_compile_requested:
-            capability = tuple(int(value) for value in self._torch.cuda.get_device_capability(self._device))
-            if capability < (7, 0):
-                self._sdfdag_torch_compile = False
-                _LOG.warning(
-                    "SdfDagBackend: torch.compile requested but disabled on %s (sm_%d%d); current inductor/triton GPU backend requires CUDA capability >= 7.0",
-                    self._torch.cuda.get_device_name(self._device),
-                    capability[0],
-                    capability[1],
-                )
         self._az_bins = config.azimuth_bins
         self._el_bins = config.elevation_bins
         self._max_distance = config.max_distance
@@ -1229,38 +1239,6 @@ class SdfDagBackend(SimulatorBackend):
             proximity_distance_threshold=self._proximity_distance_threshold,
         )
 
-    def _postprocess_cast_outputs_impl(self, out_distances: Any, out_semantics: Any) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
-        actor_count = int(out_distances.shape[0])
-        metric_distances = out_distances.reshape(actor_count, self._az_bins, self._el_bins)
-        semantic_batch = out_semantics.reshape(actor_count, self._az_bins, self._el_bins).to(dtype=self._torch.int32)
-        if self._max_distance > 0.0:
-            valid_batch = self._torch.isfinite(metric_distances) & (metric_distances <= self._max_distance)
-            clamped_metric = self._torch.where(
-                valid_batch,
-                metric_distances,
-                self._torch.full_like(metric_distances, self._max_distance),
-            )
-            depth_batch = (clamped_metric / self._max_distance).clamp(min=0.0, max=1.0)
-        else:
-            valid_batch = self._torch.isfinite(metric_distances)
-            clamped_metric = self._torch.where(valid_batch, metric_distances, self._torch.zeros_like(metric_distances))
-            depth_batch = self._torch.zeros_like(metric_distances)
-        min_distances = clamped_metric.amin(dim=(1, 2))
-        starvation_ratios, proximity_ratios, structure_band_ratios, forward_structure_ratios = self._compute_observation_ratios(
-            depth_batch=depth_batch,
-            valid_batch=valid_batch,
-        )
-        return (
-            depth_batch,
-            semantic_batch,
-            valid_batch,
-            min_distances,
-            starvation_ratios,
-            proximity_ratios,
-            structure_band_ratios,
-            forward_structure_ratios,
-        )
-
     def _compute_observation_ratios(self, *, depth_batch: Any, valid_batch: Any) -> tuple[Any, Any, Any, Any]:
         return _compute_observation_ratios_tensor(
             depth_batch,
@@ -1713,6 +1691,8 @@ class SdfDagBackend(SimulatorBackend):
             current_forward_structure_ratios,
             prev_struct,
             prev_fwd,
+            progress_reward_scale=_PROGRESS_REWARD_SCALE,
+            collision_penalty=_COLLISION_PENALTY,
             obstacle_clearance_window=self._obstacle_clearance_window,
             obstacle_clearance_reward_scale=self._obstacle_clearance_reward_scale,
             starvation_ratio_threshold=self._starvation_ratio_threshold,
@@ -1723,111 +1703,6 @@ class SdfDagBackend(SimulatorBackend):
             inspection_activation_threshold=self._inspection_activation_threshold,
             inspection_reward_scale=self._inspection_reward_scale,
         )
-
-    def _reward_components_impl(
-        self,
-        exploration_rewards: Any,
-        previous_positions: Any,
-        current_positions: Any,
-        collisions: Any,
-        previous_clearances: Any,
-        current_clearances: Any,
-        starvation_ratios: Any,
-        proximity_ratios: Any,
-        current_structure_band_ratios: Any,
-        current_forward_structure_ratios: Any,
-        prev_struct: Any,
-        prev_fwd: Any,
-    ) -> tuple[Any, Any]:
-        progress_rewards = self._torch.linalg.vector_norm(current_positions - previous_positions, dim=-1)
-        progress_rewards = progress_rewards * _PROGRESS_REWARD_SCALE
-        clearance_rewards = self._torch.zeros_like(current_clearances)
-        if self._obstacle_clearance_window > 0.0:
-            within_window_mask = (previous_clearances <= self._obstacle_clearance_window) | (
-                current_clearances <= self._obstacle_clearance_window
-            )
-            norm_deltas = (current_clearances - previous_clearances) / self._obstacle_clearance_window
-            clearance_rewards = (
-                within_window_mask.float()
-                * norm_deltas.clamp(min=-1.0, max=1.0)
-                * self._obstacle_clearance_reward_scale
-            )
-        starvation_baselines = 0.35 * starvation_ratios
-        starvation_overflows = (starvation_ratios - self._starvation_ratio_threshold).clamp(min=0.0)
-        starvation_penalties = -(starvation_baselines + starvation_overflows).clamp(max=1.0)
-        starvation_penalties = starvation_penalties * self._starvation_penalty_scale
-        proximity_penalties = -proximity_ratios.clamp(max=1.0) * self._proximity_penalty_scale
-        structure_rewards = current_structure_band_ratios.clamp(min=0.0, max=1.0) * self._structure_band_reward_scale
-        forward_structure_rewards = current_forward_structure_ratios.clamp(min=0.0, max=1.0)
-        forward_structure_rewards = forward_structure_rewards * self._forward_structure_reward_scale
-        activation = self._torch.stack(
-            [prev_struct, current_structure_band_ratios, prev_fwd, current_forward_structure_ratios]
-        ).amax(dim=0)
-        gain_deltas = (current_structure_band_ratios - prev_struct) + 0.5 * (
-            current_forward_structure_ratios - prev_fwd
-        )
-        inspection_rewards = (activation >= self._inspection_activation_threshold).float()
-        inspection_rewards = inspection_rewards * gain_deltas.clamp(min=-1.0, max=1.0)
-        inspection_rewards = inspection_rewards * self._inspection_reward_scale
-        collision_penalties = collisions.float() * _COLLISION_PENALTY
-        components = self._torch.stack(
-            [
-                exploration_rewards,
-                progress_rewards,
-                clearance_rewards,
-                starvation_penalties,
-                proximity_penalties,
-                structure_rewards,
-                forward_structure_rewards,
-                inspection_rewards,
-                collision_penalties,
-            ],
-            dim=-1,
-        )
-        return components.sum(dim=-1), components
-
-    def _step_kinematics_impl(
-        self,
-        previous_depths: Any,
-        actions_linear: Any,
-        actions_angular: Any,
-        previous_linear: Any,
-        previous_angular: Any,
-        positions: Any,
-        yaws: Any,
-    ) -> tuple[Any, Any, Any, Any]:
-        actor_count = int(previous_depths.shape[0])
-        span = max(1, int(previous_depths.shape[1]) // 8)
-        front_left = previous_depths[:, :span, :].reshape(actor_count, -1).amin(dim=1)
-        front_right = previous_depths[:, -span:, :].reshape(actor_count, -1).amin(dim=1)
-        min_front = self._torch.minimum(front_left, front_right)
-        speed_factors = (min_front * self._max_distance / 1.5).clamp(min=0.05, max=1.0).unsqueeze(1)
-
-        linear_cmd = actions_linear.clone()
-        linear_cmd[:, 0] *= self._speed_fwd
-        linear_cmd[:, 1] *= self._speed_vert
-        linear_cmd[:, 2] *= self._speed_lat
-        linear_cmd *= speed_factors
-
-        angular_cmd = actions_angular.clone()
-        angular_cmd[:, 2] *= self._speed_yaw
-
-        smooth_linear = (1.0 - self._smoothing) * linear_cmd + self._smoothing * previous_linear
-        smooth_angular = (1.0 - self._smoothing) * angular_cmd + self._smoothing * previous_angular
-
-        cos_yaw = self._torch.cos(yaws)
-        sin_yaw = self._torch.sin(yaws)
-        fwd = smooth_linear[:, 0]
-        lat = smooth_linear[:, 2]
-        dx = fwd * cos_yaw - lat * sin_yaw
-        dz = fwd * sin_yaw + lat * cos_yaw
-
-        updated_positions = positions.clone()
-        updated_positions[:, 0] += dx * self._dt
-        updated_positions[:, 1] += smooth_linear[:, 1] * self._dt
-        updated_positions[:, 2] += dz * self._dt
-        updated_yaws = yaws + (smooth_angular[:, 2] * self._dt)
-        return updated_positions, updated_yaws, smooth_linear, smooth_angular
 
     def _step_kinematics_indexed(
         self,

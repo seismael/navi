@@ -67,12 +67,12 @@ class ActorConfig(BaseSettings):
     gae_lambda: float = 0.95
     clip_ratio: float = 0.2
     entropy_coeff: float = 0.01
-    value_coeff: float = 0.005
+    value_coeff: float = 0.5
     max_grad_norm: float = 0.5
     ppo_epochs: int = 2
     rollout_length: int = 512
-    minibatch_size: int = 32
-    bptt_len: int = 16
+    minibatch_size: int = 64
+    bptt_len: int = 8
     n_actors: int = 1
     max_forward: float = 1.0
     max_vertical: float = 1.0
@@ -83,12 +83,12 @@ class ActorConfig(BaseSettings):
     memory_capacity: int = 100_000
     memory_exclusion_window: int = 50
     collision_penalty: float = 0.0
-    existential_tax: float = -0.01
-    velocity_weight: float = 0.0
-    intrinsic_coeff_init: float = 0.2
+    existential_tax: float = -0.02
+    velocity_weight: float = 0.1
+    intrinsic_coeff_init: float = 1.0
     intrinsic_coeff_final: float = 0.01
     intrinsic_anneal_steps: int = 500_000
-    loop_penalty_coeff: float = 0.5
+    loop_penalty_coeff: float = 2.0
     loop_threshold: float = 0.85
 
     # Telemetry fan-out controls (performance)

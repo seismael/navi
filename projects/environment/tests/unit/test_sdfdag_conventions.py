@@ -658,6 +658,9 @@ def test_postprocess_cast_outputs_preserves_oracle_house_profile() -> None:
     backend._max_distance = 10.0
     backend._az_bins = 12
     backend._el_bins = 3
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 8.0
+    backend._proximity_distance_threshold = 0.5
 
     oracle = house_observation()
     metric = house_metric_distances(backend._max_distance)
@@ -665,7 +668,7 @@ def test_postprocess_cast_outputs_preserves_oracle_house_profile() -> None:
     out_distances = torch.from_numpy(metric.reshape(1, -1))
     out_semantics = torch.from_numpy(oracle.semantic.reshape(1, -1))
 
-    depth_batch, semantic_batch, valid_batch, min_distances, *_rest = backend._postprocess_cast_outputs_impl(
+    depth_batch, semantic_batch, valid_batch, min_distances, *_rest = backend._postprocess_cast_outputs(
         out_distances,
         out_semantics,
     )

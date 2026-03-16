@@ -18,7 +18,7 @@ def test_basic_shaping() -> None:
     assert isinstance(result, ShapedReward)
     assert result.extrinsic == 1.0
     assert result.collision_penalty == 0.0
-    assert result.existential_tax == -0.01
+    assert result.existential_tax == -0.02
 
 
 def test_collision_penalty_on_done() -> None:
@@ -188,4 +188,4 @@ def test_default_collision_penalty_is_zero() -> None:
     # collision_penalty component should be 0 by default
     assert result.collision_penalty == 0.0
     # total should only include extrinsic + tax (no extra penalty)
-    assert abs(result.total - (-1.0 + (-0.01))) < 1e-6
+    assert abs(result.total - (-1.0 + (-0.02))) < 1e-6

@@ -166,7 +166,7 @@ class PpoLearner:
         gamma: float = 0.99,
         clip_ratio: float = 0.2,
         entropy_coeff: float = 0.01,
-        value_coeff: float = 0.005,
+        value_coeff: float = 0.5,
         max_grad_norm: float = 0.5,
         learning_rate: float = 3e-4,
         rnd_learning_rate: float = 3e-5,

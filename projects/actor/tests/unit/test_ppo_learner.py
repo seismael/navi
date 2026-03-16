@@ -173,11 +173,11 @@ def test_empty_buffer_returns_zeros() -> None:
 
 
 def test_default_value_coeff_is_low() -> None:
-    """value_coeff default should be 0.005 to prevent gradient domination."""
+    """value_coeff default should be 0.5 (canonical PPO value coefficient)."""
     from navi_actor.config import ActorConfig
 
     cfg = ActorConfig()
-    assert cfg.value_coeff == 0.005
+    assert cfg.value_coeff == 0.5
 
 
 def test_optimizer_covers_full_policy() -> None:

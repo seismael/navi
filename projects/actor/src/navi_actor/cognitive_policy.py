@@ -9,20 +9,24 @@ the engine's canonical ``(B, 3, Az, El)`` DistanceMatrix input.
 """
 
 from __future__ import annotations
+
 import contextlib
-from pathlib import Path
+import logging
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from torch import Tensor, nn
-from dataclasses import dataclass
 
 from navi_actor.actor_critic import ActorCriticHeads
 from navi_actor.config import SUPPORTED_TEMPORAL_CORES, TemporalCoreName
 from navi_actor.gru_core import GRUTemporalCore
 from navi_actor.mambapy_core import MambapyTemporalCore
+
+_log = logging.getLogger(__name__)
 
 __all__: list[str] = ["CognitiveMambaPolicy", "PolicyEvalStageMetrics"]
 
@@ -123,6 +127,32 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         from navi_actor.perception import RayViTEncoder
 
         self.encoder = RayViTEncoder(embedding_dim=embedding_dim)
+
+        # Attempt torch.compile on encoder for kernel fusion (SM >= 7.0).
+        # Falls back to eager on unsupported hardware or missing compiler.
+        _compile_ok = False
+        try:
+            # Validate that inductor can find a C/C++ compiler before wrapping.
+            from torch._inductor.cpp_builder import get_cpp_compiler
+            get_cpp_compiler()
+            _compile_ok = True
+        except Exception:
+            _compile_ok = False
+        if _compile_ok:
+            try:
+                # fullgraph=False: encoder has dynamic padding (pad_az/pad_el)
+                # that prevents full-graph capture; jit.script also incompatible.
+                self.encoder = torch.compile(  # type: ignore[assignment]
+                    self.encoder,
+                    fullgraph=False,
+                    dynamic=False,
+                    mode="reduce-overhead",
+                )
+                _log.info("RayViTEncoder: torch.compile activated")
+            except Exception:
+                _log.info("RayViTEncoder: torch.compile wrapping failed, using eager mode")
+        else:
+            _log.info("RayViTEncoder: no C++ compiler available, using eager mode")
 
         self.temporal_core = _build_temporal_core(
             temporal_core=temporal_core,
