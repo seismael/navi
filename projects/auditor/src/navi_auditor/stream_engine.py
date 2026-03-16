@@ -21,6 +21,8 @@ from navi_contracts import (
     TOPIC_DISTANCE_MATRIX,
     TOPIC_TELEMETRY_EVENT,
     Action,
+    ActorControlRequest,
+    ActorControlResponse,
     DistanceMatrix,
     StepRequest,
     TelemetryEvent,
@@ -194,6 +196,7 @@ class StreamEngine:
         self,
         matrix_sub: str = "",
         actor_sub: str = "",
+        actor_control_endpoint: str = "",
         step_endpoint: str = "",
         n_actors: int = 0,
         selected_actor_id: int | None = 0,
@@ -202,6 +205,7 @@ class StreamEngine:
         self._poller = zmq.Poller()
         self._actor_states: dict[int, StreamState] = {}
         self._selected_actor_id: int | None = selected_actor_id
+        self._actor_control_endpoint = actor_control_endpoint
 
         self._msg_total: int = 0
         self._drop_total: int = 0
@@ -250,6 +254,16 @@ class StreamEngine:
             self._sock_step.setsockopt(zmq.REQ_RELAXED, 1)
             self._sock_step.setsockopt(zmq.REQ_CORRELATE, 1)
             self._sock_step.connect(step_endpoint)
+
+        self._sock_actor_control: zmq.Socket[bytes] | None = None
+        if actor_control_endpoint:
+            self._sock_actor_control = self._ctx.socket(zmq.REQ)
+            self._sock_actor_control.setsockopt(zmq.LINGER, 0)
+            self._sock_actor_control.setsockopt(zmq.RCVTIMEO, 500)
+            self._sock_actor_control.setsockopt(zmq.SNDTIMEO, 500)
+            self._sock_actor_control.setsockopt(zmq.REQ_RELAXED, 1)
+            self._sock_actor_control.setsockopt(zmq.REQ_CORRELATE, 1)
+            self._sock_actor_control.connect(actor_control_endpoint)
 
         self._step_counter = 0
 
@@ -334,12 +348,62 @@ class StreamEngine:
         """Set actor filter for ingestion (None = ingest all actors)."""
         self._selected_actor_id = actor_id
 
+    def sync_actor_roster(self, actor_ids: list[int]) -> None:
+        """Pre-populate actor states from a trainer-provided roster snapshot."""
+        for actor_id in actor_ids:
+            self._resolve_state(int(actor_id))
+
+    def request_actor_snapshot(self) -> tuple[list[int], int | None]:
+        """Query the trainer for its actor roster and current selected actor."""
+        if self._sock_actor_control is None:
+            return (sorted(self._actor_states.keys()), self._selected_actor_id)
+
+        request = ActorControlRequest(command="snapshot", actor_id=-1, timestamp=time.time())
+        try:
+            self._sock_actor_control.send(serialize(request))
+            response = deserialize(self._sock_actor_control.recv())
+        except Exception as exc:
+            _LOG.debug("Actor snapshot request failed: %s", exc)
+            return (sorted(self._actor_states.keys()), self._selected_actor_id)
+
+        if not isinstance(response, ActorControlResponse):
+            return (sorted(self._actor_states.keys()), self._selected_actor_id)
+
+        actor_ids = [int(actor_id) for actor_id in response.actor_ids.tolist()]
+        self.sync_actor_roster(actor_ids)
+        self._selected_actor_id = int(response.actor_id)
+        return (actor_ids, self._selected_actor_id)
+
+    def request_selected_actor(self, actor_id: int) -> bool:
+        """Ask the trainer to retarget the selected rich stream actor."""
+        if self._sock_actor_control is None:
+            self._selected_actor_id = actor_id
+            return True
+
+        request = ActorControlRequest(command="select", actor_id=actor_id, timestamp=time.time())
+        try:
+            self._sock_actor_control.send(serialize(request))
+            response = deserialize(self._sock_actor_control.recv())
+        except Exception as exc:
+            _LOG.debug("Actor selection request failed: %s", exc)
+            return False
+
+        if not isinstance(response, ActorControlResponse) or not response.ok:
+            return False
+
+        actor_ids = [int(value) for value in response.actor_ids.tolist()]
+        self.sync_actor_roster(actor_ids)
+        self._selected_actor_id = int(response.actor_id)
+        return True
+
     def close(self) -> None:
         """Tear down all sockets."""
         if self._sock_matrix is not None:
             self._sock_matrix.close()
         if self._sock_actor is not None:
             self._sock_actor.close()
+        if self._sock_actor_control is not None:
+            self._sock_actor_control.close()
         if self._sock_step is not None:
             self._sock_step.close()
         self._ctx.term()
@@ -383,31 +447,31 @@ class StreamEngine:
         """Route a deserialized message to the appropriate per-actor state."""
         if topic == TOPIC_DISTANCE_MATRIX and isinstance(msg, DistanceMatrix):
             actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
+            state = self._resolve_state(actor_id)
+            state.last_rx_time = time.time()
             if self._selected_actor_id is not None and actor_id != self._selected_actor_id:
                 self._drop_total += 1
                 return
-            state = self._resolve_state(actor_id)
             state.latest_matrix = msg
-            state.last_rx_time = time.time()
             pose = msg.robot_pose
             state.pose_history.append((pose.x, pose.z, pose.yaw))
 
         elif topic == TOPIC_ACTION and isinstance(msg, Action):
             actor_id = int(msg.env_ids[0]) if len(msg.env_ids) > 0 else 0
+            state = self._resolve_state(actor_id)
+            state.last_rx_time = time.time()
             if self._selected_actor_id is not None and actor_id != self._selected_actor_id:
                 self._drop_total += 1
                 return
-            state = self._resolve_state(actor_id)
             state.latest_action = msg
-            state.last_rx_time = time.time()
 
         elif topic == TOPIC_TELEMETRY_EVENT and isinstance(msg, TelemetryEvent):
             actor_id = msg.env_id
+            state = self._resolve_state(actor_id)
+            state.last_rx_time = time.time()
             if self._selected_actor_id is not None and actor_id != self._selected_actor_id:
                 self._drop_total += 1
                 return
-            state = self._resolve_state(actor_id)
-            state.last_rx_time = time.time()
             state.telemetry_buffer.append(msg)
             self._route_telemetry(msg, state)
 

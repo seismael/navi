@@ -24,12 +24,16 @@ must not alter trainer cadence, environment semantics, or observation math.
 Detached wrapper launches now disable the actor observation stream entirely so
 no publish-row materialization or update-heartbeat observation callbacks run
 unless passive viewing is explicitly requested with `-WithDashboard`.
+When the dashboard is attached, actor discovery comes from a one-shot trainer
+roster query and selector changes are pushed back to the trainer over a dedicated
+control endpoint, so the canonical live PUB stream stays selected-actor only.
 
 ## 2. Prerequisites
 
 - Python `3.12`
 - CUDA-capable machine with working PyTorch CUDA runtime
 - free port `5557` for actor telemetry
+- free port `5561` for actor selector control
 
 Repository training wrappers launch the actor via `python -m navi_actor.cli`
 inside the actor project environment so canonical training does not depend on
@@ -102,6 +106,32 @@ entire promoted corpus before using benchmark results to judge the upgrade:
 # One-command bounded temporal comparison on the canonical trainer surface
 ./scripts/run-temporal-compare.ps1
 ./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy')
+```
+
+For durable long-running training with explicit fleet size control, use the
+direct actor CLI instead of the wrapper:
+
+```powershell
+uv run --project .\projects\actor navi-actor train --actors 4
+uv run --project .\projects\actor navi-actor train --actors 8 --total-steps 0
+uv run --project .\projects\actor navi-actor train --actors 8 --temporal-core gru --actor-pub tcp://localhost:5565 --actor-control tcp://*:5561
+uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5565 --actor-control-endpoint tcp://localhost:5561 --passive --actor-id 0
+```
+
+That surface is the canonical way to vary `--actors` directly for long runs.
+Attach the auditor separately when needed. If you need live observation frames,
+launch a surface that keeps observation streaming enabled instead of a detached
+wrapper run with `--no-emit-observation-stream`. The dashboard now requests the
+actor roster once at startup and updates the trainer-side selected actor when the
+operator changes the selector, so high-actor-count runs do not require continuous
+all-actor rich telemetry.
+
+If you want one command that launches both canonical training and the passive
+dashboard together on the full discovered corpus, use the wrapper with an
+explicit actor count:
+
+```powershell
+./scripts/run-ghost-stack.ps1 -Train -Actors 8 -WithDashboard
 ```
 
 The qualification script now proves the bounded canonical flow end to end:

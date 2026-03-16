@@ -334,6 +334,7 @@ def train(
         help="Compile tensor-only actor reward shaping helper graphs with torch.compile when supported.",
     ),
     actor_pub: str = typer.Option(None, help="Actor PUB bind address"),
+    actor_control: str = typer.Option(None, help="Actor selector REP bind address"),
 ) -> None:
     """Single canonical PPO training surface with direct in-process sdfdag stepping."""
     setup_logging("navi_actor_train")
@@ -344,6 +345,7 @@ def train(
     # Resolve actor config
     config = ActorConfig(
         pub_address=actor_pub or default_config.pub_address,
+        control_address=actor_control or default_config.control_address,
         mode="step",
         temporal_core=resolved_temporal_core,
         azimuth_bins=azimuth_bins,

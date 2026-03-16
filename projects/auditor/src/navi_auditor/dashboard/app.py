@@ -52,6 +52,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self,
         matrix_sub: str = "",
         actor_sub: str = "",
+        actor_control_endpoint: str = "",
         step_endpoint: str = "",
         actor_id: int = 0,
         enable_actor_selector: bool = True,
@@ -74,9 +75,14 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._engine = StreamEngine(
             matrix_sub=matrix_sub,
             actor_sub=actor_sub,
+            actor_control_endpoint=actor_control_endpoint,
             step_endpoint=step_endpoint,
             selected_actor_id=actor_id,
         )
+        snapshot_actor_ids, snapshot_selected_actor = self._engine.request_actor_snapshot()
+        if snapshot_selected_actor is not None:
+            self._selected_actor = int(snapshot_selected_actor)
+        self._known_actors = sorted(int(value) for value in snapshot_actor_ids)
 
         # Teleop state
         self._linear_speed = linear_speed
@@ -125,6 +131,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             )
             self._actor_selector.addItem(f"Actor {self._selected_actor}", self._selected_actor)
             self._actor_selector.currentIndexChanged.connect(self._on_actor_selector_changed)
+            if self._known_actors:
+                self._actor_selector.clear()
+                for actor_id in self._known_actors:
+                    self._actor_selector.addItem(f"Actor {actor_id}", actor_id)
+                idx = self._actor_selector.findData(self._selected_actor)
+                if idx >= 0:
+                    self._actor_selector.setCurrentIndex(idx)
             self._update_actor_selector_label()
 
             selector_container = QtWidgets.QWidget()
@@ -175,8 +188,12 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         actor_id = self._actor_selector.currentData()
         if actor_id is None:
             return
-        self._selected_actor = int(actor_id)
-        self._engine.set_selected_actor(self._selected_actor)
+        resolved_actor = int(actor_id)
+        if self._engine.request_selected_actor(resolved_actor):
+            self._selected_actor = resolved_actor
+        else:
+            self._selected_actor = resolved_actor
+            self._engine.set_selected_actor(self._selected_actor)
         self._update_actor_selector_label()
 
     def _shared_metrics_state(self) -> StreamState | None:
@@ -224,6 +241,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
                 state,
                 now=time.time(),
                 fallback_state=self._shared_metrics_state(),
+                actor_count=self._engine.n_actors,
             ),
         )
 
@@ -315,6 +333,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 def run_dashboard(
     matrix_sub: str = "",
     actor_sub: str = "",
+    actor_control_endpoint: str = "",
     step_endpoint: str = "",
     actor_id: int = 0,
     enable_actor_selector: bool = True,
@@ -330,6 +349,7 @@ def run_dashboard(
     dashboard = GhostMatrixDashboard(
         matrix_sub=matrix_sub,
         actor_sub=actor_sub,
+        actor_control_endpoint=actor_control_endpoint,
         step_endpoint=step_endpoint,
         actor_id=actor_id,
         enable_actor_selector=enable_actor_selector,

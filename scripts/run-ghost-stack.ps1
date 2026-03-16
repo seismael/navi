@@ -12,6 +12,9 @@
     # Canonical PPO training on the full discovered corpus without the dashboard
     .\run-ghost-stack.ps1 -Train
 
+    # Canonical PPO training on the full discovered corpus with 8 actors and dashboard
+    .\run-ghost-stack.ps1 -Train -Actors 8 -WithDashboard
+
     # Canonical PPO training with an explicit passive dashboard attach
     .\run-ghost-stack.ps1 -Train -WithDashboard
 
@@ -35,6 +38,10 @@ param(
     [switch]$AutoCompileGmDag,
     [int]$GmDagResolution = 512,
     [string]$PythonVersion = "3.12",
+    [ValidateRange(1, 65535)]
+    [int]$Actors = 4,
+    [ValidateRange(1, 65535)]
+    [int]$ActorControlPort = 5561,
     [switch]$NoPreKill,
     [switch]$NoDashboard,
     [switch]$WithDashboard,
@@ -60,8 +67,8 @@ param(
     [string]$ActorPolicyCheckpoint = ""
 )
 
-# Standard Ghost-Matrix Fleet Size
-$NumActors = 4
+# Requested Ghost-Matrix Fleet Size
+$NumActors = $Actors
 
 $ErrorActionPreference = "Stop"
 
@@ -401,6 +408,7 @@ if ($Train) {
         "--temporal-core", "$TemporalCore",
         "--total-steps", $TotalSteps,
         "--actor-pub", "tcp://localhost:$ActorTelemetryPort",
+        "--actor-control", "tcp://*:$ActorControlPort",
         "--shuffle",
         "--checkpoint-every", $CheckpointEvery,
         "--checkpoint-dir", $CheckpointDir,
@@ -453,6 +461,7 @@ if ($Train) {
         Write-Host "  Total Steps: $(if ($TotalSteps -le 0) { 'continuous until stopped' } else { $TotalSteps })"
         Write-Host "  Temporal   : $TemporalCore"
         Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
+        Write-Host "  Control    : tcp://localhost:$ActorControlPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
         Write-Host "  Dashboard  : $(if ($dashboardEnabled) { 'enabled (passive observer)' } else { 'disabled by default for canonical training; observation stream off' })"
         Write-Host "========================================================"
@@ -479,7 +488,7 @@ if ($Train) {
             if ($null -ne $trainProc -and -not $trainProc.HasExited) {
                 Stop-ProcessTreeById -ProcessId $trainProc.Id
             }
-            Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
+            Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, $ActorControlPort, 5559, 5560)
             exit 1
         }
         else {
@@ -496,7 +505,7 @@ if ($Train) {
                 if ($null -ne $trainProc -and -not $trainProc.HasExited) {
                     Stop-ProcessTreeById -ProcessId $trainProc.Id
                 }
-                Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
+                Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, $ActorControlPort, 5559, 5560)
                 exit 1
             }
 
@@ -506,6 +515,7 @@ if ($Train) {
                 --python $PythonVersion `
                 navi-auditor dashboard `
                 --actor-sub "tcp://localhost:$ActorTelemetryPort" `
+                --actor-control-endpoint "tcp://localhost:$ActorControlPort" `
                 --passive
         }
         else {
@@ -531,7 +541,7 @@ if ($Train) {
             Write-Host "`nStopping canonical train (PID $($trainProc.Id))..."
             Stop-ProcessTreeById -ProcessId $trainProc.Id
         }
-        Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
+        Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, $ActorControlPort, 5559, 5560)
     }
     exit 0
 }

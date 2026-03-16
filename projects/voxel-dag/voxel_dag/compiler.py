@@ -8,6 +8,7 @@ matching offline surface without depending on the native C++ CLI.
 from __future__ import annotations
 
 import argparse
+import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,6 +220,99 @@ class MeshIngestor:
         return vertex_array, index_array, bbox_min.astype(np.float32), bbox_max.astype(np.float32)
 
 
+def _point_triangle_distance_sq(
+    px: float, py: float, pz: float,
+    v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
+) -> float:
+    """Closest-point distance² from point to triangle (Eberly algorithm)."""
+    diff = np.array([px - v0[0], py - v0[1], pz - v0[2]], dtype=np.float64)
+    edge0 = (v1 - v0).astype(np.float64)
+    edge1 = (v2 - v0).astype(np.float64)
+    a00 = float(edge0 @ edge0)
+    a01 = float(edge0 @ edge1)
+    a11 = float(edge1 @ edge1)
+    b0 = float(-diff @ edge0)
+    b1 = float(-diff @ edge1)
+    det = abs(a00 * a11 - a01 * a01)
+    s = a01 * b1 - a11 * b0
+    t = a01 * b0 - a00 * b1
+
+    if s + t <= det:
+        if s < 0:
+            if t < 0:
+                if b0 < 0:
+                    t = 0.0
+                    s = 1.0 if -b0 >= a00 else -b0 / max(a00, 1e-30)
+                else:
+                    s = 0.0
+                    t = 0.0 if b1 >= 0 else (1.0 if -b1 >= a11 else -b1 / max(a11, 1e-30))
+            else:
+                s = 0.0
+                t = 0.0 if b1 >= 0 else (1.0 if -b1 >= a11 else -b1 / max(a11, 1e-30))
+        elif t < 0:
+            t = 0.0
+            s = 0.0 if b0 >= 0 else (1.0 if -b0 >= a00 else -b0 / max(a00, 1e-30))
+        else:
+            inv = 1.0 / max(det, 1e-30)
+            s *= inv
+            t *= inv
+    else:
+        if s < 0:
+            tmp0 = a01 + b0
+            tmp1 = a11 + b1
+            if tmp1 > tmp0:
+                numer = tmp1 - tmp0
+                denom = a00 - 2.0 * a01 + a11
+                s = 1.0 if numer >= denom else numer / max(denom, 1e-30)
+                t = 1.0 - s
+            else:
+                s = 0.0
+                t = 0.0 if tmp1 >= 0 else (1.0 if -b1 >= a11 else -b1 / max(a11, 1e-30))
+        elif t < 0:
+            tmp0 = a01 + b1
+            tmp1 = a00 + b0
+            if tmp1 > tmp0:
+                numer = tmp1 - tmp0
+                denom = a00 - 2.0 * a01 + a11
+                t = 1.0 if numer >= denom else numer / max(denom, 1e-30)
+                s = 1.0 - t
+            else:
+                t = 0.0
+                s = 0.0 if tmp1 >= 0 else (1.0 if -b0 >= a00 else -b0 / max(a00, 1e-30))
+        else:
+            numer = a11 + b1 - a01 - b0
+            if numer <= 0:
+                s = 0.0
+                t = 1.0
+            else:
+                denom = a00 - 2.0 * a01 + a11
+                s = 1.0 if numer >= denom else numer / max(denom, 1e-30)
+                t = 1.0 - s
+
+    rx = v0[0] + s * edge0[0] + t * edge1[0] - px
+    ry = v0[1] + s * edge0[1] + t * edge1[1] - py
+    rz = v0[2] + s * edge0[2] + t * edge1[2] - pz
+    return float(rx * rx + ry * ry + rz * rz)
+
+
+def _solve_eikonal(a: float, b: float, c: float, h: float) -> float:
+    """1D/2D/3D Eikonal solver for fast-sweeping."""
+    vals = sorted([a, b, c])
+    a, b, c = vals[0], vals[1], vals[2]
+    d = a + h
+    if d <= b:
+        return d
+    d = 0.5 * (a + b + math.sqrt(max(0.0, 2.0 * h * h - (a - b) ** 2)))
+    if d <= c:
+        return d
+    s = a + b + c
+    ssq = a * a + b * b + c * c
+    disc = s * s - 3.0 * (ssq - h * h)
+    if disc >= 0.0:
+        return (s + math.sqrt(disc)) / 3.0
+    return d
+
+
 def compute_dense_sdf(
     vertices: np.ndarray,
     indices: np.ndarray,
@@ -228,9 +322,7 @@ def compute_dense_sdf(
     *,
     padding: float = 0.1,
 ) -> tuple[np.ndarray, float, np.ndarray]:
-    """Return a cubic dense unsigned distance field sampled from simple analytic surfaces."""
-    del indices
-
+    """Return a cubic dense unsigned distance field using triangle-mesh distances + Eikonal propagation."""
     res = _next_power_of_two(resolution)
     if vertices.size == 0:
         return np.zeros((res, res, res), dtype=np.float32), 1.0 / float(res), np.zeros(3, dtype=np.float32)
@@ -244,53 +336,92 @@ def compute_dense_sdf(
     cell_size = cube_size / float(res)
     cube_min = (bbox_min + bbox_max) * 0.5 - (cube_size * 0.5)
 
-    coords = (np.arange(res, dtype=np.float32) + 0.5) * cell_size
-    x_coords = cube_min[0] + coords
-    y_coords = cube_min[1] + coords
-    z_coords = cube_min[2] + coords
-    x_grid = x_coords[None, None, :]
-    y_grid = y_coords[None, :, None]
-    z_grid = z_coords[:, None, None]
-
     # If the mesh is effectively planar on any axis, use distance to that plane.
     plane_eps = max(cell_size * 0.5, 1e-5)
     for axis in range(3):
         axis_values = vertices[:, axis]
         if float(axis_values.max() - axis_values.min()) <= plane_eps:
             plane_value = float(axis_values.mean())
+            coords = (np.arange(res, dtype=np.float32) + 0.5) * cell_size
             if axis == 0:
-                plane_dist = np.abs(x_grid - plane_value)
+                plane_dist = np.abs(cube_min[0] + coords - plane_value)
+                field = np.broadcast_to(plane_dist[None, None, :], (res, res, res))
             elif axis == 1:
-                plane_dist = np.abs(y_grid - plane_value)
+                plane_dist = np.abs(cube_min[1] + coords - plane_value)
+                field = np.broadcast_to(plane_dist[None, :, None], (res, res, res))
             else:
-                plane_dist = np.abs(z_grid - plane_value)
-            return np.broadcast_to(plane_dist, (res, res, res)).astype(np.float32, copy=False), float(cell_size), cube_min.astype(np.float32)
+                plane_dist = np.abs(cube_min[2] + coords - plane_value)
+                field = np.broadcast_to(plane_dist[:, None, None], (res, res, res))
+            return field.astype(np.float32, copy=True), float(cell_size), cube_min.astype(np.float32)
 
     # Degenerate single-point geometry falls back to Euclidean point distance.
     if vertices.shape[0] == 1:
         vertex = vertices[0]
+        coords = (np.arange(res, dtype=np.float32) + 0.5) * cell_size
+        x_coords = cube_min[0] + coords
+        y_coords = cube_min[1] + coords
+        z_coords = cube_min[2] + coords
         field = np.sqrt(
-            (x_grid - float(vertex[0])) ** 2
-            + (y_grid - float(vertex[1])) ** 2
-            + (z_grid - float(vertex[2])) ** 2
+            (x_coords[None, None, :] - float(vertex[0])) ** 2
+            + (y_coords[None, :, None] - float(vertex[1])) ** 2
+            + (z_coords[:, None, None] - float(vertex[2])) ** 2
         )
-        return np.broadcast_to(field, (res, res, res)).astype(np.float32, copy=False), float(cell_size), cube_min.astype(np.float32)
+        return np.broadcast_to(field, (res, res, res)).astype(np.float32, copy=True), float(cell_size), cube_min.astype(np.float32)
 
-    # For closed box-like test geometry, distance to the nearest bbox face is a
-    # stable analytic proxy that still yields valid sphere-tracing behavior.
-    target_shape = (res, res, res)
-    face_distances = np.stack(
-        (
-            np.broadcast_to(np.abs(x_grid - float(bbox_min[0])), target_shape),
-            np.broadcast_to(np.abs(x_grid - float(bbox_max[0])), target_shape),
-            np.broadcast_to(np.abs(y_grid - float(bbox_min[1])), target_shape),
-            np.broadcast_to(np.abs(y_grid - float(bbox_max[1])), target_shape),
-            np.broadcast_to(np.abs(z_grid - float(bbox_min[2])), target_shape),
-            np.broadcast_to(np.abs(z_grid - float(bbox_max[2])), target_shape),
-        ),
-        axis=0,
-    )
-    field = face_distances.min(axis=0)
+    # --- General mesh: seed with exact triangle distances, then Eikonal sweep ---
+    field = np.full((res, res, res), float("inf"), dtype=np.float64)
+    h = float(cell_size)
+    indices_arr = np.asarray(indices, dtype=np.int32).reshape(-1, 3)
+
+    # Seed: compute exact closest-point distances for voxels near each triangle
+    for tri_row in indices_arr:
+        i0, i1, i2 = int(tri_row[0]), int(tri_row[1]), int(tri_row[2])
+        if i0 >= len(vertices) or i1 >= len(vertices) or i2 >= len(vertices):
+            continue
+        v0 = vertices[i0]
+        v1 = vertices[i1]
+        v2 = vertices[i2]
+
+        tri_min = np.minimum(np.minimum(v0, v1), v2) - h
+        tri_max = np.maximum(np.maximum(v0, v1), v2) + h
+
+        ix_start = max(0, int((tri_min[0] - cube_min[0]) / cell_size))
+        ix_end = min(res - 1, int((tri_max[0] - cube_min[0]) / cell_size))
+        iy_start = max(0, int((tri_min[1] - cube_min[1]) / cell_size))
+        iy_end = min(res - 1, int((tri_max[1] - cube_min[1]) / cell_size))
+        iz_start = max(0, int((tri_min[2] - cube_min[2]) / cell_size))
+        iz_end = min(res - 1, int((tri_max[2] - cube_min[2]) / cell_size))
+
+        for iz in range(iz_start, iz_end + 1):
+            pz = float(cube_min[2]) + iz * cell_size
+            for iy in range(iy_start, iy_end + 1):
+                py = float(cube_min[1]) + iy * cell_size
+                for ix in range(ix_start, ix_end + 1):
+                    px = float(cube_min[0]) + ix * cell_size
+                    d2 = _point_triangle_distance_sq(px, py, pz, v0, v1, v2)
+                    d = math.sqrt(d2)
+                    if d < field[iz, iy, ix]:
+                        field[iz, iy, ix] = d
+
+    # Eikonal fast-sweeping propagation (8 diagonal passes)
+    sweep_dirs = [
+        (1, 1, 1), (-1, 1, 1), (1, -1, 1), (-1, -1, 1),
+        (1, 1, -1), (-1, 1, -1), (1, -1, -1), (-1, -1, -1),
+    ]
+    for sx, sy, sz in sweep_dirs:
+        xr = range(0, res, 1) if sx > 0 else range(res - 1, -1, -1)
+        yr = range(0, res, 1) if sy > 0 else range(res - 1, -1, -1)
+        zr = range(0, res, 1) if sz > 0 else range(res - 1, -1, -1)
+        for iz in zr:
+            for iy in yr:
+                for ix in xr:
+                    ax = field[iz, iy, ix - sx] if 0 <= ix - sx < res else float("inf")
+                    ay = field[iz, iy - sy, ix] if 0 <= iy - sy < res else float("inf")
+                    az = field[iz - sz, iy, ix] if 0 <= iz - sz < res else float("inf")
+                    updated = _solve_eikonal(ax, ay, az, h)
+                    if updated < field[iz, iy, ix]:
+                        field[iz, iy, ix] = updated
+
     return field.astype(np.float32, copy=False), float(cell_size), cube_min.astype(np.float32)
 
 
@@ -334,7 +465,11 @@ def _encode_internal_signature(
     return bytes(encoded)
 
 
-def _build_signature_tree(block: np.ndarray, specs: dict[bytes, _LeafSpec | _InternalSpec]) -> bytes:
+def _build_signature_tree(
+    block: np.ndarray,
+    specs: dict[bytes, _LeafSpec | _InternalSpec],
+    cell_size: float = 0.0,
+) -> bytes:
     if block.size == 0:
         leaf_signature = _leaf_signature_from_block(np.array([0.1], dtype=np.float32))
         specs.setdefault(
@@ -354,7 +489,12 @@ def _build_signature_tree(block: np.ndarray, specs: dict[bytes, _LeafSpec | _Int
     z_half = max(1, block.shape[0] // 2)
     y_half = max(1, block.shape[1] // 2)
     x_half = max(1, block.shape[2] // 2)
-    child_signatures: list[bytes] = []
+
+    # Octant diagonal extent for void detection
+    octant_extent = max(z_half, y_half, x_half) * cell_size * 1.7321 if cell_size > 0.0 else 0.0
+
+    child_signatures: list[bytes | None] = []
+    mask = 0
     for octant in range(8):
         z_start = z_half if octant & 4 else 0
         y_start = y_half if octant & 2 else 0
@@ -364,14 +504,31 @@ def _build_signature_tree(block: np.ndarray, specs: dict[bytes, _LeafSpec | _Int
             y_start : (block.shape[1] if octant & 2 else y_half),
             x_start : (block.shape[2] if octant & 1 else x_half),
         ]
-        child_signatures.append(_build_signature_tree(child_block, specs))
 
-    if len(set(child_signatures)) == 1:
-        return child_signatures[0]
+        # Void octant detection: skip if min SDF > octant diagonal
+        if octant_extent > 0.0 and child_block.size > 0 and float(child_block.min()) > octant_extent:
+            child_signatures.append(None)
+            continue
 
-    unique_child_signatures, remap = deduplicate_signatures(child_signatures, seed=0)
+        child_signatures.append(_build_signature_tree(child_block, specs, cell_size))
+        mask |= 1 << octant
+
+    # If all octants are void, fall back to a leaf
+    if mask == 0:
+        leaf_signature = _leaf_signature_from_block(block)
+        specs.setdefault(
+            leaf_signature,
+            _LeafSpec(signature=leaf_signature, node_word=int(_leaf_node_from_signature(leaf_signature))),
+        )
+        return leaf_signature
+
+    present_sigs = [s for s in child_signatures if s is not None]
+    if len(set(present_sigs)) == 1 and mask == 0xFF:
+        return present_sigs[0]
+
+    unique_child_signatures, remap = deduplicate_signatures(present_sigs, seed=0)
     signature = _encode_internal_signature(
-        mask=0xFF,
+        mask=mask,
         unique_child_signatures=tuple(unique_child_signatures),
         remap=tuple(remap),
     )
@@ -379,7 +536,7 @@ def _build_signature_tree(block: np.ndarray, specs: dict[bytes, _LeafSpec | _Int
         signature,
         _InternalSpec(
             signature=signature,
-            mask=0xFF,
+            mask=mask,
             unique_child_signatures=tuple(unique_child_signatures),
             remap=tuple(remap),
         ),
@@ -421,7 +578,7 @@ def _emit_signature(
     return node_index
 
 
-def compress_to_dag(grid: np.ndarray, resolution: int) -> np.ndarray:
+def compress_to_dag(grid: np.ndarray, resolution: int, cell_size: float = 0.0) -> np.ndarray:
     """Return a fast native-format DAG payload compatible with the CUDA test backend."""
     res = _next_power_of_two(resolution)
     dense = np.asarray(grid, dtype=np.float32)
@@ -432,7 +589,7 @@ def compress_to_dag(grid: np.ndarray, resolution: int) -> np.ndarray:
         return np.array([np.uint64((1 << 63) | _float_to_half_bits(0.1))], dtype=np.uint64)
 
     specs: dict[bytes, _LeafSpec | _InternalSpec] = {}
-    root_signature = _build_signature_tree(dense, specs)
+    root_signature = _build_signature_tree(dense, specs, cell_size=cell_size)
     dag_pool: list[np.uint64] = []
     _emit_signature(root_signature, specs, dag_pool, emitted_indices={})
     return np.asarray(dag_pool, dtype=np.uint64)
@@ -498,7 +655,7 @@ def main(argv: list[str] | None = None) -> int:
         args.resolution,
         padding=args.padding,
     )
-    dag = compress_to_dag(grid, args.resolution)
+    dag = compress_to_dag(grid, args.resolution, cell_size=voxel_size)
     write_gmdag(args.output, dag, args.resolution, cube_min, voxel_size)
     return 0
 

@@ -128,6 +128,16 @@ uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-fi
 # Canonical continuous training with an alternate actor telemetry port
 ./scripts/train.ps1 -ActorTelemetryPort 5565
 
+# Canonical full-corpus training with 8 actors and passive dashboard attach
+./scripts/run-ghost-stack.ps1 -Train -Actors 8 -WithDashboard
+
+# Durable direct trainer surface with explicit fleet size
+uv run --project .\projects\actor navi-actor train --actors 4
+uv run --project .\projects\actor navi-actor train --actors 8 --total-steps 0
+
+# Separate passive dashboard attach for the direct trainer surface
+uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5557 --actor-control-endpoint tcp://localhost:5561 --passive --actor-id 0
+
 # Refresh the default public bootstrap corpus (Habitat test scenes + ReplicaCAD stages)
 ./scripts/refresh-scene-corpus.ps1
 

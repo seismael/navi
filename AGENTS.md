@@ -25,6 +25,7 @@ Navi is a modular ecosystem of isolated projects. Each project is a sovereign en
   - `NAVI_ENV_PUB_ADDRESS=tcp://localhost:5559`
   - `NAVI_ENV_REP_ADDRESS=tcp://localhost:5560`
   - `NAVI_ACTOR_PUB_ADDRESS=tcp://localhost:5557`
+  - `NAVI_ACTOR_CONTROL_ADDRESS=tcp://localhost:5561`
 - **Resolution Defaults:**
   - `NAVI_AZIMUTH_BINS=256`
   - `NAVI_ELEVATION_BINS=48` (High-fidelity navigation)
@@ -40,6 +41,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Standard Fleet:** Training scripts and backends default to **4 parallel actors** for optimal hardware utilization.
 - **Dashboard Throughput Default:** The Auditor Dashboard defaults to **actor 0** ingestion/rendering for maximum throughput.
 - **Dynamic Discovery Mode:** Optional selector mode MAY enable dynamic actor discovery/switching for diagnostics.
+- **Selected-Actor Viewer Rule:** Dashboard actor discovery SHOULD come from a lightweight roster query or explicit selector-control surface rather than continuous rich all-actor observation publication. Live dashboard-grade observations and per-actor training detail MUST stay scoped to the selected actor on the canonical path.
 - **Canonical Training Corpus Default:** When the user does not explicitly request a scene, manifest, or subset, canonical training MUST use the full discovered dataset corpus rather than a single sample scene.
 - **Canonical Bootstrap Dataset Default:** When bootstrap downloads are requested without an explicit dataset override, the canonical source refresh MUST fetch both the public Habitat test scenes and the public ReplicaCAD stage set so default training is not limited to the 3-scene test bundle.
 - **Canonical Observation Default:** All production-facing CLI commands, wrappers, benchmarks, and training surfaces MUST default to the full-resolution `256x48` observation contract. Retired `128x24` defaults are forbidden.

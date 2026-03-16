@@ -63,7 +63,10 @@ private:
     // --- DAG Compression ---
     static uint64_t hash_node(const std::vector<uint32_t>& child_indices);
     static uint16_t float_to_half(float f);
-    static uint32_t build_recursive(
+    float block_min_sdf(
+        const std::vector<float>& dense_grid,
+        int N, int x, int y, int z, int size) const;
+    uint32_t build_recursive(
         const std::vector<float>& dense_grid,
         int N, int x, int y, int z, int size,
         std::vector<uint64_t>& dag_pool,

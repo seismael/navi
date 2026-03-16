@@ -159,7 +159,7 @@ def _apply_fog_of_war(img: np.ndarray, invalid_mask: np.ndarray) -> None:
     fog_pixels = np.where(stripe)
     img[ys[fog_pixels], xs[fog_pixels]] = (
         img[ys[fog_pixels], xs[fog_pixels]] * 0.3
-        + np.array([45, 25, 55], dtype=np.float32) * 0.7
+        + np.array([48, 45, 42], dtype=np.float32) * 0.7
     ).astype(np.uint8)
 
 
@@ -198,13 +198,14 @@ def depth_to_observer_palette(
     depth: np.ndarray,
     valid: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Convert depth to a smooth observer-friendly palette.
+    """Convert depth to a structure-revealing observer palette.
 
-    The palette keeps a muted red reserved for collision-near bins, then moves
-    quickly into softer grey-green and light blue tones for ordinary structure.
-    Contrast is scaled dynamically from the valid depth distribution so indoor
-    scenes keep visible separation without flooding the panel with saturated
-    rainbow colours.
+    Near surfaces render as warm yellow-green so walls, furniture, and
+    doorframes stand out.  Mid-range structure transitions through teal
+    into light and darker blues.  The far end fades to neutral gray so
+    horizon / void regions recede visually instead of competing with
+    structure detail.  Contrast is stretched dynamically from the valid
+    depth distribution so indoor scenes keep clear separation.
     """
     if valid is not None and np.any(valid):
         valid_vals = depth[valid]
@@ -216,15 +217,17 @@ def depth_to_observer_palette(
     span = max(hi - lo, 1e-4)
     normalised = np.clip((depth - lo) / span, 0.0, 1.0)
 
-    control_x = np.array([0.0, 0.06, 0.20, 0.52, 0.80, 1.0], dtype=np.float32)
+    # near (0) = yellow-green → teal → light blue → dark blue → gray (1)
+    control_x = np.array([0.0, 0.12, 0.28, 0.48, 0.68, 0.85, 1.0], dtype=np.float32)
     control_bgr = np.array(
         [
-            [78.0, 98.0, 172.0],
-            [92.0, 122.0, 188.0],
-            [124.0, 162.0, 184.0],
-            [146.0, 186.0, 156.0],
-            [182.0, 188.0, 140.0],
-            [214.0, 180.0, 132.0],
+            [55.0, 225.0, 195.0],   # warm yellow-green  (nearest walls)
+            [80.0, 210.0, 145.0],   # fresh lime-green   (close structure)
+            [148.0, 195.0, 90.0],   # teal-green         (transition)
+            [210.0, 168.0, 72.0],   # light sky blue     (mid-range)
+            [188.0, 118.0, 52.0],   # medium blue        (away structure)
+            [148.0, 78.0, 42.0],    # dark blue          (far structure)
+            [80.0, 72.0, 68.0],     # neutral dark gray  (void / horizon)
         ],
         dtype=np.float32,
     )

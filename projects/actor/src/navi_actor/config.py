@@ -48,6 +48,10 @@ class ActorConfig(BaseSettings):
         default="tcp://*:5557",
         validation_alias="NAVI_ACTOR_PUB_ADDRESS",
     )
+    control_address: str = Field(
+        default="tcp://*:5561",
+        validation_alias="NAVI_ACTOR_CONTROL_ADDRESS",
+    )
     step_endpoint: str = Field(
         default="tcp://localhost:5560",
         validation_alias="NAVI_ENV_REP_ADDRESS",

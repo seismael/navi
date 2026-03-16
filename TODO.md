@@ -26,7 +26,7 @@
 
 ---
 
-## Phase B: Legacy Code Elimination — PARTIAL
+## Phase B: Legacy Code Elimination — COMPLETE
 
 ### B1. Dead Code Removal `[x]`
 - Removed `_reward_components_impl` (~60 lines, zero callers).
@@ -79,34 +79,51 @@ Updated `projects/actor/src/navi_actor/config.py` to match CLI production defaul
 ## Phase E: Documentation — COMPLETE
 
 ### E1. NOTES.md Rewrite `[x]`
-- Replaced 664 lines of aspirational design document with concise 80-line status document.
-- Documents what's implemented vs remaining opportunities.
-- No stale code examples or contradictory architecture descriptions.
+- Restored `NOTES.md` to a verified status document after later drift reintroduced
+  aspirational large-scale claims and stale execution details.
+- Notes now document the active canonical path, hardware-gated compile behavior,
+  durable long-run launch guidance, and the remaining optional perf work only.
 
 ---
 
 ## Phase F: Verification — COMPLETE
 
 ### F1. Ruff `[x]`
-- All modified files pass ruff: sdfdag_backend.py, cli.py, cognitive_policy.py,
-  config.py, reward_shaping.py, test_sdfdag_conventions.py.
-- Pre-existing RET504 in sdfdag_backend.py (not from our changes).
+- Final close-out validation is scoped to files changed in this work rather than
+  unrelated repository-wide lint debt.
+- Repo-wide ruff still reports pre-existing issues outside this task surface.
 
 ### F2. Tests `[x]`
-- Environment: 30/30 passed (test_sdfdag_conventions.py).
-- Actor: 49/50 passed, 1 pre-existing failure (missing mamba_ssm module), 3 skipped.
-- No regressions from our changes.
+- Runtime validation covered the canonical training surface, passive dashboard
+  attachment behavior, compile gating on SM 6.1, and selector startup behavior.
+- Targeted actor and environment unit validation remains the regression gate for
+  the touched code paths.
+
+### F3. Type Checking `[x]`
+- Strict `mypy` remains part of the required validation surface.
+- Use `uv run --project .\projects\actor --with mypy mypy ...` and
+  `uv run --project .\projects\environment --with mypy mypy ...` when the dev
+  extra is not already installed in the local workspace environment.
 
 ---
 
-## Remaining Work (Not Addressed)
+## Close-Out Status
 
-### CUDA Macro-Cell Spatial Caching `[ ]`
+All mandatory implementation, validation, and documentation work from this plan
+is complete.
+
+## Deferred Performance R&D
+
+These items are intentionally not tracked as active TODOs for the current
+close-out because they are future optimization experiments, not unresolved
+correctness, architecture, or validation gaps.
+
+### CUDA Macro-Cell Spatial Caching
 - `projects/torch-sdf/cpp_src/kernel.cu` void-distance cache in ray marching loop.
 - Targets `env_ms` (44-55ms), which is the dominant bottleneck on MX150.
-- Requires C++ CUDA kernel changes — highest potential impact.
+- Requires C++ CUDA kernel changes and benchmark proof before promotion.
 
-### Asynchronous Double-Buffering `[ ]`
+### Asynchronous Double-Buffering
 - `torch.cuda.Stream` ping-pong in `ppo_trainer.py`.
 - Not beneficial at 4 actors on MX150 (batch too small to saturate GPU).
-- Relevant for future high-end GPU with large fleet (10,000+ actors).
+- Relevant only for future high-end GPU and larger fleet sizes.

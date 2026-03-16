@@ -18,6 +18,7 @@ class MatrixViewer:
         self,
         matrix_sub: str = "",
         actor_sub: str = "",
+        actor_control_endpoint: str = "",
         step_endpoint: str | None = None,
         actor_id: int = 0,
         enable_actor_selector: bool = True,
@@ -29,6 +30,7 @@ class MatrixViewer:
     ) -> None:
         self._matrix_sub = matrix_sub
         self._actor_sub = actor_sub
+        self._actor_control_endpoint = actor_control_endpoint
         self._step_endpoint = step_endpoint or ""
         self._actor_id = actor_id
         self._enable_actor_selector = enable_actor_selector
@@ -49,6 +51,7 @@ class MatrixViewer:
         run_dashboard(
             matrix_sub=self._matrix_sub,
             actor_sub=self._actor_sub,
+            actor_control_endpoint=self._actor_control_endpoint,
             step_endpoint=self._step_endpoint,
             actor_id=self._actor_id,
             enable_actor_selector=self._enable_actor_selector,

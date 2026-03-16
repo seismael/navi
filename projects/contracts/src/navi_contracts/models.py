@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 __all__: list[str] = [
     "Action",
+    "ActorControlRequest",
+    "ActorControlResponse",
     "BatchStepRequest",
     "BatchStepResult",
     "DistanceMatrix",
@@ -61,6 +63,26 @@ class Action:
     angular_velocity: NDArray[np.float32]  # (batch, 3) — roll, pitch, yaw rates
     policy_id: str
     step_id: int
+    timestamp: float
+
+
+@dataclass(frozen=True, slots=True)
+class ActorControlRequest:
+    """Dashboard-to-trainer control request for roster and selection."""
+
+    command: str
+    actor_id: int
+    timestamp: float
+
+
+@dataclass(frozen=True, slots=True)
+class ActorControlResponse:
+    """Trainer reply describing available actors and active selection."""
+
+    ok: bool
+    actor_id: int
+    actor_ids: NDArray[np.int32]
+    message: str
     timestamp: float
 
 

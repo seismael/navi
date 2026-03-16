@@ -559,6 +559,23 @@ uint16_t Compiler::float_to_half(float f) {
     }
 }
 
+// Return the minimum SDF value in the sub-block [x..x+size, y..y+size, z..z+size].
+float Compiler::block_min_sdf(
+    const std::vector<float>& dense_grid,
+    int N, int x, int y, int z, int size) const
+{
+    float min_val = std::numeric_limits<float>::max();
+    for (int bz = z; bz < z + size && bz < N; ++bz) {
+        for (int by = y; by < y + size && by < N; ++by) {
+            for (int bx = x; bx < x + size && bx < N; ++bx) {
+                float v = dense_grid[bz * N * N + by * N + bx];
+                if (v < min_val) min_val = v;
+            }
+        }
+    }
+    return min_val;
+}
+
 uint32_t Compiler::build_recursive(
     const std::vector<float>& dense_grid,
     int N, int x, int y, int z, int size,
@@ -568,7 +585,9 @@ uint32_t Compiler::build_recursive(
     if (size == 1) {
         // LEAF NODE (Type 1)
         float dist = dense_grid[z * N * N + y * N + x];
-        uint16_t semantic_id = 0;
+        // Mark surface-proximate leaves with semantic=1 so the sphere-tracer
+        // can distinguish surface hits from empty-space leaves.
+        uint16_t semantic_id = (dist < m_voxel_size * 2.0f) ? 1 : 0;
         uint16_t dist_f16 = float_to_half(dist);
 
         uint64_t node = (1ULL << 63); // Type 1 flag
@@ -578,7 +597,34 @@ uint32_t Compiler::build_recursive(
         return deduplicate_leaf_node(node, dag_pool, unique_nodes);
     }
 
+    // Early-leaf: if the entire sub-block is uniform (all voxels ≈ same
+    // value), collapse into a single leaf instead of subdividing further.
+    {
+        float first_val = dense_grid[z * N * N + y * N + x];
+        bool uniform = true;
+        for (int bz = z; bz < z + size && bz < N && uniform; ++bz) {
+            for (int by = y; by < y + size && by < N && uniform; ++by) {
+                for (int bx = x; bx < x + size && bx < N && uniform; ++bx) {
+                    if (std::abs(dense_grid[bz * N * N + by * N + bx] - first_val) > 1e-6f) {
+                        uniform = false;
+                    }
+                }
+            }
+        }
+        if (uniform) {
+            uint16_t semantic_id = (first_val < m_voxel_size * 2.0f) ? 1 : 0;
+            uint16_t dist_f16 = float_to_half(first_val);
+            uint64_t node = (1ULL << 63);
+            node |= (static_cast<uint64_t>(semantic_id) << 16);
+            node |= static_cast<uint64_t>(dist_f16);
+            return deduplicate_leaf_node(node, dag_pool, unique_nodes);
+        }
+    }
+
     int half = size / 2;
+    // The diagonal extent of an octant cell in world space.
+    float octant_extent = static_cast<float>(half) * m_voxel_size * 1.7321f; // sqrt(3)
+
     uint8_t child_mask = 0;
     std::vector<uint32_t> children;
 
@@ -587,9 +633,26 @@ uint32_t Compiler::build_recursive(
         int oy = (i & 2) ? half : 0;
         int oz = (i & 4) ? half : 0;
 
+        // Void octant detection: if every voxel in this octant is farther
+        // from geometry than the octant's diagonal, the sphere tracer can
+        // safely skip the entire octant.  Clear the mask bit.
+        float min_sdf = block_min_sdf(dense_grid, N, x + ox, y + oy, z + oz, half);
+        if (min_sdf > octant_extent) {
+            // Do NOT set the mask bit — octant is void.
+            continue;
+        }
+
         uint32_t child_ptr = build_recursive(dense_grid, N, x + ox, y + oy, z + oz, half, dag_pool, unique_nodes);
         children.push_back(child_ptr);
         child_mask |= (1 << i);
+    }
+
+    // If ALL octants are void (very unlikely), emit a far-distance leaf.
+    if (child_mask == 0) {
+        float min_sdf = block_min_sdf(dense_grid, N, x, y, z, size);
+        uint16_t dist_f16 = float_to_half(min_sdf);
+        uint64_t node = (1ULL << 63) | static_cast<uint64_t>(dist_f16);
+        return deduplicate_leaf_node(node, dag_pool, unique_nodes);
     }
 
     return deduplicate_internal_node(child_mask, children, dag_pool, unique_nodes);

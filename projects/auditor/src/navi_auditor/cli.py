@@ -305,6 +305,10 @@ def dashboard(
         None,
         help="Actor/Trainer PUB SUB address (action_v2 + telemetry)",
     ),
+    actor_control_endpoint: str = typer.Option(
+        None,
+        help="Actor/Trainer selector REP address for roster query and selected-actor control.",
+    ),
     step_endpoint: str = typer.Option(
         None,
         help="Environment REP address for Tab-toggle manual stepping",
@@ -337,6 +341,7 @@ def dashboard(
     # CLI overrides
     m_sub = "" if passive else (matrix_sub if matrix_sub is not None else config.matrix_sub_address)
     a_sub = actor_sub if actor_sub is not None else config.actor_sub_address
+    a_ctl = actor_control_endpoint if actor_control_endpoint is not None else config.actor_control_address
     s_end = "" if passive else (step_endpoint if step_endpoint is not None else config.step_endpoint)
     resolved_max_distance = float(max_distance) if max_distance is not None else float(config.observation_max_distance_m)
 
@@ -349,6 +354,7 @@ def dashboard(
     dashboard_runner = _get_matrix_viewer_class()(
         matrix_sub=m_sub,
         actor_sub=a_sub,
+        actor_control_endpoint=a_ctl,
         step_endpoint=s_end,
         actor_id=actor_id,
         enable_actor_selector=enable_actor_selector,

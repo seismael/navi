@@ -249,6 +249,14 @@ __global__ void sphere_trace_kernel(
     const float float_bmin[3] = {bmin_x, bmin_y, bmin_z};
     const float float_bmax[3] = {bmax_x, bmax_y, bmax_z};
 
+    // Hit epsilon: constant threshold below which a ray registers a surface hit.
+    // The semantic gate (semantic != 0) is essential: it prevents void octants
+    // and far-from-surface leaves (both semantic=0) from registering as false
+    // hits at bbox boundaries where exit distance can be near zero.  The C++
+    // compiler sets semantic=1 for near-surface leaves (SDF < 2×voxel_size),
+    // ensuring the gate passes exactly where real geometry exists.
+    const float hit_epsilon = kHitEpsilon;
+
     for (int step = 0; step < max_steps; ++step) {
         float px = ox + current_t * dx;
         float py = oy + current_t * dy;
@@ -286,7 +294,7 @@ __global__ void sphere_trace_kernel(
                 semantic);
         }
 
-        if (semantic != 0 && dist < kHitEpsilon) {
+        if (semantic != 0 && dist < hit_epsilon) {
             out_distances[idx] = current_t;
             out_semantics[idx] = semantic;
             return;

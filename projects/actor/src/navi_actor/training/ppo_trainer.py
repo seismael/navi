@@ -24,10 +24,13 @@ from navi_actor.reward_shaping import RewardShaper
 from navi_actor.rnd import RNDModule
 from navi_actor.rollout_buffer import MultiTrajectoryBuffer
 from navi_contracts import (
+    ActorControlRequest,
+    ActorControlResponse,
     TOPIC_DISTANCE_MATRIX,
     TOPIC_TELEMETRY_EVENT,
     DistanceMatrix,
     TelemetryEvent,
+    deserialize,
     serialize,
 )
 
@@ -298,6 +301,8 @@ class PpoTrainer:
         self._scene_pool = scene_pool
         self._last_dashboard_observation: DistanceMatrix | None = None
         self._last_dashboard_heartbeat_at: float = 0.0
+        self._selected_actor_lock = threading.Lock()
+        self._selected_stream_actor_id: int = int(config.telemetry_actor_id)
 
         self._n_actors = config.n_actors
 
@@ -419,6 +424,8 @@ class PpoTrainer:
         # Phase 11: Async Telemetry
         self._telemetry_queue: queue.Queue[tuple[str, bytes, str] | None] = queue.Queue(maxsize=1024)
         self._telemetry_thread: threading.Thread | None = None
+        self._control_thread: threading.Thread | None = None
+        self._control_stop_event = threading.Event()
         self._rollout_group_count = 2 if self._n_actors >= 2 else 1
         self._rollout_group_indices = tuple(
             group.contiguous()
@@ -465,6 +472,90 @@ class PpoTrainer:
         pub.close(linger=0)
         ctx.term()
         _LOGGER.info("Async telemetry worker stopped")
+
+    def _get_selected_stream_actor_id(self) -> int:
+        with self._selected_actor_lock:
+            return self._selected_stream_actor_id
+
+    def _set_selected_stream_actor_id(self, actor_id: int) -> bool:
+        if actor_id < 0 or actor_id >= self._n_actors:
+            return False
+        with self._selected_actor_lock:
+            changed = actor_id != self._selected_stream_actor_id
+            self._selected_stream_actor_id = actor_id
+            if changed:
+                self._last_dashboard_observation = None
+                self._last_dashboard_heartbeat_at = 0.0
+        return True
+
+    def _actor_control_response(self, *, ok: bool, actor_id: int, message: str) -> ActorControlResponse:
+        return ActorControlResponse(
+            ok=ok,
+            actor_id=actor_id,
+            actor_ids=np.arange(self._n_actors, dtype=np.int32),
+            message=message,
+            timestamp=time.time(),
+        )
+
+    def _control_worker(self) -> None:
+        ctx = zmq.Context()
+        rep = ctx.socket(zmq.REP)
+        rep.setsockopt(zmq.LINGER, 0)
+        rep.setsockopt(zmq.RCVTIMEO, 250)
+        rep.bind(self._config.control_address)
+        _LOGGER.info("Actor selector control worker started on %s", self._config.control_address)
+
+        try:
+            while not self._control_stop_event.is_set():
+                try:
+                    data = rep.recv()
+                except zmq.Again:
+                    continue
+                except Exception as exc:
+                    _LOGGER.warning("Actor selector control receive failure: %s", exc)
+                    continue
+
+                try:
+                    request = deserialize(data)
+                    if not isinstance(request, ActorControlRequest):
+                        response = self._actor_control_response(
+                            ok=False,
+                            actor_id=self._get_selected_stream_actor_id(),
+                            message="unsupported-request",
+                        )
+                    elif request.command == "snapshot":
+                        response = self._actor_control_response(
+                            ok=True,
+                            actor_id=self._get_selected_stream_actor_id(),
+                            message="snapshot",
+                        )
+                    elif request.command == "select":
+                        changed = self._set_selected_stream_actor_id(int(request.actor_id))
+                        response = self._actor_control_response(
+                            ok=changed,
+                            actor_id=self._get_selected_stream_actor_id(),
+                            message="selected" if changed else "invalid-actor-id",
+                        )
+                    else:
+                        response = self._actor_control_response(
+                            ok=False,
+                            actor_id=self._get_selected_stream_actor_id(),
+                            message="unknown-command",
+                        )
+                except Exception as exc:
+                    _LOGGER.warning("Actor selector control failure: %s", exc)
+                    response = self._actor_control_response(
+                        ok=False,
+                        actor_id=self._get_selected_stream_actor_id(),
+                        message="internal-error",
+                    )
+
+                with contextlib.suppress(Exception):
+                    rep.send(serialize(response))
+        finally:
+            rep.close(linger=0)
+            ctx.term()
+            _LOGGER.info("Actor selector control worker stopped")
 
     def _sync_rollout_policy(self) -> None:
         """Copy weights from learner_policy to rollout_policy with thread safety."""
@@ -654,12 +745,16 @@ class PpoTrainer:
         # Start background telemetry thread
         self._telemetry_thread = threading.Thread(target=self._telemetry_worker, daemon=True)
         self._telemetry_thread.start()
+        self._control_stop_event.clear()
+        self._control_thread = threading.Thread(target=self._control_worker, daemon=True)
+        self._control_thread.start()
 
         _LOGGER.info(
-            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s temporal=%s (async)",
+            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s control=%s temporal=%s (async)",
             self._n_actors,
             self._gmdag_file or "<state-only>",
             self._config.pub_address,
+            self._config.control_address,
             self._config.temporal_core,
         )
 
@@ -670,6 +765,11 @@ class PpoTrainer:
             self._telemetry_queue.put(None)
             self._telemetry_thread.join(timeout=2.0)
             self._telemetry_thread = None
+
+        self._control_stop_event.set()
+        if self._control_thread:
+            self._control_thread.join(timeout=2.0)
+            self._control_thread = None
 
         if self._runtime is not None:
             with contextlib.suppress(Exception):
@@ -1136,7 +1236,7 @@ class PpoTrainer:
             return ()
         if self._config.telemetry_all_actors:
             return tuple(range(self._n_actors))
-        selected_actor = int(self._config.telemetry_actor_id)
+        selected_actor = self._get_selected_stream_actor_id()
         if selected_actor < 0 or selected_actor >= self._n_actors:
             return ()
         return (selected_actor,)
@@ -1144,7 +1244,7 @@ class PpoTrainer:
     def _should_publish_actor_telemetry(self, actor_id: int) -> bool:
         if self._config.telemetry_all_actors:
             return True
-        return actor_id == int(self._config.telemetry_actor_id)
+        return actor_id == self._get_selected_stream_actor_id()
 
     def _publish_step_telemetry(self, *, step_id: int, episode_id: int, actor_id: int, **kwargs: Any) -> None:
         if not self._config.emit_training_telemetry:
@@ -1174,7 +1274,7 @@ class PpoTrainer:
         event = TelemetryEvent(
             event_type="actor.training.ppo.update",
             episode_id=0,
-            env_id=int(self._config.telemetry_actor_id),
+            env_id=self._get_selected_stream_actor_id(),
             step_id=step_id,
             payload=p,
             timestamp=time.time(),
@@ -1208,7 +1308,7 @@ class PpoTrainer:
                      "transition_ms", "tick_total_ms", "zero_wait_ratio", "ppo_update_ms",
                      "host_extract_ms", "telemetry_publish_ms", "ppo_inference_ms",
                      "ppo_optimization_ms", "ppo_aux_ms"]], dtype=np.float32)
-        event = TelemetryEvent(event_type="actor.training.ppo.perf", episode_id=0, env_id=int(self._config.telemetry_actor_id), step_id=step_id,
+        event = TelemetryEvent(event_type="actor.training.ppo.perf", episode_id=0, env_id=self._get_selected_stream_actor_id(), step_id=step_id,
                                payload=p, timestamp=time.time())
         _enqueue_telemetry(
             self._telemetry_queue,
@@ -1421,7 +1521,7 @@ class PpoTrainer:
             return done_indices[:0]
         if self._config.telemetry_all_actors:
             return done_indices
-        telemetry_actor = int(self._config.telemetry_actor_id)
+        telemetry_actor = self._get_selected_stream_actor_id()
         return done_indices[done_indices == telemetry_actor]
 
     def _selected_step_telemetry_actor_indices(self) -> torch.Tensor:
@@ -1430,7 +1530,7 @@ class PpoTrainer:
             return torch.empty((0,), dtype=torch.int64, device=self._device)
         if self._config.telemetry_all_actors:
             return torch.arange(self._n_actors, dtype=torch.int64, device=self._device)
-        return torch.tensor([int(self._config.telemetry_actor_id)], dtype=torch.int64, device=self._device)
+        return torch.tensor([self._get_selected_stream_actor_id()], dtype=torch.int64, device=self._device)
 
     def _active_actor_local_indices(
         self,

@@ -123,12 +123,23 @@ class TestStreamEngine:
         engine._dispatch(TOPIC_DISTANCE_MATRIX, dm_actor1)
         engine._dispatch(TOPIC_ACTION, action_actor1)
         engine._dispatch(TOPIC_TELEMETRY_EVENT, telem_actor1)
-        assert 1 not in engine.actor_states
+        assert 1 in engine.actor_states
+        assert engine.actor_states[1].latest_matrix is None
+        assert engine.actor_states[1].latest_action is None
+        assert len(engine.actor_states[1].telemetry_buffer) == 0
 
         engine._dispatch(TOPIC_DISTANCE_MATRIX, dm_actor0)
         assert 0 in engine.actor_states
         assert engine.actor_states[0].latest_matrix is not None
         assert engine.actor_states[0].latest_matrix.episode_id == 11
+        engine.close()
+
+    def test_sync_actor_roster_prepopulates_states(self) -> None:
+        engine = StreamEngine(actor_sub="tcp://localhost:15557", selected_actor_id=0)
+
+        engine.sync_actor_roster([0, 3, 7])
+
+        assert sorted(engine.actor_states.keys()) == [0, 3, 7]
         engine.close()
 
     def test_selected_actor_none_ingests_all_actors(self) -> None:

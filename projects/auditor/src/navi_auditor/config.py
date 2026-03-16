@@ -44,6 +44,10 @@ class AuditorConfig(_SettingsBase):
         default="tcp://localhost:5557",
         validation_alias="NAVI_ACTOR_PUB_ADDRESS",
     )
+    actor_control_address: str = Field(
+        default="tcp://localhost:5561",
+        validation_alias="NAVI_ACTOR_CONTROL_ADDRESS",
+    )
     step_endpoint: str = Field(
         default="tcp://localhost:5560",
         validation_alias="NAVI_ENV_REP_ADDRESS",
