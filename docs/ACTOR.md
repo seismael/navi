@@ -149,6 +149,8 @@ Current properties:
 
 - input shape `(B, 3, Az, El)`
 - output latent embedding `z_t` with configurable embedding dimension
+- strided `Conv2d` patch projection with `patch_size=8`
+- `nn.TransformerEncoder` over patch tokens plus one `[CLS]` token
 - fixed spherical positional structure rather than ad hoc flattened features
 
 Architectural consequence:
@@ -156,6 +158,47 @@ Architectural consequence:
 - runtime upgrades must preserve spherical observation semantics
 - imported ideas such as foveation remain optional future work and do not alter
   the current production contract
+
+### 7.1 Resolution Scaling Boundary
+
+The current encoder is not resolution-linear.
+
+Patch-token count grows as:
+
+`(Az / 8) * (El / 8)`
+
+and the encoder then applies full self-attention over those tokens. That means
+encoder cost grows much faster than raw ray count once the profile is widened.
+
+Concrete token counts on the active benchmark profiles are:
+
+- `256x48` -> `192` patch tokens
+- `384x72` -> `432` patch tokens
+- `512x96` -> `768` patch tokens
+- `768x144` -> `1728` patch tokens
+
+That is why the environment runtime and the actor do not scale the same way.
+The environment mostly tracks ray-count growth; the actor additionally pays the
+transformer token-growth penalty during PPO evaluation.
+
+### 7.2 Current Measured Consequence
+
+The March 2026 resolution sweep established the following on the active
+4-actor GRU trainer surface:
+
+- `256x48`: about `49.6 SPS`, `ppo_update_ms` about `1019.68`
+- `384x72`: about `49.34 SPS`, `ppo_update_ms` about `1249.87`
+- `512x96`: about `43.96 SPS`, `ppo_update_ms` about `17731.88`
+- `768x144`: trainer OOM on the active MX150 surface inside transformer
+  self-attention during PPO update
+
+Those results come from the canonical bounded trainer artifacts under
+`artifacts/benchmarks/resolution-compare/` and they matter architecturally:
+
+- the environment runtime is no longer the only performance story
+- the actor encoder is already a first-class scaling limit
+- future temporal-core promotion alone will not make the full trainer scale
+  linearly with observation resolution
 
 ## 8. Curiosity: RND Module
 
@@ -255,7 +298,12 @@ This decision does not imply that the temporal core is free. The remaining
 throughput ceiling must still be investigated through real trainer attribution,
 because the optimizer path, rollout cadence, telemetry cadence, and scene-level
 environment variance all continue to contribute wall-clock cost on top of the
-active Mamba sequence path.
+selected temporal-core path.
+
+At higher observation resolutions, current evidence says the temporal core is
+not the only dominant factor anyway. RayViT encoder evaluation and its
+attention memory footprint become the first limiter before a future fused
+temporal runtime would have a chance to solve the full trainer scaling problem.
 
 That is why the cuDNN GRU path is the active canonical runtime now. It keeps
 one production temporal path, improves trainer throughput on the machine we
@@ -280,8 +328,8 @@ The future upgrade checklist is:
 
 - install a compatible fused `mamba-ssm` + `causal-conv1d` stack or wheel for the actor environment
 - verify import and runtime on the actual training machine
-- swap the active temporal-core implementation in `cognitive_policy.py` from `MambapyTemporalCore` to the fused runtime
-- rerun the temporal bakeoff on CUDA, including the active Mamba path and fused candidates
+- add the fused runtime as an explicit selector candidate without creating a second canonical trainer surface
+- rerun the temporal bakeoff on CUDA, including the active GRU path and fused candidates
 - rerun the bounded 4-actor canonical training surface and PPO attribution pass
 - promote fused Mamba-2 back into the documentation only after the real trainer proves the win on the supported environment
 

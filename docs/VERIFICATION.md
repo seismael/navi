@@ -137,8 +137,24 @@ Required proof style:
 - report end-to-end impact, not just isolated kernel numbers
 - prefer structured `bench-sdfdag --json` summaries when capturing benchmark artifacts for comparison
 - environment-layer benchmarks must measure backend stepping rather than spending most of the wall time in repeated pre-step binary integrity traversal of the same already-qualified asset
+- observation-resolution work must archive both environment-only and end-to-end artifacts when the change could affect both layers
 
-### 3.6.1 Validation Matrix
+### 3.6.1 Resolution-Scaling Proof
+
+Canonical resolution-scaling claims now require two distinct artifact classes:
+
+1. environment-only `bench-sdfdag --json` evidence for the compared profiles
+2. bounded canonical trainer evidence from `scripts/run-resolution-compare.ps1`
+
+Required interpretation rules:
+
+- if the environment remains healthy but the trainer slows or OOMs, document the
+	failure as an actor-side scaling limit unless evidence says otherwise
+- if the trainer improves while the environment regresses, the regression is
+	still real and must be surfaced separately
+- benchmark notes must say which layer produced each number
+
+### 3.6.2 Validation Matrix
 
 Canonical SDF/DAG validation should be tracked in five explicit lanes:
 

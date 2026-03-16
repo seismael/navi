@@ -1,3 +1,5 @@
+> Historical imported reference only. This file preserves external design material and is not canonical Navi policy. For current repository behavior, use `docs/VERIFICATION.md`, `docs/PERFORMANCE.md`, `docs/SDFDAG_RUNTIME.md`, and `AGENTS.md`.
+
 # TESTING_AND_VERIFICATION.md — TopoNav Ecosystem
 
 ## 1. Executive Summary

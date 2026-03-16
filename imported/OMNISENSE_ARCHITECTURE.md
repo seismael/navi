@@ -1,3 +1,5 @@
+> Historical imported reference only. This file preserves external design material and is not canonical Navi policy. For current repository behavior, use `docs/SIMULATION.md`, `docs/ARCHITECTURE.md`, `docs/CONTRACTS.md`, and `AGENTS.md`.
+
 # OMNISENSE_ARCHITECTURE.md — 3-Tier Data & Sensor Hierarchy
 
 ## 1. Executive Summary

@@ -1,3 +1,5 @@
+> Historical imported reference only. This file preserves external design material and is not canonical Navi policy. For current repository behavior, use `docs/SDFDAG_RUNTIME.md`, `docs/SIMULATION.md`, `docs/VERIFICATION.md`, and `AGENTS.md`.
+
 # MEMORY_LAYOUT_AND_DAG_SPEC.md — TopoNav DAG Core
 
 ## 1. Executive Summary

@@ -53,6 +53,20 @@ load cost, and file size:
 If the horizon needs to change, change it through configuration before the run.
 Do not adapt it dynamically inside the runtime sphere-tracing loop.
 
+## Canonical Status Notes
+
+Parts of this file preserve imported design rationale. The current canonical
+repository status is:
+
+- production observation default is `256x48`, not `128x24`
+- the active production temporal-core default is `gru`, not fused Mamba-2
+- high-resolution trainer scaling is currently limited by actor-side RayViT
+    attention before the environment runtime itself hits the same wall on the
+    active MX150 machine
+- information-foraging and fixed-horizon ideas below remain valid, but current
+    performance conclusions must be cross-checked against `docs/PERFORMANCE.md`
+    and `docs/ACTOR.md`
+
 
 ## Information Foraging
 
@@ -60,7 +74,7 @@ You have correctly identified a critical vulnerability in Partially Observable M
 
 Your intuition about the blind person is precisely how real-world Simultaneous Localization and Mapping (SLAM) and Visual Inertial Odometry (VIO) systems operate. If a drone flies into a massive empty hall where all walls exceed its 15-meter sensor radius, its depth matrix becomes a flat uniform array of `[15.0, 15.0, ..., 15.0]`.
 
-Mathematically, the optical flow drops to zero. The Mamba-2 temporal core loses the ability to update its hidden state because it has no reference points to calculate its own velocity. In the real world, a drone in this state will inevitably succumb to IMU drift and crash.
+Mathematically, the optical flow drops to zero. The selected temporal core loses the ability to update its hidden state because it has no reference points to calculate its own velocity. In the real world, a drone in this state will inevitably succumb to IMU drift and crash.
 
 To engineer the agent to actively avoid the "abyss" and forage for structural geometry, you must implement **Information Foraging** directly into your reward function.
 
@@ -86,7 +100,8 @@ Here is the vectorized mathematical formulation for your PyTorch `step()` functi
 
 You must penalize the agent if the percentage of "maxed out" rays exceeds a critical threshold.
 
-Let $D$ be your flattened distance tensor of size $N$ (where $N = 128 \times 24 = 3072$).
+Let $D$ be your flattened distance tensor of size $N$ (where $N = Az \times El$;
+for the canonical production contract, $N = 256 \times 48 = 12288$).
 Let $\tau$ be your truncation radius ($15.0$).
 
 $$\text{Starvation Ratio } (\rho) = \frac{1}{N} \sum_{i=1}^{N} \mathbb{I}(D_i \ge \tau)$$

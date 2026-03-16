@@ -1,3 +1,5 @@
+> Historical imported reference only. This file preserves external design material and is not canonical Navi policy. For current repository behavior, use `docs/SIMULATION.md`, `docs/SDFDAG_RUNTIME.md`, `docs/VERIFICATION.md`, and `AGENTS.md`.
+
 # VOXEL_COMPILER.md — The Universal Asset Factory
 
 ## 1. Purpose

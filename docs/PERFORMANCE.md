@@ -27,6 +27,15 @@ kernel is fast, the bottleneck moves to dataflow above it.
 
 That is the current state of Navi.
 
+Current machine-level truth is now sharper:
+
+- the environment-only `bench-sdfdag` surface still scales materially better
+	than the full trainer as observation resolution rises
+- the canonical 4-actor trainer remains near the production floor at
+	`256x48`, degrades moderately at `512x96`, and fails at `768x144` on the
+	active MX150 surface because actor-side attention memory exhausts the
+	available `2 GB` VRAM
+
 ## 3. Adopted Performance Rules
 
 ### 3.1 Measure End To End
@@ -115,6 +124,7 @@ Therefore the canonical performance rule is:
 - `mambapy` may be selected explicitly on that same surface for controlled comparisons, but performance conclusions must compare like-for-like bounded runs with only the temporal-core selector changed
 - benchmark-proven end-to-end trainer wins may replace GRU or another supported backend as the canonical default, but only when config defaults, wrappers, validation, and docs are updated together so the repo keeps one performance truth
 - throughput attribution must measure the selected runtime on the real trainer surface before assigning the remaining `~100 SPS` ceiling to the temporal core alone
+- future fused temporal-core work may reduce part of PPO update cost, but it does not remove RayViT token-attention scaling on higher observation profiles
 
 Why this is mandatory in practice:
 
@@ -122,11 +132,11 @@ Why this is mandatory in practice:
 - an unfused Python Mamba path decomposes that sequence into many smaller tensor ops
 - the CPU pays for every dispatcher entry, argument check, autograd node, and launch submission
 - the GPU may still execute only a smaller fraction of the total wall time
-- a future fused Mamba-2 build may still collapse that sequence math further, but the current production question is how much of the remaining wall time comes from rollout cadence, environment variance, telemetry, and PPO update structure while the active Mamba path is in place
+- a future fused Mamba-2 build may still collapse that sequence math further, but the current production question is how much of the remaining wall time comes from rollout cadence, environment variance, telemetry, PPO update structure, and the now-dominant RayViT encoder path on the active GRU-based trainer surface
 
 Future switch-back rule:
 
-- fused Mamba-2 may be introduced later, but only after the supported environment exists and the real bounded trainer proves that it beats the current Windows-friendly Mamba baseline without reopening deployment friction on the active platform
+- fused Mamba-2 may be introduced later, but only after the supported environment exists and the real bounded trainer proves that it beats the current GRU baseline without reopening deployment friction on the active platform
 
 ### 3.5 Keep Observability Passive
 
@@ -168,6 +178,41 @@ The latest attribution matrix in
 `artifacts/benchmarks/attribution-matrix/20260309-095734/summary.csv` supports
 that interpretation.
 
+## 4.1 Observation-Resolution Scaling
+
+March 2026 bounded canonical trainer sweeps produced the current reference
+results for the active 4-actor GRU surface:
+
+| Profile | Rays / Actor | Steady SPS | `env_ms` | `ppo_update_ms` | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| `256x48` | `12,288` | `49.6` | `36.50` | `1,019.68` | healthy bounded run |
+| `384x72` | `27,648` | `49.34` | `39.96` | `1,249.87` | healthy bounded run |
+| `512x96` | `49,152` | `43.96` | `50.64` | `17,731.88` | runnable, update-dominated |
+| `768x144` | `110,592` | n/a | n/a | n/a | trainer OOM in actor attention |
+
+Primary artifact roots:
+
+- `artifacts/benchmarks/resolution-compare/resolution-compare-20260317-003916/`
+- `artifacts/benchmarks/resolution-compare/resolution-compare-20260317-004714/`
+- `artifacts/benchmarks/resolution-compare/resolution-compare-20260317-002948/768x144/repeat-01/train.log`
+
+Interpretation rules:
+
+- ray-count growth alone does not explain trainer slowdown
+- `env_ms` rises with the larger sphere, but `ppo_update_ms` rises much faster
+- the active failure boundary at `768x144` is `torch.nn.MultiheadAttention`
+	allocation, which localizes the current limit to the actor encoder path
+
+The actor-side reason is straightforward. `RayViTEncoder` uses `patch_size=8`,
+so token count grows from `192` at `256x48` to `768` at `512x96` and `1728` at
+`768x144`. Full self-attention then grows roughly with the square of that token
+count.
+
+Environment-only comparison remains important because it shows the CUDA runtime
+is not the same ceiling. The environment path still remained benchmark-viable
+above the trainer limit on the same machine, which means future work must keep
+separating environment wins from actor-side bottlenecks.
+
 Canonical PPO update logs now also report the minibatch `updates=` count plus
 both averaged and summed learner-stage timings. That surface now includes
 `stats=` for per-minibatch KL, clip-fraction, and metric accumulation work plus
@@ -193,6 +238,14 @@ or actor/critic head evaluation before changing the canonical runtime.
 The canonical RayViT encoder patch-token path should use direct strided patch
 projection rather than explicit `view -> permute -> contiguous -> linear`
 materialization when the same tokenization can be expressed as one convolution.
+
+GPU-sampled `512x96` evidence reinforces the same conclusion.
+`artifacts/benchmarks/resolution-compare/resolution-compare-20260317-004714/`
+and `artifacts/benchmarks/resolution-compare/gpu-sample-512x96-20260317.csv`
+show the active MX150 spending the PPO update window near full GPU utilization
+while VRAM climbs to roughly `1963 MiB` out of `2048 MiB`. On this machine,
+`512x96` is therefore a diagnostic comparison surface, not a new production
+default.
 
 One concrete remaining environment-to-actor seam still worth cleaning is the
 MJX speed-throttling dependency on previous depth. On tensor-native trainer
@@ -250,6 +303,9 @@ When run-to-run variance is non-trivial on the local machine, canonical environm
 The same rule now applies to bounded temporal-core comparisons: `scripts/run-temporal-compare.ps1` should prefer repeated direct-trainer runs and compare the emitted median `steady_sps` and median `ppo_update_ms` rather than one wrapper pass.
 The same repeated-run rule applies to observation-resolution scaling: `scripts/run-resolution-compare.ps1` should compare median `steady_sps` and median `ppo_update_ms` across repeated bounded trainer runs for each `AzimuthxElevation` profile rather than judging one pass.
 When `-ProfileCudaEvents` is used on that surface, comparison artifacts should also compare median learner `backward_ms` and median `gpu_backward_ms` before attributing the remaining stall to the active temporal runtime.
+Observation-resolution comparison notes must also say whether the result came
+from the environment-only `bench-sdfdag` surface or the full trainer surface.
+Mixing those two interpretations is a documentation error.
 
 ### 5.4 Experimental Work Classification
 
@@ -303,3 +359,10 @@ These values are current reference points, not final goals.
 
 No design becomes canonical because it is elegant on paper.
 It becomes canonical when it is contract-correct and faster in real training.
+
+## 9. Related Docs
+
+- `docs/ACTOR.md`
+- `docs/TRAINING.md`
+- `docs/VERIFICATION.md`
+- `docs/RESOLUTION_BENCHMARKS.md`

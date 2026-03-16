@@ -18,8 +18,8 @@ observations *to* the engine's canonical `(1, Az, El)` DistanceMatrix format.
 `CognitiveMambaPolicy` implements a 5-stage pipeline:
 1. **RayViTEncoder** — ViT `(B, 3, Az, El)` → `(B, 128)` spatial embedding
 2. **RND Curiosity** — intrinsic exploration reward from embedding novelty
-3. **EpisodicMemory** — FAISS KNN loop-closure detection and context retrieval
-4. **TemporalCore** — canonical sequence engine (benchmark-selected policy)
+3. **EpisodicMemory** — tensor-native cosine-similarity loop-avoidance and context retrieval
+4. **TemporalCore** — canonical sequence engine (`gru` by default, `mambapy` by explicit comparison)
 5. **ActorCriticHeads** — 4-DOF action distribution + value estimation
 
 Input contract: only `depth` and `semantic` from `DistanceMatrix` are consumed.
@@ -63,7 +63,35 @@ Repository wrappers keep the same canonical path:
 ```powershell
 ./scripts/train.ps1
 ./scripts/train-all-night.ps1
+./scripts/run-resolution-compare.ps1
 ```
+
+## Resolution Scaling Reality
+
+The actor does not scale linearly with observation resolution.
+
+Current `RayViTEncoder` implementation in `perception.py` uses:
+
+- strided `Conv2d` patch projection with `patch_size=8`
+- fixed spherical positional encodings
+- `nn.TransformerEncoder` over the resulting patch tokens
+
+That means token count scales with `(Az / 8) * (El / 8)` and self-attention
+cost grows roughly with the square of that token count.
+
+Concrete token counts on the current profiles are:
+
+- `256x48` -> `32 * 6 = 192` tokens
+- `384x72` -> `48 * 9 = 432` tokens
+- `512x96` -> `64 * 12 = 768` tokens
+- `768x144` -> `96 * 18 = 1728` tokens
+
+The canonical March 2026 resolution sweep therefore showed a split result:
+
+- the environment path remained viable at higher ray counts
+- the actor encoder plus PPO update became the dominant scaling limit
+- on the active MX150 machine, the full trainer OOMs at `768x144` inside
+	transformer self-attention during PPO update
 
 Run Actor with learned policy checkpoint:
 
@@ -172,8 +200,9 @@ means Python `3.12`, Windows `win_amd64`, and a fused package stack compatible
 with the pinned CUDA PyTorch actor environment.
 
 Temporal bakeoff remains diagnostic-only. The current canonical backend is the
-Windows-friendly Mamba path already used by the actor policy; future fused
-Mamba-2 remains available as `mamba2` for later promotion work.
+native cuDNN GRU path. Future fused `mamba-ssm` work remains available only as
+a later promotion target once a supported environment exists and the real
+bounded trainer proves the win.
 
 ### Switching Back Later
 
@@ -181,9 +210,9 @@ When the proper environment is ready later, the switch-back path is:
 
 1. install the fused temporal dependencies from vendored sources or a compatible wheel
 2. verify that `mamba2` imports and runs on the actual machine
-3. benchmark the active Windows-friendly Mamba path against any fused candidates with `run-temporal-bakeoff.ps1`
+3. benchmark the active GRU path against any fused candidates with `run-temporal-bakeoff.ps1`
 4. rerun the bounded canonical 4-actor training surface
-5. only then swap the active temporal-core implementation to fused Mamba-2 and update the docs
+5. only then promote the fused selector into the canonical docs, wrappers, and defaults
 
 ```powershell
 ./scripts/setup-actor-cuda.ps1

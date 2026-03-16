@@ -1,3 +1,5 @@
+> Historical imported reference only. This file preserves external design material and is not canonical Navi policy. For current repository behavior, use `docs/SIMULATION.md`, `docs/TRAINING.md`, `docs/ARCHITECTURE.md`, and `AGENTS.md`.
+
 # DASHBOARD_DESIGN.md — TopoNav Behavioral Observer Suite
 
 ## 1. Executive Summary

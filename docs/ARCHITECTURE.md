@@ -198,6 +198,25 @@ This is the key architectural bridge between old and new runtime work: the
 runtime beneath the contract may change, but the actor's observation semantics
 must not drift.
 
+### 6.2.1 Resolution-Scaling Boundary
+
+The environment and the actor do not share one scaling law.
+
+- environment cost tracks batched ray count and the bounded CUDA march
+- actor cost tracks both ray-derived input size and RayViT patch-token
+  self-attention cost
+
+With the current `patch_size=8` encoder, token count grows as `(Az / 8) * (El / 8)`.
+That keeps the observation contract stable, but it means end-to-end trainer
+scaling becomes actor-limited before the CUDA runtime itself is exhausted on the
+active machine.
+
+Architectural consequence:
+
+- runtime and compiler upgrades remain necessary
+- but documentation and planning must not treat higher observation resolution as
+  a pure environment problem once the actor encoder dominates PPO update cost
+
 ### 6.3 Persistence-First Collision Policy
 
 Canonical training is not reset-first. It is persistence-first.

@@ -1,3 +1,5 @@
+> Historical imported reference only. This file preserves external design material and is not canonical Navi policy. For current repository behavior, use `docs/ARCHITECTURE.md`, `docs/SIMULATION.md`, `docs/ACTOR.md`, and `AGENTS.md`.
+
 # SYSTEM_COMPONENTS.md — TopoNav Ecosystem Architecture
 
 ## 1. Executive Summary

@@ -60,6 +60,23 @@ Key runtime properties:
 - the canonical trainer may consume equivalent CUDA tensors directly
 - observer requirements do not change the environment's tensor math, observation normalization, or step semantics
 
+## 3.1 Runtime-Only Scaling Interpretation
+
+`bench-sdfdag` is the environment-layer throughput surface, not the full-trainer
+throughput surface.
+
+Use it to answer questions like:
+
+- does the CUDA runtime still scale acceptably when ray count increases?
+- did a compiler or kernel change regress stepping throughput?
+- does a higher observation profile remain viable before the actor is involved?
+
+Do not use it to claim end-to-end trainer viability at the same resolution.
+The active March 2026 benchmark work showed that the environment runtime
+remained usable above the current full-trainer ceiling on the MX150 machine.
+That means a trainer failure at high resolution is not automatically an
+environment regression.
+
 ## 4. Corpus Preparation
 
 `prepare-corpus` discovers source scenes, compiles missing or stale `.gmdag`
@@ -97,6 +114,14 @@ The tensor-native trainer seam may use the equivalent CUDA observation tensor
 This contract is viewer-invariant. Dashboard FOV choice, half-sphere extraction,
 palette, or other observer presentation preferences must be applied after
 publication and must not alter the environment contract or tensor stepping path.
+
+Real-scene interpretation note:
+
+- not every approved dataset scene has a closed ceiling shell
+- several ReplicaCAD stage assets are open-top shells, so upward-looking rays in
+  those scenes may legitimately saturate at the configured horizon
+- ceiling visibility therefore depends on source geometry and is not by itself a
+  dashboard or projection bug
 
 ### 5.2 Fixed-Horizon Policy
 

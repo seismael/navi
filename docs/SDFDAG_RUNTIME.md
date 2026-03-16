@@ -93,6 +93,25 @@ Execution cost depends on:
 The stable architectural guarantee is therefore bounded batched execution, not
 literal constant-time cost per ray.
 
+## 6.1 Runtime Ceiling vs. Trainer Ceiling
+
+The current repository now documents these as different limits.
+
+- the low-level runtime ceiling is measured with `bench-sdfdag`
+- the full-trainer ceiling is measured with the canonical actor training surface
+
+March 2026 resolution sweeps on the active MX150 machine showed that the
+runtime remained benchmark-viable at profiles above the current full-trainer
+limit. The trainer then failed later at `768x144` inside actor-side transformer
+self-attention during PPO update.
+
+That distinction matters for low-level CUDA work:
+
+- a trainer OOM at high resolution is not evidence that `torch_sdf.cast_rays()`
+   failed
+- low-level runtime changes must still be benchmarked on `bench-sdfdag` even
+   when the actor currently hits the first wall in end-to-end runs
+
 ## 7. Boundary Semantics
 
 The runtime and the environment boundary have distinct responsibilities.

@@ -44,6 +44,16 @@ native cuDNN GRU path by default on the active Windows machine. The canonical
 train and serve surfaces expose one explicit temporal-core selector contract on
 the same trainer surface: `gru` (default) and `mambapy`.
 
+The active benchmark machine is an MX150 (`sm_61`, `2 GB` VRAM). That matters
+for training guidance:
+
+- `256x48` remains the production default
+- `512x96` is a valid bounded comparison surface but carries a much heavier PPO
+	update cost on this machine
+- `768x144` currently exceeds full-trainer memory during actor-side attention
+	even though the environment runtime itself can still be benchmarked at that
+	profile
+
 Canonical rollout storage on that surface remains CUDA-resident. Host-staged or
 pinned-CPU rollout buffers are not part of the canonical trainer design and
 should be treated as non-canonical diagnostics unless the architecture standard
@@ -117,6 +127,13 @@ same canonical `sdfdag` path and emits per-run logs plus summary JSON/CSV under
 `artifacts/benchmarks/resolution-compare/`. Profiles are specified as
 `AzimuthxElevation`. Remember that doubling both dimensions is a `4x` ray-count
 increase and tripling both dimensions is a `9x` ray-count increase.
+
+Interpret those runs carefully:
+
+- trainer results reflect both the environment and the actor
+- larger profiles stress RayViT patch-token attention and PPO update memory,
+  not just ray casting
+- use `bench-sdfdag` separately when you need environment-only attribution
 
 For durable long-running training with explicit fleet size control, use the
 direct actor CLI instead of the wrapper:
@@ -255,6 +272,7 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - canonical environment shaping also penalizes starvation-heavy views and persistent near-field wall-hugging using ratios derived from the current spherical observation
 - canonical geometry-foraging shaping positively values mid-range structure visibility, forward-sector structure reacquisition, and controlled inspection turns that reveal more geometry instead of less
 - use explicit overrides only for deliberate experiments; temporal-core comparisons should change only `TemporalCore` or `--temporal-core` while holding all other canonical settings fixed
+- resolution-scaling comparisons should change only `AzimuthxElevation` while holding actor count, temporal core, rollout length, minibatch size, and PPO epochs fixed
 - dashboard mode detection stays on low-volume telemetry to avoid rollout stalls
 - the actor CLI still defaults the dashboard observation stream to a passive `10 Hz` frame for the selected telemetry actor, but `run-ghost-stack.ps1 -Train` disables that stream when launched detached and re-enables it only with `-WithDashboard`
 - widening observation streaming or full training telemetry to all actors remains a deliberate high-overhead diagnostic mode and should be enabled only when the operator explicitly requests all-actor fan-out
@@ -262,3 +280,4 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - the current grouped rollout surface may launch actor subsets on per-group CUDA streams, but any future ping-pong rewrite must preserve actor-local `observation -> action -> next observation` ordering and prove its value with bounded canonical measurements
 - PPO update-loss scalar materialization is diagnostic-only on the canonical hot path: the trainer still emits coarse `actor.training.ppo.update` events for mode/status detection by default, but full PPO loss fields are populated only when explicit update-loss telemetry is enabled
 - when a supported fused Mamba-2 environment is ready later, re-promotion must be proven by rerunning the canonical temporal profile and bounded canonical training surfaces before the active docs and scripts are switched away from GRU
+- stronger hardware may move the high-resolution ceiling outward, but documentation and scripts must not imply that higher observation profiles are already production-safe on the active MX150 machine

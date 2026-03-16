@@ -67,6 +67,12 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Soft Warning Policy:** Throughput drift, attach instability, and other non-fatal regressions MAY emit warnings, but hard failures must stop the nightly and produce machine-readable artifacts.
 - **Artifact Rule:** Every nightly run MUST emit one timestamped artifact root containing raw phase outputs plus a top-level summary JSON for morning review.
 
+### 2.4.3 Observation-Resolution Benchmark Standard
+- **Split Benchmark Rule:** Observation-resolution changes MUST be benchmarked on both the environment-only `bench-sdfdag` surface and the end-to-end canonical trainer surface. One measurement does not stand in for the other.
+- **Canonical Interpretation Rule:** Environment viability at a higher ray count does NOT prove end-to-end trainer viability. Documentation, scripts, and benchmark summaries MUST distinguish runtime scaling from actor-side scaling.
+- **Active Machine Truth Rule:** On the active MX150 `sm_61` machine, the canonical `256x48` contract remains the production default. Higher profiles such as `512x96` are diagnostic comparison surfaces, and `768x144` currently exceeds full-trainer memory limits during actor-side attention even though the environment runtime itself remains benchmark-viable.
+- **Future-Promotion Rule:** Better hardware or a future fused temporal core MAY move the trainer ceiling outward, but those upgrades MUST NOT be documented as solving high-resolution scaling by themselves while RayViT token attention still dominates the actor hot path.
+
 ### 2.4.2 SDF/DAG Validation Standard
 - **Layered Proof Required:** `projects/voxel-dag` and `projects/torch-sdf` MUST be validated at compiler, binary-format, runtime, corpus-promotion, and qualification levels rather than by one smoke test.
 - **Mathematical Oracle Rule:** Small canonical fixtures MUST be checked against independent or analytic geometry expectations, not only implementation-to-implementation self-comparison.
@@ -89,7 +95,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Performance-First Path:** Canonical runtime evolution prioritizes `.gmdag` compilation plus batched `torch_sdf.cast_rays()` execution before any actor-brain redesign work.
 - **Canonical Training Runtime:** All actor training entrypoints (`train`, `run-ghost-stack.ps1 -Train`, and wrapper training scripts) MUST run only on the `sdfdag` backend over compiled `.gmdag` assets.
 - **Unified Training Direction:** Canonical high-throughput training MUST use one in-process unified trainer that removes the Environment<->Actor ZMQ control path from the rollout hot loop. Parallel training architectures, equivalent alternate modes, and dual canonical surfaces are forbidden.
-- **Actor Preservation:** Environment and compiler upgrades MUST preserve the actor-side `DistanceMatrix` contract so `RayViTEncoder` and `Mamba2TemporalCore` remain unchanged.
+- **Actor Preservation:** Environment and compiler upgrades MUST preserve the actor-side `DistanceMatrix` contract so `RayViTEncoder` and the selected canonical temporal core remain unchanged.
 - **No CPU Fallback In Canonical Path:** The canonical SDF/DAG runtime must fail fast when CUDA or the compiled backend is unavailable rather than silently degrading to a slower path.
 - **Batching Rule:** New SDF/DAG execution must be designed around reusable GPU buffers and `batch_step()` throughput, not per-actor stepping or per-step allocation churn.
 - **CLI-Level Integration Rule:** Any direct actor-to-environment integration for canonical training MUST occur at CLI or orchestration boundaries. Service packages remain sovereign; the actor may instantiate environment backends only in the single canonical training entrypoint, not as a permanent service-to-service dependency surface.
@@ -142,6 +148,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 ### 3.2 Vision Transformer Optimization
 - `RayViTEncoder` MUST cache fixed spherical positional encodings.
 - Avoid redundant sin/cos recomputation on every forward pass.
+- Observation-resolution documentation and performance conclusions MUST account for the real RayViT token path: with the canonical `patch_size=8`, token count scales as `(Az / 8) * (El / 8)` and full self-attention cost grows roughly with the square of that count.
 
 ### 3.3 Zero-Stall Telemetry
 - High-frequency per-actor per-step telemetry is forbidden during training as it bottlenecks the CPU rollout loop.
@@ -161,6 +168,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Tensor-only actor helper graphs such as reward shaping SHOULD use `torch.compile` on supported GPU/compiler stacks when they remain on the PyTorch side of the rollout hot path; unsupported stacks MUST fall back cleanly to eager execution with explicit attribution visibility.
 - Canonical PPO update code MUST avoid redundant tensor device copies, allocator churn, and repeated optimizer-side host sync when minibatch tensors already reside on CUDA.
 - Canonical PPO update code MUST keep the temporal-core sequence path inside precompiled backend operators such as cuDNN GRU on the active path; Python-level sequence unrolling, dispatcher-heavy scan decomposition, and large autograd-graph construction are forbidden on the production hot path.
+- Canonical throughput analysis MUST not blame high-resolution trainer regressions on the SDF/DAG runtime alone when RayViT encoder attention or PPO update memory clearly dominates the measured wall time.
 - Canonical PPO update work SHOULD prefer optimizer/runtime improvements on the existing learner path before changing training hyperparameter defaults.
 - Actor-side performance telemetry SHOULD expose enough sub-metrics to distinguish memory, transport, reward shaping, and buffer-append overhead when investigating stalls.
 - Canonical throughput investigation MUST add attribution on the existing `navi-actor train` surface rather than creating alternate trainer modes or shadow benchmarking entrypoints.

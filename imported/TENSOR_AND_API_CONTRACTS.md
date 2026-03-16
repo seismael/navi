@@ -1,3 +1,5 @@
+> Historical imported reference only. This file preserves external design material and is not canonical Navi policy. For current repository behavior, use `docs/CONTRACTS.md`, `docs/SDFDAG_RUNTIME.md`, `docs/VERIFICATION.md`, and `AGENTS.md`.
+
 # TENSOR_AND_API_CONTRACTS.md — Interface Boundaries
 
 ## 1. Executive Summary
