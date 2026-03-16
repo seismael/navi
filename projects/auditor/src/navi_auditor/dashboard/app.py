@@ -75,7 +75,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             matrix_sub=matrix_sub,
             actor_sub=actor_sub,
             step_endpoint=step_endpoint,
-            selected_actor_id=None if enable_actor_selector else actor_id,
+            selected_actor_id=actor_id,
         )
 
         # Teleop state

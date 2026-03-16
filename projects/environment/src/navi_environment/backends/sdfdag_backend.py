@@ -298,15 +298,33 @@ def _maybe_compile_callable(
 ) -> Any:
     if not enabled:
         return fn
-    # 1. Try torch.compile (requires Triton, SM >= 7.0)
+    # 1. Try torch.compile only on supported CUDA GPUs.
+    compile_supported = False
+    compile_reason = "torch.compile unavailable"
+    try:
+        if bool(torch_module.cuda.is_available()):
+            capability = torch_module.cuda.get_device_capability()
+            if tuple(int(part) for part in capability) >= (7, 0):
+                compile_supported = True
+            else:
+                compile_reason = (
+                    f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
+                )
+        else:
+            compile_reason = "CUDA is unavailable"
+    except Exception as exc:
+        compile_reason = f"CUDA capability probe failed ({exc})"
+
     compile_fn = getattr(torch_module, "compile", None)
-    if compile_fn is not None:
+    if compile_supported and compile_fn is not None:
         try:
             compiled = compile_fn(fn, fullgraph=True, dynamic=False, mode="reduce-overhead")
             _LOG.info("torch.compile enabled for %s", name)
             return compiled
         except Exception as exc:
             _LOG.info("torch.compile unavailable for %s (%s), trying torch.jit.script", name, exc)
+    elif compile_fn is not None:
+        _LOG.info("Skipping torch.compile for %s (%s); trying torch.jit.script", name, compile_reason)
     # 2. Try torch.jit.script (works on all CUDA SMs)
     jit_mod = getattr(torch_module, "jit", None)
     if jit_mod is not None:

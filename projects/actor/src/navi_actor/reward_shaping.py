@@ -27,7 +27,7 @@ def _shape_batch_impl(
     loop_threshold: float,
 ) -> Tensor:
     col_penalties = torch.where(
-        dones.bool(),
+        dones,
         torch.full_like(raw_rewards, collision_penalty),
         torch.zeros_like(raw_rewards),
     )
@@ -106,14 +106,24 @@ class RewardShaper:
                 )
             else:
                 compiled = False
-                # 1. Try torch.compile (requires Triton, SM >= 7.0 + C++ compiler)
+                # 1. Try torch.compile only on supported CUDA GPUs with a C++ compiler.
                 _compile_ok = False
+                _compile_reason = "torch.compile unavailable"
                 try:
-                    from torch._inductor.cpp_builder import get_cpp_compiler
-                    get_cpp_compiler()
-                    _compile_ok = True
-                except Exception:
+                    capability = torch.cuda.get_device_capability()
+                    if tuple(int(part) for part in capability) < (7, 0):
+                        _compile_reason = (
+                            f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
+                        )
+                    else:
+                        from torch._inductor.cpp_builder import get_cpp_compiler
+
+                        get_cpp_compiler()
+                        _compile_ok = True
+                except Exception as exc:
                     _compile_ok = False
+                    if _compile_reason == "torch.compile unavailable":
+                        _compile_reason = str(exc)
                 if _compile_ok:
                     compile_fn = getattr(torch, "compile", None)
                     if compile_fn is not None:
@@ -130,7 +140,7 @@ class RewardShaper:
                         except Exception as exc:
                             _LOGGER.info("RewardShaper: torch.compile unavailable (%s), trying torch.jit.script", exc)
                 else:
-                    _LOGGER.info("RewardShaper: no C++ compiler available, skipping torch.compile")
+                    _LOGGER.info("RewardShaper: skipping torch.compile (%s)", _compile_reason)
                 # 2. Try torch.jit.script (works on all CUDA SMs)
                 if not compiled:
                     try:

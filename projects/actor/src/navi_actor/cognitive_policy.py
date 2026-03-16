@@ -128,16 +128,26 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
 
         self.encoder = RayViTEncoder(embedding_dim=embedding_dim)
 
-        # Attempt torch.compile on encoder for kernel fusion (SM >= 7.0).
+        # Attempt torch.compile on encoder for kernel fusion on supported GPUs.
         # Falls back to eager on unsupported hardware or missing compiler.
         _compile_ok = False
+        _compile_reason = "torch.compile unavailable"
         try:
-            # Validate that inductor can find a C/C++ compiler before wrapping.
-            from torch._inductor.cpp_builder import get_cpp_compiler
-            get_cpp_compiler()
-            _compile_ok = True
-        except Exception:
+            capability = torch.cuda.get_device_capability()
+            if tuple(int(part) for part in capability) < (7, 0):
+                _compile_reason = (
+                    f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
+                )
+            else:
+                # Validate that inductor can find a C/C++ compiler before wrapping.
+                from torch._inductor.cpp_builder import get_cpp_compiler
+
+                get_cpp_compiler()
+                _compile_ok = True
+        except Exception as exc:
             _compile_ok = False
+            if _compile_reason == "torch.compile unavailable":
+                _compile_reason = str(exc)
         if _compile_ok:
             try:
                 # fullgraph=False: encoder has dynamic padding (pad_az/pad_el)
@@ -152,7 +162,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             except Exception:
                 _log.info("RayViTEncoder: torch.compile wrapping failed, using eager mode")
         else:
-            _log.info("RayViTEncoder: no C++ compiler available, using eager mode")
+            _log.info("RayViTEncoder: skipping torch.compile (%s), using eager mode", _compile_reason)
 
         self.temporal_core = _build_temporal_core(
             temporal_core=temporal_core,
