@@ -263,6 +263,121 @@ def test_select_publish_rows_returns_only_selected_actor_rows() -> None:
     assert actor_ids == [2, 0]
 
 
+def _make_tensor_action_backend_stub(*, n_actors: int = 4) -> SdfDagBackend:
+    backend = object.__new__(SdfDagBackend)
+    backend._torch = torch
+    backend._config = type("Config", (), {"sdf_max_steps": 32})()
+    backend._device = torch.device("cpu")
+    backend._n_actors = n_actors
+    backend._az_bins = 2
+    backend._el_bins = 2
+    backend._n_rays = 4
+    backend._max_distance = 10.0
+    backend._max_steps_per_episode = 5
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
+    backend._proximity_distance_threshold = 1.0
+    backend._needs_reset_mask = torch.zeros((n_actors,), dtype=torch.bool)
+    backend._actor_positions = torch.zeros((n_actors, 3), dtype=torch.float32)
+    backend._actor_yaws = torch.zeros((n_actors,), dtype=torch.float32)
+    backend._episode_ids = torch.arange(100, 100 + n_actors, dtype=torch.int64)
+    backend._actor_steps = torch.zeros((n_actors,), dtype=torch.int64)
+    backend._episode_returns = torch.zeros((n_actors,), dtype=torch.float32)
+    backend._prev_min_distances = torch.zeros((n_actors,), dtype=torch.float32)
+    backend._prev_structure_band_ratios = torch.zeros((n_actors,), dtype=torch.float32)
+    backend._prev_forward_structure_ratios = torch.zeros((n_actors,), dtype=torch.float32)
+    backend._ray_dirs_local = torch.zeros((backend._n_rays, 3), dtype=torch.float32)
+    backend._bbox_min = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+    backend._bbox_max = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
+    backend._record_perf_sample = lambda **kwargs: None  # type: ignore[method-assign]
+    backend._advance_reset_bookkeeping = lambda reset_count: None  # type: ignore[method-assign]
+    backend._reset_tensor_actor_batch = lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reset path"))  # type: ignore[method-assign]
+    backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
+    backend._require_asset = lambda: type("Asset", (), {"resolution": 8})()  # type: ignore[method-assign]
+    def cast_rays(*args: object, **kwargs: object) -> None:
+        del kwargs
+        out_distances = cast(torch.Tensor, args[3])
+        out_semantics = cast(torch.Tensor, args[4])
+        out_distances.fill_(2.5)
+        out_semantics.zero_()
+
+    backend._torch_sdf = type("TorchSdfStub", (), {"cast_rays": staticmethod(cast_rays)})()
+
+    def scratch_slot_views(*, scratch_slot: int, actor_count: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        origins = torch.zeros((actor_count, backend._n_rays, 3), dtype=torch.float32)
+        dirs_world = torch.zeros((actor_count, backend._n_rays, 3), dtype=torch.float32)
+        out_distances = torch.zeros((actor_count, backend._n_rays), dtype=torch.float32)
+        out_semantics = torch.zeros((actor_count, backend._n_rays), dtype=torch.int32)
+        return origins, dirs_world, out_distances, out_semantics
+
+    backend._scratch_slot_views = scratch_slot_views  # type: ignore[method-assign]
+
+    def step_kinematics_indexed(*, actor_indices: torch.Tensor, actions_linear: torch.Tensor, actions_angular: torch.Tensor) -> None:
+        backend._actor_positions[actor_indices, 0] = actor_indices.to(dtype=torch.float32) + actions_linear[:, 0]
+        backend._actor_yaws[actor_indices] = actions_angular[:, 2]
+
+    backend._step_kinematics_indexed = step_kinematics_indexed  # type: ignore[method-assign]
+
+    def compute_reward_batch(**kwargs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_indices = cast(torch.Tensor, kwargs["actor_indices"])
+        rewards = actor_indices.to(dtype=torch.float32) + 0.5
+        components = torch.zeros((int(actor_indices.shape[0]), 9), dtype=torch.float32)
+        return rewards, components
+
+    backend._compute_reward_batch = compute_reward_batch  # type: ignore[method-assign]
+
+    def consume_observation_batch(*, actor_indices: torch.Tensor, depth_batch: torch.Tensor, semantic_batch: torch.Tensor, valid_batch: torch.Tensor, current_clearances: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_count = int(actor_indices.shape[0])
+        obs_batch = torch.zeros((actor_count, 3, backend._az_bins, backend._el_bins), dtype=torch.float32)
+        obs_batch[:, 0, :, :] = actor_indices.to(dtype=torch.float32).view(-1, 1, 1)
+        delta_batch = torch.zeros((actor_count, backend._az_bins, backend._el_bins), dtype=torch.float32)
+        return obs_batch, delta_batch
+
+    backend._consume_observation_batch = consume_observation_batch  # type: ignore[method-assign]
+    backend._materialize_selected_observations = lambda **kwargs: None  # type: ignore[method-assign]
+    return backend
+
+
+def test_batch_step_tensor_actions_preserves_subset_actor_ids() -> None:
+    backend = _make_tensor_action_backend_stub()
+
+    step_batch, ordered_results = backend.batch_step_tensor_actions(
+        torch.tensor([[1.0, 0.0, 0.0, 0.1], [2.0, 0.0, 0.0, 0.2]], dtype=torch.float32),
+        step_id=17,
+        actor_indices=torch.tensor([2, 0], dtype=torch.int64),
+        publish_actor_ids=(),
+        materialize_results=False,
+    )
+
+    assert ordered_results == ()
+    assert torch.equal(step_batch.env_id_tensor, torch.tensor([2, 0], dtype=torch.int64))
+    assert torch.equal(step_batch.episode_id_tensor, torch.tensor([102, 100], dtype=torch.int64))
+    assert torch.allclose(step_batch.reward_tensor, torch.tensor([2.5, 0.5], dtype=torch.float32))
+    assert torch.allclose(step_batch.observation_tensor[:, 0, 0, 0], torch.tensor([2.0, 0.0], dtype=torch.float32))
+    assert float(backend._actor_positions[2, 0]) == pytest.approx(3.0)
+    assert float(backend._actor_positions[0, 0]) == pytest.approx(2.0)
+    assert float(backend._actor_positions[1, 0]) == pytest.approx(0.0)
+    assert float(backend._actor_positions[3, 0]) == pytest.approx(0.0)
+
+
+def test_batch_step_tensor_actions_skips_publish_materialization_when_unrequested() -> None:
+    backend = _make_tensor_action_backend_stub()
+    backend._select_publish_rows = lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected publish-row selection"))  # type: ignore[method-assign]
+    backend._materialize_selected_observations = lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected observation materialization"))  # type: ignore[method-assign]
+
+    step_batch, ordered_results = backend.batch_step_tensor_actions(
+        torch.tensor([[0.5, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        step_id=3,
+        actor_indices=torch.tensor([1], dtype=torch.int64),
+        publish_actor_ids=(),
+        materialize_results=False,
+    )
+
+    assert ordered_results == ()
+    assert step_batch.published_observations == {}
+    assert torch.equal(step_batch.env_id_tensor, torch.tensor([1], dtype=torch.int64))
+
+
 def test_starvation_penalty_triggers_only_beyond_threshold() -> None:
     assert _starvation_penalty(0.7, ratio_threshold=0.8, penalty_scale=1.5) < 0.0
     assert _starvation_penalty(0.9, ratio_threshold=0.8, penalty_scale=1.5) < 0.0
@@ -356,6 +471,9 @@ def test_cast_actor_batch_tensors_passes_environment_horizon() -> None:
     backend._torch_sdf = fake_sdf
     backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
     backend._max_distance = 17.5
+    backend._proximity_distance_threshold = 1.0
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
     backend._bbox_min = [0.0, 0.0, 0.0]
     backend._bbox_max = [1.0, 1.0, 1.0]
     backend._az_bins = 1
@@ -392,6 +510,9 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
     backend._torch_sdf = _FakeSdf()
     backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
     backend._max_distance = 10.0
+    backend._proximity_distance_threshold = 1.0
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
     backend._bbox_min = [0.0, 0.0, 0.0]
     backend._bbox_max = [1.0, 1.0, 1.0]
     backend._az_bins = 2
@@ -431,6 +552,9 @@ def test_cast_actor_batch_tensors_treats_exact_horizon_as_valid() -> None:
     backend._torch_sdf = _FakeSdf()
     backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
     backend._max_distance = 10.0
+    backend._proximity_distance_threshold = 1.0
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
     backend._bbox_min = [0.0, 0.0, 0.0]
     backend._bbox_max = [1.0, 1.0, 1.0]
     backend._az_bins = 1
@@ -468,6 +592,9 @@ def test_cast_actor_batch_tensors_clamps_negative_inside_solid_distances_to_zero
     backend._torch_sdf = _FakeSdf()
     backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
     backend._max_distance = 10.0
+    backend._proximity_distance_threshold = 1.0
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
     backend._bbox_min = [0.0, 0.0, 0.0]
     backend._bbox_max = [1.0, 1.0, 1.0]
     backend._az_bins = 1
@@ -502,6 +629,9 @@ def test_cast_actor_batch_tensors_rejects_wrong_output_dtype() -> None:
     backend._torch_sdf = _FakeSdf()
     backend._config = type("Cfg", (), {"sdf_max_steps": 64})()
     backend._max_distance = 17.5
+    backend._proximity_distance_threshold = 1.0
+    backend._structure_band_min_distance = 1.5
+    backend._structure_band_max_distance = 10.0
     backend._bbox_min = [0.0, 0.0, 0.0]
     backend._bbox_max = [1.0, 1.0, 1.0]
     backend._az_bins = 1

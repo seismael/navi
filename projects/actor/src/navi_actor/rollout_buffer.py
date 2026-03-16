@@ -169,6 +169,43 @@ class MultiTrajectoryBuffer:
             raise RuntimeError("actor_indices must be unique within one append_batch call")
         return indices
 
+    def _require_rollout_tensor_device_alignment(
+        self,
+        *,
+        observations: Tensor,
+        actions: Tensor,
+        log_probs: Tensor,
+        values: Tensor,
+        rewards: Tensor,
+        dones: Tensor,
+        truncateds: Tensor,
+        aux_tensors: Tensor | None,
+    ) -> None:
+        device = observations.device
+        tensor_fields = (
+            ("actions", actions),
+            ("log_probs", log_probs),
+            ("values", values),
+            ("rewards", rewards),
+            ("dones", dones),
+            ("truncateds", truncateds),
+        )
+        if aux_tensors is not None:
+            tensor_fields += (("aux_tensors", aux_tensors),)
+
+        for field_name, tensor in tensor_fields:
+            if tensor.device != device:
+                raise RuntimeError(
+                    "MultiTrajectoryBuffer.append_batch requires all rollout tensors on one device; "
+                    f"observations are on {device}, but {field_name} is on {tensor.device}",
+                )
+
+        if self._batch_obs is not None and self._batch_obs.device != device:
+            raise RuntimeError(
+                "MultiTrajectoryBuffer batched storage device is fixed for the active rollout; "
+                f"storage is on {self._batch_obs.device}, incoming observations are on {device}",
+            )
+
     def _required_batched_rollout_len(self) -> int:
         if self._batched_actor_step_counts is None:
             return 0
@@ -196,6 +233,16 @@ class MultiTrajectoryBuffer:
         actor_indices: Tensor | None = None,
     ) -> None:
         """Append one rollout step for every actor without Python transition objects."""
+        self._require_rollout_tensor_device_alignment(
+            observations=observations,
+            actions=actions,
+            log_probs=log_probs,
+            values=values,
+            rewards=rewards,
+            dones=dones,
+            truncateds=truncateds,
+            aux_tensors=aux_tensors,
+        )
         self._allocate_batched_storage(
             observations=observations,
             actions=actions,

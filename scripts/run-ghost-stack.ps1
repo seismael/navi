@@ -411,6 +411,10 @@ if ($Train) {
         "--elevation-bins", "$ElevationBins"
     )
 
+    if (-not $dashboardEnabled) {
+        $trainArgs += "--no-emit-observation-stream"
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($resolvedGmDagFile)) {
         $trainArgs += @("--gmdag-file", $resolvedGmDagFile)
     }
@@ -450,7 +454,7 @@ if ($Train) {
         Write-Host "  Temporal   : $TemporalCore"
         Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
-        Write-Host "  Dashboard  : $(if ($dashboardEnabled) { 'enabled (passive observer)' } else { 'disabled by default for canonical training' })"
+        Write-Host "  Dashboard  : $(if ($dashboardEnabled) { 'enabled (passive observer)' } else { 'disabled by default for canonical training; observation stream off' })"
         Write-Host "========================================================"
 
         Write-Host "`nStarting canonical train (background)..."
@@ -507,7 +511,8 @@ if ($Train) {
         else {
             Write-Host "`nDashboard not launched. Canonical training runs without observer attachment by default."
             Write-Host "  Tail logs: Get-Content '$trainUnifiedLog' -Wait"
-            Write-Host "  Attach:    .\scripts\run-dashboard.ps1 --actor-sub tcp://localhost:$ActorTelemetryPort"
+            Write-Host "  Telemetry: actor.training.* remains available on tcp://localhost:$ActorTelemetryPort"
+            Write-Host "  Live view: relaunch with -WithDashboard when passive observation attach is needed"
             Write-Host "  Stop:      Stop-Process -Id $($trainProc.Id) -Force"
 
             # In no-dashboard mode, wait for canonical train to finish naturally.

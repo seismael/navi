@@ -47,6 +47,7 @@ Forbidden patterns on the canonical hot path:
 
 - GPU -> CPU -> GPU observation bounces
 - GPU -> CPU -> GPU action bounces for already-CUDA policy outputs
+- pinned-CPU or host-first rollout slabs on the canonical trainer when the same rollout state can remain on CUDA
 - per-actor Python object rebuilding when batched tensors already exist
 - per-actor hidden-state or episode-state dictionaries when the rollout horizon is fixed and a batched tensor can carry the same state
 - per-actor Python branching over CUDA reset masks when one batched reset-index extraction can drive the same state transition
@@ -61,6 +62,7 @@ Forbidden patterns on the canonical hot path:
 - collision-triggered subset re-casts when rollback to the previous safe pose already preserves the non-terminal wall-contact signal the actor needs
 - viewer-driven observation remaps, re-normalization, or contract branching inside environment or actor hot-path code
 - dashboard-required CPU materialization or cadence checks that alter rollout math instead of staying inside passive publication seams
+- blind removal of validated `torch-sdf` leaf, void, or prefix caches without a reproduced current-branch regression and a benchmark-backed replacement
 
 ### 3.3 Treat PPO Update As Part Of The Hot Path
 
@@ -89,6 +91,7 @@ Current high-value work therefore includes:
 - gating completed-episode host extraction behind real sparse episode publication need so done-actor reset bookkeeping stays on-device when episode telemetry is disabled or filtered out
 - gating initial and live observation materialization behind real dashboard publication need so the canonical trainer does not ask the runtime to build `DistanceMatrix` objects when no observation stream will publish them
 - hardening attribution toggles so perf-only telemetry configurations remain valid
+- rewriting grouped rollout overlap only when the design preserves actor-local `Obs -> Action -> Next Obs` ordering and shows an end-to-end trainer gain on the canonical surface
 
 ### 3.4 Treat The Temporal Core As Hot-Path Infrastructure
 
@@ -183,7 +186,13 @@ When `--profile-cuda-events` is enabled, the optimizer log also emits a
 diagnostic `diag(...)` suffix with GPU execution totals and per-stage host-gap
 deltas for eval, backward, clip, optimizer, RND, and stats. Use that surface to
 separate Python/autograd orchestration overhead from actual GPU execution time on
-the active Mamba learner path.
+the active learner path. That diagnostic surface now also splits `eval` into
+encoder, temporal-core, and heads buckets so GRU-path investigation can decide
+whether the remaining wall time belongs to RayViT encoding, sequence-core work,
+or actor/critic head evaluation before changing the canonical runtime.
+The canonical RayViT encoder patch-token path should use direct strided patch
+projection rather than explicit `view -> permute -> contiguous -> linear`
+materialization when the same tokenization can be expressed as one convolution.
 
 One concrete remaining environment-to-actor seam still worth cleaning is the
 MJX speed-throttling dependency on previous depth. On tensor-native trainer
@@ -252,6 +261,11 @@ Accepted and already integrated:
 - starvation and proximity shaping derived from existing spherical observations
 - two-group trainer-side CUDA stream overlap on the canonical PPO rollout tick, with actor subset routing and deferred episodic-memory adds so same-tick memory queries still observe the pre-add state across the full fleet
 - macro-cell empty-space caching in `projects/torch-sdf/cpp_src/kernel.cu`, where repeated samples inside the same empty DAG child cell reuse cached bounds and advance to the cell exit without a fresh root descent
+
+Those two integrated surfaces carry explicit promotion constraints:
+
+- the current grouped rollout implementation is only partial overlap until a benchmark-proven ping-pong rewrite lands; preserving per-actor ordering is mandatory
+- the current `torch-sdf` cache path is part of the validated runtime baseline and must not be removed based on imported theory alone
 
 Benchmark-gated only:
 

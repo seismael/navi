@@ -23,6 +23,14 @@ __all__: list[str] = ["app"]
 app = typer.Typer(name="navi-actor", help="Brain Layer — Sacred Cognitive Engine")
 
 
+def _configure_torch_training_runtime() -> None:
+    """Enable stable backend autotuning for fixed-shape canonical training kernels."""
+    import torch
+
+    if torch.backends.cudnn.enabled:
+        torch.backends.cudnn.benchmark = True
+
+
 def _validate_sdfdag_training_scenes(scenes: list[str]) -> None:
     """Ensure canonical training scenes are compiled `.gmdag` assets."""
     non_gmdag = [scene for scene in scenes if Path(scene).suffix.lower() != ".gmdag"]
@@ -416,6 +424,7 @@ def train(
         typer.echo(f"  ... and {len(scenes) - 5} more")
 
     _validate_bindable(config.pub_address, "Actor PUB")
+    _configure_torch_training_runtime()
 
     trainer = _build_canonical_trainer(
         config,
@@ -467,6 +476,8 @@ def profile(
     from navi_actor.training.ppo_trainer import PpoTrainer
     from navi_environment.backends.sdfdag_backend import SdfDagBackend
     from navi_environment.config import EnvironmentConfig
+
+    _configure_torch_training_runtime()
 
     config = ActorConfig(
         n_actors=actors,

@@ -1159,10 +1159,13 @@ class SdfDagBackend(SimulatorBackend):
             truncated_tensor[active_local_indices_t] = truncated_mask_t
             episode_id_tensor[active_local_indices_t] = self._episode_ids.index_select(0, actor_indices_t)
 
-            publish_rows, publish_actor_ids_list = self._select_publish_rows(
-                actor_indices=actor_indices_t,
-                publish_actor_ids=tuple(sorted(publish_actor_set)),
-            )
+            publish_rows: list[int] = []
+            publish_actor_ids_list: list[int] = []
+            if publish_actor_set:
+                publish_rows, publish_actor_ids_list = self._select_publish_rows(
+                    actor_indices=actor_indices_t,
+                    publish_actor_ids=tuple(sorted(publish_actor_set)),
+                )
             if result_rows is not None and ordered_results is not None:
                 for row in result_rows:
                     local_row = int(row[0])
@@ -1178,16 +1181,17 @@ class SdfDagBackend(SimulatorBackend):
                         timestamp=time.time(),
                     )
 
-            self._materialize_selected_observations(
-                actor_ids=publish_actor_ids_list,
-                row_indices=publish_rows,
-                step_id=step_id,
-                depth_batch=depth_batch,
-                delta_batch=deltas_batch_t,
-                semantic_batch=semantic_batch,
-                valid_batch=valid_batch,
-                published_observations=published_observations,
-            )
+            if publish_actor_ids_list:
+                self._materialize_selected_observations(
+                    actor_ids=publish_actor_ids_list,
+                    row_indices=publish_rows,
+                    step_id=step_id,
+                    depth_batch=depth_batch,
+                    delta_batch=deltas_batch_t,
+                    semantic_batch=semantic_batch,
+                    valid_batch=valid_batch,
+                    published_observations=published_observations,
+                )
 
         if not bool(populated_mask.all().item()):
             msg = "tensor action step did not populate all actor outputs"

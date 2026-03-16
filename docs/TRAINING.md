@@ -21,6 +21,9 @@ Default behavior:
 Canonical training is valid with no dashboard attached. When the auditor is
 attached, it remains a passive consumer of low-rate published observations and
 must not alter trainer cadence, environment semantics, or observation math.
+Detached wrapper launches now disable the actor observation stream entirely so
+no publish-row materialization or update-heartbeat observation callbacks run
+unless passive viewing is explicitly requested with `-WithDashboard`.
 
 ## 2. Prerequisites
 
@@ -36,6 +39,11 @@ Canonical training currently assumes the actor temporal core runs through the
 native cuDNN GRU path by default on the active Windows machine. The canonical
 train and serve surfaces expose one explicit temporal-core selector contract on
 the same trainer surface: `gru` (default) and `mambapy`.
+
+Canonical rollout storage on that surface remains CUDA-resident. Host-staged or
+pinned-CPU rollout buffers are not part of the canonical trainer design and
+should be treated as non-canonical diagnostics unless the architecture standard
+is updated in the same change.
 
 Canonical actor reward shaping also requests `torch.compile` by default when
 the shaping path stays tensor-only on the rollout hot path. On unsupported
@@ -167,6 +175,10 @@ Example:
 canonical training wrapper does not imply a viewer dependency. Use
 `-WithDashboard` only when a live passive observer is explicitly needed.
 
+Detached wrapper launches also pass `--no-emit-observation-stream`, so later
+manual dashboard attachment to that same run is telemetry-only. Relaunch with
+`-WithDashboard` when live observation frames are required.
+
 ```powershell
 ./scripts/run-dashboard.ps1 --matrix-sub tcp://localhost:5559 --actor-sub tcp://localhost:5557 --step-endpoint tcp://localhost:5560
 ```
@@ -204,8 +216,9 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - canonical geometry-foraging shaping positively values mid-range structure visibility, forward-sector structure reacquisition, and controlled inspection turns that reveal more geometry instead of less
 - use explicit overrides only for deliberate experiments; temporal-core comparisons should change only `TemporalCore` or `--temporal-core` while holding all other canonical settings fixed
 - dashboard mode detection stays on low-volume telemetry to avoid rollout stalls
-- the dashboard observation stream publishes a passive `10 Hz` frame for the selected telemetry actor by default
+- the actor CLI still defaults the dashboard observation stream to a passive `10 Hz` frame for the selected telemetry actor, but `run-ghost-stack.ps1 -Train` disables that stream when launched detached and re-enables it only with `-WithDashboard`
 - widening observation streaming or full training telemetry to all actors remains a deliberate high-overhead diagnostic mode and should be enabled only when the operator explicitly requests all-actor fan-out
 - those observation frames reuse the canonical spherical contract; any half-sphere or other display transform belongs in auditor code only
+- the current grouped rollout surface may launch actor subsets on per-group CUDA streams, but any future ping-pong rewrite must preserve actor-local `observation -> action -> next observation` ordering and prove its value with bounded canonical measurements
 - PPO update-loss scalar materialization is diagnostic-only on the canonical hot path: the trainer still emits coarse `actor.training.ppo.update` events for mode/status detection by default, but full PPO loss fields are populated only when explicit update-loss telemetry is enabled
 - when a supported fused Mamba-2 environment is ready later, re-promotion must be proven by rerunning the canonical temporal profile and bounded canonical training surfaces before the active docs and scripts are switched away from GRU

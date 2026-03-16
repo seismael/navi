@@ -13,7 +13,7 @@ import torch
 from torch import Tensor
 
 if TYPE_CHECKING:
-    from navi_actor.cognitive_policy import CognitiveMambaPolicy
+    from navi_actor.cognitive_policy import CognitiveMambaPolicy, PolicyEvalStageMetrics
     from navi_actor.rnd import RNDModule
     from navi_actor.rollout_buffer import MultiTrajectoryBuffer, TrajectoryBuffer
 
@@ -116,6 +116,12 @@ class PpoMetrics:
     epoch_finalize_ms: float = 0.0
     epoch_total_ms: float = 0.0
     policy_eval_device_ms_total: float = 0.0
+    policy_eval_encode_ms_total: float = 0.0
+    policy_eval_temporal_ms_total: float = 0.0
+    policy_eval_heads_ms_total: float = 0.0
+    policy_eval_encode_device_ms_total: float = 0.0
+    policy_eval_temporal_device_ms_total: float = 0.0
+    policy_eval_heads_device_ms_total: float = 0.0
     backward_device_ms_total: float = 0.0
     grad_clip_device_ms_total: float = 0.0
     optimizer_step_device_ms_total: float = 0.0
@@ -299,19 +305,22 @@ class PpoLearner:
         params = self._policy_params(policy)
         policy_param_cache_ms = (time.perf_counter() - param_cache_start) * 1000
 
+        track_summary_scalars = materialize_summary_scalars
         metric_device = device
-        running_policy_loss = torch.zeros((), device=metric_device)
-        running_value_loss = torch.zeros((), device=metric_device)
-        running_entropy = torch.zeros((), device=metric_device)
-        running_kl = torch.zeros((), device=metric_device)
-        running_clip = torch.zeros((), device=metric_device)
-        running_total = torch.zeros((), device=metric_device)
-        running_rnd_loss = torch.zeros((), device=metric_device)
-        zero_metric = torch.zeros((), device=metric_device)
+        running_policy_loss = torch.zeros((), device=metric_device) if track_summary_scalars else None
+        running_value_loss = torch.zeros((), device=metric_device) if track_summary_scalars else None
+        running_entropy = torch.zeros((), device=metric_device) if track_summary_scalars else None
+        running_kl = torch.zeros((), device=metric_device) if track_summary_scalars else None
+        running_clip = torch.zeros((), device=metric_device) if track_summary_scalars else None
+        running_total = torch.zeros((), device=metric_device) if track_summary_scalars else None
+        running_rnd_loss = torch.zeros((), device=metric_device) if track_summary_scalars else None
         n_updates = 0
         fetch_ms_acc = 0.0
         prep_ms_acc = 0.0
         eval_ms_acc = 0.0
+        eval_encode_ms_acc = 0.0
+        eval_temporal_ms_acc = 0.0
+        eval_heads_ms_acc = 0.0
         backward_ms_acc = 0.0
         grad_clip_ms_acc = 0.0
         optimizer_step_ms_acc = 0.0
@@ -319,6 +328,9 @@ class PpoLearner:
         post_update_stats_ms_acc = 0.0
         progress_callback_ms_acc = 0.0
         eval_device_ms_acc = 0.0
+        eval_encode_device_ms_acc = 0.0
+        eval_temporal_device_ms_acc = 0.0
+        eval_heads_device_ms_acc = 0.0
         backward_device_ms_acc = 0.0
         grad_clip_device_ms_acc = 0.0
         optimizer_device_ms_acc = 0.0
@@ -375,12 +387,22 @@ class PpoLearner:
 
                 # Forward pass
                 with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as eval_ms:
+                    eval_stage_metrics: PolicyEvalStageMetrics | None = None
                     if use_sequence_path:
                         assert obs_seq_tensor is not None
                         assert acts_seq_tensor is not None
-                        new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
-                            obs_seq_tensor, acts_seq_tensor, hidden=h0, aux_seq=aux_seq_tensor,
-                        )
+                        if self._profile_cuda_events:
+                            new_lp, new_vals, ent, _, z_mb, eval_stage_metrics = policy.evaluate_sequence_profiled(
+                                obs_seq_tensor,
+                                acts_seq_tensor,
+                                hidden=h0,
+                                aux_seq=aux_seq_tensor,
+                                use_cuda_events=True,
+                            )
+                        else:
+                            new_lp, new_vals, ent, _, z_mb = policy.evaluate_sequence(
+                                obs_seq_tensor, acts_seq_tensor, hidden=h0, aux_seq=aux_seq_tensor,
+                            )
                     else:
                         obs = _prepare_minibatch_tensor(mb.observations, device)
                         acts = _prepare_minibatch_tensor(mb.actions, device)
@@ -389,7 +411,15 @@ class PpoLearner:
                             if mb.aux_tensors is not None
                             else None
                         )
-                        new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
+                        if self._profile_cuda_events:
+                            new_lp, new_vals, ent, _, z_mb, eval_stage_metrics = policy.evaluate_profiled(
+                                obs,
+                                acts,
+                                aux_tensor=aux_tensor,
+                                use_cuda_events=True,
+                            )
+                        else:
+                            new_lp, new_vals, ent, _, z_mb = policy.evaluate(obs, acts, aux_tensor=aux_tensor)
 
                     new_vals = new_vals.squeeze(-1)
                     log_ratio = new_lp - old_lp
@@ -404,6 +434,13 @@ class PpoLearner:
                     total_loss = policy_loss + self._value_coeff * vf_loss - self._entropy_coeff * ent
                 eval_ms_acc += eval_ms.wall_ms
                 eval_device_ms_acc += eval_ms.device_ms
+                if eval_stage_metrics is not None:
+                    eval_encode_ms_acc += eval_stage_metrics.encode_ms
+                    eval_temporal_ms_acc += eval_stage_metrics.temporal_ms
+                    eval_heads_ms_acc += eval_stage_metrics.heads_ms
+                    eval_encode_device_ms_acc += eval_stage_metrics.encode_device_ms
+                    eval_temporal_device_ms_acc += eval_stage_metrics.temporal_device_ms
+                    eval_heads_device_ms_acc += eval_stage_metrics.heads_device_ms
 
                 # Optimization step
                 with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as backward_ms:
@@ -423,7 +460,7 @@ class PpoLearner:
                 optimizer_device_ms_acc += optimizer_ms.device_ms
 
                 # RND distillation
-                rnd_loss_metric = zero_metric
+                rnd_loss_metric: Tensor | None = None
                 if rnd is not None and rnd_optimizer is not None:
                     with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as rnd_ms:
                         z_rnd = z_mb.detach()
@@ -431,25 +468,41 @@ class PpoLearner:
                         rnd_optimizer.zero_grad(set_to_none=True)
                         rnd_loss.backward()  # type: ignore[no-untyped-call]
                         rnd_optimizer.step()
-                        rnd_loss_metric = rnd_loss.detach()
+                        if track_summary_scalars:
+                            rnd_loss_metric = rnd_loss.detach()
                     rnd_step_ms_acc += rnd_ms.wall_ms
                     rnd_device_ms_acc += rnd_ms.device_ms
 
-                with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as stats_ms:
-                    with torch.no_grad():
-                        approx_kl = (ratio - 1.0 - log_ratio).mean()
-                        clip_frac = ((ratio - 1.0).abs() > self._clip_ratio).float().mean()
+                stats_wall_ms = 0.0
+                stats_device_ms = 0.0
+                if track_summary_scalars:
+                    with _stage_timer(device=device, use_cuda_events=self._profile_cuda_events) as stats_ms:
+                        with torch.no_grad():
+                            approx_kl = (ratio - 1.0 - log_ratio).mean()
+                            clip_frac = ((ratio - 1.0).abs() > self._clip_ratio).float().mean()
 
-                    running_policy_loss += policy_loss.detach()
-                    running_value_loss += vf_loss.detach()
-                    running_entropy += ent.detach()
-                    running_kl += approx_kl.detach()
-                    running_clip += clip_frac.detach()
-                    running_total += total_loss.detach()
-                    running_rnd_loss += rnd_loss_metric
+                        assert running_policy_loss is not None
+                        assert running_value_loss is not None
+                        assert running_entropy is not None
+                        assert running_kl is not None
+                        assert running_clip is not None
+                        assert running_total is not None
+                        assert running_rnd_loss is not None
+                        running_policy_loss += policy_loss.detach()
+                        running_value_loss += vf_loss.detach()
+                        running_entropy += ent.detach()
+                        running_kl += approx_kl.detach()
+                        running_clip += clip_frac.detach()
+                        running_total += total_loss.detach()
+                        if rnd_loss_metric is not None:
+                            running_rnd_loss += rnd_loss_metric
+                    stats_wall_ms = stats_ms.wall_ms
+                    stats_device_ms = stats_ms.device_ms
                     n_updates += 1
-                post_update_stats_ms_acc += stats_ms.wall_ms
-                stats_device_ms_acc += stats_ms.device_ms
+                else:
+                    n_updates += 1
+                post_update_stats_ms_acc += stats_wall_ms
+                stats_device_ms_acc += stats_device_ms
 
                 if progress_callback is not None:
                     t_callback_start = time.perf_counter()
@@ -468,7 +521,7 @@ class PpoLearner:
                     + optimizer_ms.wall_ms
                     + (rnd_ms.wall_ms if rnd is not None and rnd_optimizer is not None else 0.0)
                 )
-                timed_update_ms += stats_ms.wall_ms + callback_ms
+                timed_update_ms += stats_wall_ms + callback_ms
                 update_total_ms = (time.perf_counter() - update_total_start) * 1000
                 update_loop_overhead_ms_acc += max(0.0, update_total_ms - timed_update_ms)
 
@@ -481,7 +534,14 @@ class PpoLearner:
             )
 
         mean_metric_values = [0.0] * 7
-        if materialize_summary_scalars:
+        if track_summary_scalars:
+            assert running_policy_loss is not None
+            assert running_value_loss is not None
+            assert running_entropy is not None
+            assert running_kl is not None
+            assert running_clip is not None
+            assert running_total is not None
+            assert running_rnd_loss is not None
             finalize_start = time.perf_counter()
             mean_metrics = _materialize_metric_means(
                 running_policy_loss=running_policy_loss,
@@ -538,6 +598,9 @@ class PpoLearner:
             minibatch_fetch_ms_total=fetch_ms_acc,
             minibatch_prep_ms_total=prep_ms_acc,
             policy_eval_ms_total=eval_ms_acc,
+            policy_eval_encode_ms_total=eval_encode_ms_acc,
+            policy_eval_temporal_ms_total=eval_temporal_ms_acc,
+            policy_eval_heads_ms_total=eval_heads_ms_acc,
             backward_ms_total=backward_ms_acc,
             grad_clip_ms_total=grad_clip_ms_acc,
             optimizer_step_ms_total=optimizer_step_ms_acc,
@@ -548,6 +611,9 @@ class PpoLearner:
             epoch_finalize_ms=epoch_finalize_ms,
             epoch_total_ms=epoch_total_ms,
             policy_eval_device_ms_total=eval_device_ms_acc,
+            policy_eval_encode_device_ms_total=eval_encode_device_ms_acc,
+            policy_eval_temporal_device_ms_total=eval_temporal_device_ms_acc,
+            policy_eval_heads_device_ms_total=eval_heads_device_ms_acc,
             backward_device_ms_total=backward_device_ms_acc,
             grad_clip_device_ms_total=grad_clip_device_ms_acc,
             optimizer_step_device_ms_total=optimizer_device_ms_acc,

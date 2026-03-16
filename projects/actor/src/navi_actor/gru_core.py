@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import torch
 from torch import Tensor, nn
 
 __all__: list[str] = ["GRUTemporalCore"]
@@ -36,7 +37,19 @@ class GRUTemporalCore(nn.Module):
             batch_first=True,
         )
         self.aux_proj = nn.Linear(3, d_model)
+        self._flattened_device_key: tuple[str, int | None] | None = None
         _LOGGER.info("GRUTemporalCore: native cuDNN GRU runtime active")
+
+    def _maybe_flatten_parameters(self, device: torch.device) -> None:
+        """Flatten GRU weights once per CUDA device so cuDNN can use packed parameters."""
+        device_key = (device.type, device.index)
+        if device.type != "cuda":
+            self._flattened_device_key = None
+            return
+        if self._flattened_device_key == device_key:
+            return
+        self.core.flatten_parameters()
+        self._flattened_device_key = device_key
 
     def forward(
         self,
@@ -46,6 +59,7 @@ class GRUTemporalCore(nn.Module):
         aux_tensor: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
         del dones
+        self._maybe_flatten_parameters(z_seq.device)
         if aux_tensor is not None:
             z_seq = z_seq + self.aux_proj(aux_tensor)
 

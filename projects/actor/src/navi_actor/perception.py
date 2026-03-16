@@ -38,10 +38,13 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         self.patch_size = patch_size
         self.hidden_dim = hidden_dim
 
-        # Input projection: flatten patch + channels → hidden_dim
-        # Channel 0=depth, 1=semantic, 2=valid_mask
-        patch_input_dim = 3 * patch_size * patch_size
-        self.patch_proj = nn.Linear(patch_input_dim, hidden_dim)
+        # Input projection: strided patch embedding avoids explicit patch materialization.
+        self.patch_proj = nn.Conv2d(
+            in_channels=3,
+            out_channels=hidden_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
 
         # [CLS] token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
@@ -65,18 +68,20 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
 
         # Cache for positional encodings
         self._pos_enc_cache: Tensor | None = None
-        self._cache_key: tuple[int, int, torch.device] | None = None
+        self._cache_key: tuple[int, int, int, torch.device, torch.dtype] | None = None
 
     def _get_fixed_pos_enc(
         self, n_az: int, n_el: int, dim: int, device: torch.device
     ) -> Tensor:
         """Compute fixed 2D sin/cos positional encodings for spherical patches."""
-        if self._pos_enc_cache is not None and self._cache_key == (n_az, n_el, device):
+        dtype = self.cls_token.dtype
+        cache_key = (n_az, n_el, dim, device, dtype)
+        if self._pos_enc_cache is not None and self._cache_key == cache_key:
             return self._pos_enc_cache
 
         grid_az, grid_el = torch.meshgrid(
-            torch.linspace(0, 2 * 3.14159, n_az, device=device),
-            torch.linspace(-3.14159 / 2, 3.14159 / 2, n_el, device=device),
+            torch.linspace(0, 2 * 3.14159, n_az, device=device, dtype=dtype),
+            torch.linspace(-3.14159 / 2, 3.14159 / 2, n_el, device=device, dtype=dtype),
             indexing="ij",
         )
         # Flatten to patches: (N_patches,)
@@ -85,7 +90,7 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
 
         # Frequency bands for encoding
         bands = dim // 4
-        freqs = torch.pow(10000, -torch.arange(0, bands, device=device) / bands)
+        freqs = torch.pow(10000, -torch.arange(0, bands, device=device, dtype=dtype) / bands)
 
         # az_sin, az_cos, el_sin, el_cos
         enc_az = flat_az[:, None] * freqs[None, :]
@@ -103,7 +108,7 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         # Cache and return (1, N_patches, D)
         final_enc = pos_enc.unsqueeze(0)
         self._pos_enc_cache = final_enc
-        self._cache_key = (n_az, n_el, device)
+        self._cache_key = cache_key
         return final_enc
 
     def forward(self, x: Tensor) -> Tensor:
@@ -129,13 +134,8 @@ class RayViTEncoder(nn.Module):  # type: ignore[misc]
         n_el = el // p
         n_patches = n_az * n_el
 
-        # Reshape into patches
-        patches = x.view(batch, channels, n_az, p, n_el, p)
-        patches = patches.permute(0, 2, 4, 1, 3, 5).contiguous()
-        patches = patches.view(batch, n_patches, -1)
-
-        # Project to hidden_dim
-        h = self.patch_proj(patches)
+        # Project directly into patch tokens with a strided convolution.
+        h = self.patch_proj(x).flatten(2).transpose(1, 2)
 
         # Add [CLS] token and FIXED positional embeddings
         pos_enc = self._get_fixed_pos_enc(n_az, n_el, self.hidden_dim, x.device)

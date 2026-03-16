@@ -9,19 +9,63 @@ the engine's canonical ``(B, 3, Az, El)`` DistanceMatrix input.
 """
 
 from __future__ import annotations
+import contextlib
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
 import torch
 from torch import Tensor, nn
+from dataclasses import dataclass
 
 from navi_actor.actor_critic import ActorCriticHeads
 from navi_actor.config import SUPPORTED_TEMPORAL_CORES, TemporalCoreName
 from navi_actor.gru_core import GRUTemporalCore
 from navi_actor.mambapy_core import MambapyTemporalCore
 
-__all__: list[str] = ["CognitiveMambaPolicy"]
+__all__: list[str] = ["CognitiveMambaPolicy", "PolicyEvalStageMetrics"]
+
+
+@dataclass(frozen=True)
+class _PolicyStageTiming:
+    wall_ms: float = 0.0
+    device_ms: float = 0.0
+
+
+@contextlib.contextmanager
+def _policy_stage_timer(*, device: torch.device, use_cuda_events: bool) -> Any:
+    elapsed = _PolicyStageTiming()
+    if use_cuda_events and device.type == "cuda":
+        start_event: Any = torch.cuda.Event(enable_timing=True)  # type: ignore[no-untyped-call]
+        end_event: Any = torch.cuda.Event(enable_timing=True)  # type: ignore[no-untyped-call]
+        t_start = time.perf_counter()
+        torch.cuda.synchronize(device)
+        start_event.record()
+        try:
+            yield elapsed
+        finally:
+            end_event.record()
+            torch.cuda.synchronize(device)
+            object.__setattr__(elapsed, "wall_ms", (time.perf_counter() - t_start) * 1000)
+            object.__setattr__(elapsed, "device_ms", start_event.elapsed_time(end_event))
+        return
+
+    t_start = time.perf_counter()
+    try:
+        yield elapsed
+    finally:
+        object.__setattr__(elapsed, "wall_ms", (time.perf_counter() - t_start) * 1000)
+
+
+@dataclass(frozen=True)
+class PolicyEvalStageMetrics:
+    encode_ms: float = 0.0
+    temporal_ms: float = 0.0
+    heads_ms: float = 0.0
+    encode_device_ms: float = 0.0
+    temporal_device_ms: float = 0.0
+    heads_device_ms: float = 0.0
 
 
 def _build_temporal_core(
@@ -197,15 +241,50 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             z_t: (B, D) spatial embedding (for RND distillation).
 
         """
-        z_t = self.encoder(obs_tensor)
-        features, new_hidden = self.temporal_core.forward_step(z_t, hidden, aux_tensor)
-
-        log_probs = self.heads.log_prob(features, actions)
-        # Stop-gradient: critic sees detached features so value-loss
-        # gradients never flow back through the shared backbone.
-        values: Tensor = self.heads.critic(features.detach()).squeeze(-1)
-        entropy = self.heads.entropy()
+        log_probs, values, entropy, new_hidden, z_t, _metrics = self.evaluate_profiled(
+            obs_tensor,
+            actions,
+            hidden=hidden,
+            aux_tensor=aux_tensor,
+            use_cuda_events=False,
+        )
         return log_probs, values, entropy, new_hidden, z_t
+
+    def evaluate_profiled(
+        self,
+        obs_tensor: Tensor,
+        actions: Tensor,
+        hidden: Tensor | None = None,
+        aux_tensor: Tensor | None = None,
+        *,
+        use_cuda_events: bool,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor, PolicyEvalStageMetrics]:
+        """Evaluate actions and return per-stage timings for diagnostic attribution."""
+        with _policy_stage_timer(device=obs_tensor.device, use_cuda_events=use_cuda_events) as encode_timing:
+            z_t = self.encoder(obs_tensor)
+        with _policy_stage_timer(device=obs_tensor.device, use_cuda_events=use_cuda_events) as temporal_timing:
+            features, new_hidden = self.temporal_core.forward_step(z_t, hidden, aux_tensor)
+        with _policy_stage_timer(device=obs_tensor.device, use_cuda_events=use_cuda_events) as heads_timing:
+            log_probs = self.heads.log_prob(features, actions)
+            # Stop-gradient: critic sees detached features so value-loss
+            # gradients never flow back through the shared backbone.
+            values: Tensor = self.heads.critic(features.detach()).squeeze(-1)
+            entropy = self.heads.entropy()
+        return (
+            log_probs,
+            values,
+            entropy,
+            new_hidden,
+            z_t.detach(),
+            PolicyEvalStageMetrics(
+                encode_ms=encode_timing.wall_ms,
+                temporal_ms=temporal_timing.wall_ms,
+                heads_ms=heads_timing.wall_ms,
+                encode_device_ms=encode_timing.device_ms,
+                temporal_device_ms=temporal_timing.device_ms,
+                heads_device_ms=heads_timing.device_ms,
+            ),
+        )
 
     def evaluate_sequence(
         self,
@@ -230,25 +309,57 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             z_t: (B*T, D) spatial embeddings (for RND distillation).
 
         """
-        batch, seq_len = obs_seq.shape[:2]
-        # Encode all frames
-        flat_obs = obs_seq.reshape(batch * seq_len, *obs_seq.shape[2:])
-        z_flat = self.encoder(flat_obs)
-        z_seq = z_flat.reshape(batch, seq_len, -1)
-
-        # Temporal core: full-sequence evaluation on the active hidden-free path
-        features_seq, new_hidden = self.temporal_core.forward(
-            z_seq, hidden, aux_tensor=aux_seq,
+        log_probs, values, entropy, new_hidden, z_flat, _metrics = self.evaluate_sequence_profiled(
+            obs_seq,
+            actions_seq,
+            hidden=hidden,
+            aux_seq=aux_seq,
+            use_cuda_events=False,
         )
-        flat_features = features_seq.reshape(batch * seq_len, -1)
-        flat_actions = actions_seq.reshape(batch * seq_len, -1)
-
-        log_probs = self.heads.log_prob(flat_features, flat_actions)
-        # Stop-gradient: critic sees detached features so value-loss
-        # gradients never flow back through the shared backbone.
-        values: Tensor = self.heads.critic(flat_features.detach()).squeeze(-1)
-        entropy = self.heads.entropy()
         return log_probs, values, entropy, new_hidden, z_flat
+
+    def evaluate_sequence_profiled(
+        self,
+        obs_seq: Tensor,
+        actions_seq: Tensor,
+        hidden: Tensor | None = None,
+        aux_seq: Tensor | None = None,
+        *,
+        use_cuda_events: bool,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor, PolicyEvalStageMetrics]:
+        """Evaluate a full PPO sequence minibatch and return per-stage timings."""
+        batch, seq_len = obs_seq.shape[:2]
+        flat_obs = obs_seq.reshape(batch * seq_len, *obs_seq.shape[2:])
+        with _policy_stage_timer(device=obs_seq.device, use_cuda_events=use_cuda_events) as encode_timing:
+            z_flat = self.encoder(flat_obs)
+            z_seq = z_flat.reshape(batch, seq_len, -1)
+        with _policy_stage_timer(device=obs_seq.device, use_cuda_events=use_cuda_events) as temporal_timing:
+            features_seq, new_hidden = self.temporal_core.forward(
+                z_seq, hidden, aux_tensor=aux_seq,
+            )
+            flat_features = features_seq.reshape(batch * seq_len, -1)
+        with _policy_stage_timer(device=obs_seq.device, use_cuda_events=use_cuda_events) as heads_timing:
+            flat_actions = actions_seq.reshape(batch * seq_len, -1)
+            log_probs = self.heads.log_prob(flat_features, flat_actions)
+            # Stop-gradient: critic sees detached features so value-loss
+            # gradients never flow back through the shared backbone.
+            values: Tensor = self.heads.critic(flat_features.detach()).squeeze(-1)
+            entropy = self.heads.entropy()
+        return (
+            log_probs,
+            values,
+            entropy,
+            new_hidden,
+            z_flat.detach(),
+            PolicyEvalStageMetrics(
+                encode_ms=encode_timing.wall_ms,
+                temporal_ms=temporal_timing.wall_ms,
+                heads_ms=heads_timing.wall_ms,
+                encode_device_ms=encode_timing.device_ms,
+                temporal_device_ms=temporal_timing.device_ms,
+                heads_device_ms=heads_timing.device_ms,
+            ),
+        )
 
     @torch.no_grad()  # type: ignore[untyped-decorator]
     def act(

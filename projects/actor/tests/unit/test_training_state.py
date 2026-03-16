@@ -12,7 +12,7 @@ import torch
 
 from navi_actor.config import ActorConfig
 from navi_actor.rollout_buffer import MultiTrajectoryBuffer
-from navi_actor.training.ppo_trainer import PpoTrainer
+from navi_actor.training.ppo_trainer import PpoTrainer, _PendingRolloutGroup
 from navi_contracts import (
     TOPIC_DISTANCE_MATRIX,
     TOPIC_TELEMETRY_EVENT,
@@ -27,6 +27,15 @@ from navi_contracts.testing.oracle_house import (
 )
 
 
+def _assert_same_device(actual: torch.device, expected: torch.device) -> None:
+    """Treat CUDA default-device aliases as equivalent during device placement checks."""
+    assert actual.type == expected.type
+    if actual.type == "cuda":
+        assert (actual.index in (None, 0)) and (expected.index in (None, 0))
+    else:
+        assert actual.index == expected.index
+
+
 def _make_trainer() -> PpoTrainer:
     """Create a canonical PpoTrainer with minimal config for state tests."""
     cfg = ActorConfig(
@@ -35,6 +44,19 @@ def _make_trainer() -> PpoTrainer:
         step_endpoint="tcp://127.0.0.1:19002",
         mode="step",
         embedding_dim=64,
+    )
+    return PpoTrainer(cfg)
+
+
+def _make_trainer_with_actors(n_actors: int) -> PpoTrainer:
+    """Create a canonical PpoTrainer with a configurable actor count for overlap tests."""
+    cfg = ActorConfig(
+        sub_address="tcp://127.0.0.1:19000",
+        pub_address="tcp://127.0.0.1:19001",
+        step_endpoint="tcp://127.0.0.1:19002",
+        mode="step",
+        embedding_dim=64,
+        n_actors=n_actors,
     )
     return PpoTrainer(cfg)
 
@@ -360,11 +382,11 @@ def test_extract_host_rollout_scalars_uses_selected_actor_subset() -> None:
     assert batch.intrinsic_reward_tensor is not None
     assert batch.loop_similarity_tensor is not None
     assert batch.done_tensor is not None
-    assert batch.raw_reward_tensor.device == trainer._device
-    assert batch.shaped_reward_tensor.device == trainer._device
-    assert batch.intrinsic_reward_tensor.device == trainer._device
-    assert batch.loop_similarity_tensor.device == trainer._device
-    assert batch.done_tensor.device == trainer._device
+    _assert_same_device(batch.raw_reward_tensor.device, trainer._device)
+    _assert_same_device(batch.shaped_reward_tensor.device, trainer._device)
+    _assert_same_device(batch.intrinsic_reward_tensor.device, trainer._device)
+    _assert_same_device(batch.loop_similarity_tensor.device, trainer._device)
+    _assert_same_device(batch.done_tensor.device, trainer._device)
     assert torch.equal(batch.raw_reward_tensor, torch.tensor([2.0, 4.0], dtype=torch.float32))
     assert torch.equal(batch.shaped_reward_tensor, torch.tensor([2.5, 4.5], dtype=torch.float32))
     assert torch.equal(batch.intrinsic_reward_tensor, torch.tensor([0.2, 0.4], dtype=torch.float32))
@@ -605,6 +627,100 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
     assert torch.equal(step_batch.episode_id_tensor, torch.tensor([5], dtype=torch.int64, device=trainer._device))
     assert torch.equal(step_batch.env_id_tensor, torch.tensor([3], dtype=torch.int64, device=trainer._device))
     assert step_batch.published_observations == {}
+
+
+def test_finalize_rollout_group_preserves_actor_local_transition_order() -> None:
+    """Finalize must append the old observation while updating current state to the new observation."""
+    trainer = _make_trainer_with_actors(4)
+    trainer._config.emit_training_telemetry = False
+    trainer._config.emit_observation_stream = False
+    trainer._config.enable_episodic_memory = False
+    trainer._config.enable_reward_shaping = False
+
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_append_batch(**kwargs: torch.Tensor) -> None:
+        captured["observations"] = kwargs["observations"].detach().clone()
+        captured["actor_indices"] = kwargs["actor_indices"].detach().clone()
+
+    trainer._multi_buffers.append_batch = capture_append_batch  # type: ignore[method-assign]
+
+    actor_indices = torch.tensor([2, 0], dtype=torch.int64, device=trainer._device)
+    old_observations = torch.arange(2 * 3 * 8 * 4, dtype=torch.float32, device=trainer._device).reshape(2, 3, 8, 4)
+    next_observations = torch.full((2, 3, 8, 4), 77.0, dtype=torch.float32, device=trainer._device)
+    current_obs_batch = torch.zeros((trainer._n_actors, 3, 8, 4), dtype=torch.float32, device=trainer._device)
+    aux_states = torch.zeros((trainer._n_actors, 3), dtype=torch.float32, device=trainer._device)
+    reward_sum = torch.zeros((), dtype=torch.float32, device=trainer._device)
+    reward_ema = torch.zeros((), dtype=torch.float32, device=trainer._device)
+    episode_returns = torch.zeros((trainer._n_actors,), dtype=torch.float32, device=trainer._device)
+    episode_lengths = torch.zeros((trainer._n_actors,), dtype=torch.int32, device=trainer._device)
+
+    class FakeTensorBatch:
+        def __init__(self) -> None:
+            self.observation_tensor = next_observations
+            self.reward_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device)
+            self.done_tensor = torch.tensor([False, False], dtype=torch.bool, device=trainer._device)
+            self.truncated_tensor = torch.tensor([False, False], dtype=torch.bool, device=trainer._device)
+            self.episode_id_tensor = torch.tensor([9, 10], dtype=torch.int64, device=trainer._device)
+            self.env_id_tensor = actor_indices
+            self.reward_component_tensor = None
+            self.published_observations: dict[int, DistanceMatrix] = {}
+
+    pending = _PendingRolloutGroup(
+        group_slot=0,
+        actor_indices=actor_indices,
+        observations=old_observations,
+        aux_tensor=torch.zeros((2, 3), dtype=torch.float32, device=trainer._device),
+        actions=torch.zeros((2, 4), dtype=torch.float32, device=trainer._device),
+        embeddings=torch.zeros((2, trainer._config.embedding_dim), dtype=torch.float32, device=trainer._device),
+        log_probs=torch.zeros((2,), dtype=torch.float32, device=trainer._device),
+        values=torch.zeros((2,), dtype=torch.float32, device=trainer._device),
+        intrinsic_rewards=torch.zeros((2,), dtype=torch.float32, device=trainer._device),
+        step_batch=FakeTensorBatch(),
+        fwd_ms=0.0,
+        step_ms=0.0,
+    )
+
+    trainer._finalize_rollout_group(
+        pending=pending,
+        current_obs_batch=current_obs_batch,
+        aux_states=aux_states,
+        reward_sum_tensor=reward_sum,
+        reward_ema=reward_ema,
+        episode_returns=episode_returns,
+        episode_lengths=episode_lengths,
+        step_id=100,
+        publish_step_telemetry=False,
+        publish_observations=False,
+    )
+
+    assert torch.equal(captured["observations"], old_observations)
+    assert torch.equal(captured["actor_indices"], actor_indices)
+    assert torch.equal(current_obs_batch.index_select(0, actor_indices), next_observations)
+
+
+def test_prepare_rollout_group_reads_updated_group_state_after_finalize() -> None:
+    """Preparing a group after finalize should observe the latest per-actor observation rows."""
+    trainer = _make_trainer_with_actors(4)
+    trainer._config.emit_training_telemetry = False
+    trainer._config.emit_observation_stream = False
+    trainer._config.enable_episodic_memory = False
+    trainer._config.enable_reward_shaping = False
+
+    actor_indices = trainer._rollout_group_indices[0]
+    current_obs_batch = torch.zeros((trainer._n_actors, 3, 8, 4), dtype=torch.float32, device=trainer._device)
+    aux_states = torch.zeros((trainer._n_actors, 3), dtype=torch.float32, device=trainer._device)
+    updated_rows = torch.full((int(actor_indices.numel()), 3, 8, 4), 11.0, dtype=torch.float32, device=trainer._device)
+
+    trainer._write_actor_rows(current_obs_batch, actor_indices, updated_rows)
+    prepared = trainer._prepare_rollout_group(
+        group_slot=0,
+        actor_indices=actor_indices,
+        current_obs_batch=current_obs_batch,
+        aux_states=aux_states,
+    )
+
+    assert torch.equal(prepared.observations, updated_rows)
 
 
 def test_load_initial_observation_batch_requires_tensor_reset_seam() -> None:
@@ -868,11 +984,11 @@ def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() ->
     assert payload.intrinsic_reward_tensor is not None
     assert payload.loop_similarity_tensor is not None
     assert payload.done_tensor is not None
-    assert payload.raw_reward_tensor.device == trainer._device
-    assert payload.shaped_reward_tensor.device == trainer._device
-    assert payload.intrinsic_reward_tensor.device == trainer._device
-    assert payload.loop_similarity_tensor.device == trainer._device
-    assert payload.done_tensor.device == trainer._device
+    _assert_same_device(payload.raw_reward_tensor.device, trainer._device)
+    _assert_same_device(payload.shaped_reward_tensor.device, trainer._device)
+    _assert_same_device(payload.intrinsic_reward_tensor.device, trainer._device)
+    _assert_same_device(payload.loop_similarity_tensor.device, trainer._device)
+    _assert_same_device(payload.done_tensor.device, trainer._device)
     assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32))
     assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
     assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32))

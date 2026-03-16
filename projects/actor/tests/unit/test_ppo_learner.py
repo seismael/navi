@@ -131,7 +131,11 @@ def test_ppo_epoch_can_skip_summary_scalar_materialization() -> None:
     assert metrics.epoch_finalize_ms == 0.0
     assert metrics.policy_loss == 0.0
     assert metrics.value_loss == 0.0
+    assert metrics.entropy == 0.0
+    assert metrics.approx_kl == 0.0
+    assert metrics.clip_fraction == 0.0
     assert metrics.total_loss == 0.0
+    assert metrics.rnd_loss == 0.0
 
 
 def test_empty_buffer_returns_zeros() -> None:

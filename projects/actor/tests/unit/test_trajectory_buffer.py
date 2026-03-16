@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
 import torch
 
 from navi_actor.rollout_buffer import MultiTrajectoryBuffer, PPOTransition, TrajectoryBuffer
+
+
+def _assert_same_device(actual: torch.device, expected: torch.device) -> None:
+    """Treat CUDA default-device aliases as equivalent during device placement checks."""
+    assert actual.type == expected.type
+    if actual.type == "cuda":
+        assert (actual.index in (None, 0)) and (expected.index in (None, 0))
+    else:
+        assert actual.index == expected.index
 
 
 def _make_transition(
@@ -333,6 +343,56 @@ def test_multi_trajectory_append_batch_supports_sequence_sampling() -> None:
     assert first.dones is None
     assert first.sequence_aux_tensors is not None
     assert first.sequence_aux_tensors.shape == (2, 2, 3)
+
+
+def test_multi_trajectory_append_batch_keeps_batched_storage_on_input_device() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+
+    buffer.append_batch(
+        observations=torch.randn(2, 3, 16, 8, device=device),
+        actions=torch.randn(2, 4, device=device),
+        log_probs=torch.randn(2, device=device),
+        values=torch.randn(2, device=device),
+        rewards=torch.randn(2, device=device),
+        dones=torch.zeros(2, dtype=torch.bool, device=device),
+        truncateds=torch.zeros(2, dtype=torch.bool, device=device),
+        aux_tensors=torch.randn(2, 3, device=device),
+    )
+
+    assert buffer._batch_obs is not None
+    assert buffer._batch_actions is not None
+    assert buffer._batch_log_probs is not None
+    assert buffer._batch_values is not None
+    assert buffer._batch_rewards is not None
+    assert buffer._batch_dones is not None
+    assert buffer._batch_truncateds is not None
+    assert buffer._batch_aux is not None
+    _assert_same_device(buffer._batch_obs.device, device)
+    _assert_same_device(buffer._batch_actions.device, device)
+    _assert_same_device(buffer._batch_log_probs.device, device)
+    _assert_same_device(buffer._batch_values.device, device)
+    _assert_same_device(buffer._batch_rewards.device, device)
+    _assert_same_device(buffer._batch_dones.device, device)
+    _assert_same_device(buffer._batch_truncateds.device, device)
+    _assert_same_device(buffer._batch_aux.device, device)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA to exercise mixed-device guard")
+def test_multi_trajectory_append_batch_rejects_mixed_device_rollout_tensors() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
+
+    with pytest.raises(RuntimeError, match="requires all rollout tensors on one device"):
+        buffer.append_batch(
+            observations=torch.randn(2, 3, 16, 8, device="cuda"),
+            actions=torch.randn(2, 4),
+            log_probs=torch.randn(2, device="cuda"),
+            values=torch.randn(2, device="cuda"),
+            rewards=torch.randn(2, device="cuda"),
+            dones=torch.zeros(2, dtype=torch.bool, device="cuda"),
+            truncateds=torch.zeros(2, dtype=torch.bool, device="cuda"),
+            aux_tensors=None,
+        )
 
 
 def test_multi_trajectory_short_rollout_yields_no_sequence_minibatches() -> None:

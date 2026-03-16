@@ -92,6 +92,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Batching Rule:** New SDF/DAG execution must be designed around reusable GPU buffers and `batch_step()` throughput, not per-actor stepping or per-step allocation churn.
 - **CLI-Level Integration Rule:** Any direct actor-to-environment integration for canonical training MUST occur at CLI or orchestration boundaries. Service packages remain sovereign; the actor may instantiate environment backends only in the single canonical training entrypoint, not as a permanent service-to-service dependency surface.
 - **Tensor-Native Training Rule:** Canonical training internals MUST prefer CUDA tensor representations for observations, actions, rewards, and rollout storage. Materializing Python `DistanceMatrix` or `Action` objects inside the rollout hot path is forbidden except for coarse diagnostics, replay, or external service surfaces.
+- **No Host-Staged Canonical Rollout Rule:** Canonical rollout storage remains GPU-resident on the active tensor-native training path. Pinned-CPU or host-first rollout slabs are forbidden on the canonical path unless the architecture standard is intentionally revised in the same change.
 - **Corpus Refresh Rule:** Canonical training may auto-compile source scene meshes into `.gmdag` assets, and dataset refresh tooling MUST support overwrite-first refresh of source data and compiled outputs when explicitly requested.
 - **Compile Profile Rule:** Canonical corpus refresh, environment CLI compilation, and actor training wrappers MUST default to `.gmdag` compile resolution `512` unless the user explicitly overrides it.
 - **Real Dataset Scene Rule:** Canonical tests, benchmarks, scripts, and training surfaces MUST use only real dataset scenes or real compiled dataset `.gmdag` assets. Generated, synthetic, procedural, or sample-scene substitutes are forbidden on the canonical path.
@@ -133,6 +134,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Canonical `torch-sdf` ray inputs use contiguous CUDA `float32` tensors shaped `[batch, rays, 3]`; canonical outputs use preallocated CUDA tensors shaped `[batch, rays]`.
 - Long-running CUDA extension calls MUST release the Python GIL while the kernel is executing.
 - Canonical environment and actor runtimes MUST keep tensor-native observation and action seams available so Python `DistanceMatrix` and `Action` materialization is optional for diagnostics, telemetry, and passive viewers only.
+- Low-level `torch-sdf` cache removals or redesigns MUST be justified by reproduced current-branch evidence and benchmarked against the canonical trainer or `bench-sdfdag` surface before promotion.
 - Low-level DAG layout, leaf payload packing, cache assumptions, and related storage changes MAY be documented, but they do not become stable architectural guarantees until end-to-end benchmark wins are proven on the canonical trainer.
 
 ### 3.2 Vision Transformer Optimization
@@ -166,6 +168,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Canonical CLI defaults for actor training MUST match the intended performance-safe config defaults unless a wrapper explicitly overrides them for a documented profile.
 - Canonical throughput work MUST prefer GPU-resident rollout storage and direct backend stepping before spending effort on smaller Python-side micro-optimisations.
 - Canonical throughput work MUST remove Python per-actor reward, memory, and transition loops from the rollout hot path once observation and action tensors are already batched on device.
+- Grouped rollout-overlap rewrites MUST preserve actor-local `observation -> action -> next observation` ordering. No group may consume stale observations from another phase just to increase overlap.
 - Canonical cleanup work MUST remove non-essential training modes rather than preserving multiple architecture paths with equal status.
 
 ### 3.5 Soft Stall Monitoring

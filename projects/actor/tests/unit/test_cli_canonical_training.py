@@ -8,11 +8,13 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+import torch
 import typer
 from typer.models import OptionInfo
 from typer.testing import CliRunner
 
 from navi_actor.cli import (
+    _configure_torch_training_runtime,
     _validate_sdfdag_training_scenes,
     app,
     train,
@@ -71,6 +73,20 @@ def test_train_defaults_match_canonical_perf_profile() -> None:
     assert _option_default(train, "emit_training_telemetry") is True
     assert _option_default(train, "emit_update_loss_telemetry") is False
     assert _option_default(train, "emit_perf_telemetry") is True
+
+
+def test_configure_torch_training_runtime_enables_cudnn_benchmark() -> None:
+    """Canonical actor training should opt into cuDNN autotuning for fixed shapes."""
+    if not torch.backends.cudnn.enabled:
+        pytest.skip("cuDNN backend is unavailable in this test runtime")
+
+    original = torch.backends.cudnn.benchmark
+    try:
+        torch.backends.cudnn.benchmark = False
+        _configure_torch_training_runtime()
+        assert torch.backends.cudnn.benchmark is True
+    finally:
+        torch.backends.cudnn.benchmark = original
 
 
 def test_cli_help_does_not_expose_second_canonical_training_mode() -> None:

@@ -44,6 +44,7 @@ def test_evaluate_shapes() -> None:
     assert val.shape == (2,)
     assert ent.dim() == 0
     assert z_t.shape == (2, 128)
+    assert z_t.requires_grad is False
 
 
 def test_act_returns_list() -> None:
@@ -73,6 +74,47 @@ def test_evaluate_sequence_shapes() -> None:
     assert val.shape == (8,)
     assert ent.dim() == 0
     assert z_t.shape == (8, 128)
+    assert z_t.requires_grad is False
+
+
+def test_evaluate_profiled_reports_stage_metrics() -> None:
+    """Profiled evaluation should expose per-stage attribution on the canonical path."""
+    policy = _make_policy()
+    obs = torch.randn(2, 3, 128, 24)
+    acts = torch.randn(2, 4)
+
+    lp, val, ent, _, z_t, metrics = policy.evaluate_profiled(obs, acts, use_cuda_events=False)
+
+    assert lp.shape == (2,)
+    assert val.shape == (2,)
+    assert ent.dim() == 0
+    assert z_t.shape == (2, 128)
+    assert z_t.requires_grad is False
+    assert metrics.encode_ms >= 0.0
+    assert metrics.temporal_ms >= 0.0
+    assert metrics.heads_ms >= 0.0
+
+
+def test_evaluate_sequence_profiled_reports_stage_metrics() -> None:
+    """Profiled sequence evaluation should expose encoder/temporal/heads attribution."""
+    policy = _make_policy()
+    obs_seq = torch.randn(2, 4, 3, 128, 24)
+    acts_seq = torch.randn(2, 4, 4)
+
+    lp, val, ent, _, z_t, metrics = policy.evaluate_sequence_profiled(
+        obs_seq,
+        acts_seq,
+        use_cuda_events=False,
+    )
+
+    assert lp.shape == (8,)
+    assert val.shape == (8,)
+    assert ent.dim() == 0
+    assert z_t.shape == (8, 128)
+    assert z_t.requires_grad is False
+    assert metrics.encode_ms >= 0.0
+    assert metrics.temporal_ms >= 0.0
+    assert metrics.heads_ms >= 0.0
 
 
 def test_checkpoint_roundtrip() -> None:
@@ -184,6 +226,25 @@ def test_policy_uses_canonical_gru_temporal_core() -> None:
     policy = _make_policy()
 
     assert isinstance(policy.temporal_core, GRUTemporalCore)
+
+
+def test_gru_temporal_core_flattens_once_per_cuda_device() -> None:
+    """GRU core should only request cuDNN parameter flattening once per device."""
+    core = GRUTemporalCore(d_model=8)
+    calls: list[torch.device] = []
+
+    def record_flatten() -> None:
+        calls.append(torch.device("cuda", 0))
+
+    core.core.flatten_parameters = record_flatten  # type: ignore[method-assign]
+
+    core._maybe_flatten_parameters(torch.device("cuda", 0))
+    core._maybe_flatten_parameters(torch.device("cuda", 0))
+    core._maybe_flatten_parameters(torch.device("cuda", 1))
+    core._maybe_flatten_parameters(torch.device("cpu"))
+    core._maybe_flatten_parameters(torch.device("cuda", 0))
+
+    assert len(calls) == 3
 
 
 def test_policy_can_select_mambapy_temporal_core() -> None:
