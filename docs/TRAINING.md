@@ -28,6 +28,47 @@ When the dashboard is attached, actor discovery comes from a one-shot trainer
 roster query and selector changes are pushed back to the trainer over a dedicated
 control endpoint, so the canonical live PUB stream stays selected-actor only.
 
+Canonical wrappers now create one structured run root per launch. Unless you
+override output directories explicitly, the default operational outputs are
+written under `artifacts/runs/<run_id>/` with subdirectories for `logs/`,
+`metrics/`, `manifests/`, `captures/`, and `checkpoints/`. Stable top-level
+logs still exist for quick tailing, but run review should start from the run
+root because it carries the shared `run_id` across the whole training flow.
+
+Canonical training measurement is now split into coarse machine-readable streams
+under that same run root so bottleneck review does not depend on ad hoc log
+scraping alone:
+
+- `metrics/actor_training.command.jsonl` records command-surface phases such as
+	corpus preparation, trainer construction, trainer start, bounded training
+	execution, and final checkpoint save.
+- `metrics/actor_training.jsonl` records trainer lifecycle, heartbeat perf,
+	runtime perf, PPO update summaries, checkpoint operations, and final training
+	summary records.
+- wrapper-driven launches such as `run-ghost-stack.ps1 -Train` also emit
+	wrapper-side phase metrics under the active run root so process startup,
+	readiness wait, and observed child exit latency can be correlated with the
+	actor-side metrics.
+
+Those records intentionally stay coarse. They sample at operation boundaries and
+the existing `log_every` cadence instead of every rollout tick, so measurement
+remains useful without becoming a new source of training stall.
+
+Measurement control stays on the canonical training surface itself. Use the
+existing training command or wrapper plus environment-backed options to decide
+which internal stats are active:
+
+- `NAVI_ACTOR_EMIT_INTERNAL_STATS=true|false` controls whether run-scoped
+	machine-readable training metrics are written at all.
+- `NAVI_ACTOR_ATTACH_RESOURCE_SNAPSHOTS=true|false` controls whether those
+	internal metric records include coarse process and CUDA memory snapshots.
+- `NAVI_ACTOR_PRINT_PERFORMANCE_SUMMARY=true|false` controls whether the train
+	command prints a concise human-readable performance summary and metrics paths.
+
+Equivalent CLI flags exist on `navi-actor train` so one training command can
+be used both for normal runs and for deeper bottleneck attribution without
+introducing a second launcher surface.
+
 ## 2. Prerequisites
 
 - Python `3.12`
@@ -64,6 +105,21 @@ the shaping path stays tensor-only on the rollout hot path. On unsupported
 GPU/compiler stacks, Navi reports that compile was requested but inactive and
 continues on the eager tensor path for honest attribution.
 
+Resource snapshots collected on the canonical trainer surface should be read as
+coarse attribution aids, not a replacement for deeper profilers. The production
+metrics surface captures:
+
+- elapsed wall time for major operations and phases
+- process CPU memory and thread counts
+- CUDA allocator state such as allocated, reserved, peak allocated, peak
+	reserved, and free/total device memory when CUDA is active
+- existing trainer and runtime timing summaries such as rollout-step, PPO
+	update, and `SdfDagBackend` perf snapshots
+
+That combination is intended to answer the first-order questions quickly:
+which phase is slow, whether pressure is mostly CPU-side or CUDA-side, and
+whether checkpointing, corpus work, rollout, or PPO update is dominating a run.
+
 ## 3. Refresh And Preflight
 
 ```powershell
@@ -88,6 +144,14 @@ entire promoted corpus before using benchmark results to judge the upgrade:
 
 # Standard continuous training with the alternate Mambapy backend
 ./scripts/train.ps1 -TemporalCore mambapy
+
+# Disable internal metrics for a lighter run
+$env:NAVI_ACTOR_EMIT_INTERNAL_STATS = "false"
+./scripts/train.ps1
+
+# Keep internal metrics but omit coarse process/CUDA resource snapshots
+$env:NAVI_ACTOR_ATTACH_RESOURCE_SNAPSHOTS = "false"
+./scripts/train.ps1
 
 # Standard continuous training on an alternate actor telemetry port
 ./scripts/train.ps1 -ActorTelemetryPort 5565
@@ -179,6 +243,11 @@ The nightly wrapper builds on those same surfaces and adds:
 - an overnight soak with checkpoint and passive attach monitoring
 - one machine-readable morning summary artifact root
 
+The main training and qualification wrappers also perform explicit cleanup of
+stale transient generated outputs before launching. That cleanup is limited to
+aged captures, benchmark scratch outputs, temporary directories, and detached
+nightly or process-capture leftovers. It must not delete the active run root.
+
 For refresh-to-training qualification without mutating the live promoted corpus:
 
 ```powershell
@@ -217,7 +286,9 @@ experiment explicitly calls for more changes.
 ## 5. Checkpoints
 
 - periodic checkpoints use the configured checkpoint directory
+- when the default checkpoint root is left unchanged on wrapper-driven runs, checkpoints are written under the current run root `checkpoints/`
 - final checkpoints are written as `policy_final.pt` when enabled
+- trainer checkpoints now persist the active `run_id` so review tooling can correlate saved state with the originating run
 - resume with `-ResumeCheckpoint` on wrappers or `--checkpoint` on the actor CLI
 
 Example:

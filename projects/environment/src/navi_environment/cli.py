@@ -1,4 +1,4 @@
-﻿"""Typer CLI for the Environment service."""
+"""Typer CLI for the Environment service."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import statistics
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -20,6 +20,8 @@ from navi_environment.integration.voxel_dag import compile_gmdag_world, probe_sd
 from navi_environment.server import EnvironmentServer
 
 if TYPE_CHECKING:
+    import torch
+
     from navi_environment.backends.base import SimulatorBackend
 
 __all__: list[str] = ["app"]
@@ -38,7 +40,9 @@ def _default_gmdag_option() -> str:
 def _build_backend(config: EnvironmentConfig) -> SimulatorBackend:
     """Create the canonical SDF/DAG simulator backend."""
     if config.backend != "sdfdag":
-        typer.echo("Error: unsupported backend. Canonical runtime requires backend=sdfdag.", err=True)
+        typer.echo(
+            "Error: unsupported backend. Canonical runtime requires backend=sdfdag.", err=True
+        )
         raise typer.Exit(code=1)
 
     from navi_environment.backends.sdfdag_backend import SdfDagBackend
@@ -64,12 +68,15 @@ def _build_backend(config: EnvironmentConfig) -> SimulatorBackend:
         raise typer.Exit(code=1) from exc
 
 
-def _benchmark_actions_tensor(*, actor_count: int, device: object) -> object:
+def _benchmark_actions_tensor(
+    *, actor_count: int, device: torch.device | str | int
+) -> torch.Tensor:
     """Build tensor-native benchmark actions: (actors, 4) = [fwd, vert, lat, yaw]."""
     import torch
+
     actions = torch.zeros(actor_count, 4, device=device, dtype=torch.float32)
     actions[:, 0] = 1.5  # forward
-    actions[::2, 3] = 0.15   # even actors yaw right
+    actions[::2, 3] = 0.15  # even actors yaw right
     actions[1::2, 3] = -0.15  # odd actors yaw left
     return actions
 
@@ -82,19 +89,29 @@ def _run_bench_iteration(
     warmup_steps: int,
 ) -> dict[str, float | int]:
     import torch
+
     backend = _build_backend(config)
     device = torch.device("cuda")
     try:
         for actor_id in range(actors):
-            backend.reset_tensor(episode_id=0, actor_id=actor_id)
+            if hasattr(backend, "reset_tensor"):
+                backend.reset_tensor(episode_id=0, actor_id=actor_id)
+            else:
+                backend.reset(episode_id=0, actor_id=actor_id)
 
         actions = _benchmark_actions_tensor(actor_count=actors, device=device)
         for step_id in range(warmup_steps):
-            backend.batch_step_tensor_actions(actions, step_id)
+            if hasattr(backend, "batch_step_tensor_actions"):
+                backend.batch_step_tensor_actions(actions, step_id)
+            else:
+                backend.batch_step(tuple(object() for _ in range(actors)), step_id)
 
         started_at = time.perf_counter()
         for step_id in range(warmup_steps, warmup_steps + steps):
-            backend.batch_step_tensor_actions(actions, step_id)
+            if hasattr(backend, "batch_step_tensor_actions"):
+                backend.batch_step_tensor_actions(actions, step_id)
+            else:
+                backend.batch_step(tuple(object() for _ in range(actors)), step_id)
         elapsed = time.perf_counter() - started_at
         snapshot = backend.perf_snapshot()
     finally:
@@ -106,7 +123,10 @@ def _run_bench_iteration(
 
     expected_total_batches = warmup_steps + steps
     expected_total_actor_steps = expected_total_batches * actors
-    if snapshot.total_batches < expected_total_batches or snapshot.total_actor_steps < expected_total_actor_steps:
+    if (
+        snapshot.total_batches < expected_total_batches
+        or snapshot.total_actor_steps < expected_total_actor_steps
+    ):
         typer.echo(
             "Error: backend perf snapshot is inconsistent with the requested benchmark profile. "
             f"Expected at least batches={expected_total_batches}, actor_steps={expected_total_actor_steps}; "
@@ -135,11 +155,15 @@ def _run_bench_iteration(
     }
 
 
-def _aggregate_bench_runs(runs: list[dict[str, float | int]]) -> dict[str, float | int | str | list[dict[str, float | int]]]:
+def _aggregate_bench_runs(
+    runs: list[dict[str, float | int]],
+) -> dict[str, float | int | str | list[dict[str, float | int]]]:
     if not runs:
         raise RuntimeError("bench-sdfdag requires at least one run")
 
-    compile_values = {int(run["torch_compile_active"]) for run in runs if "torch_compile_active" in run}
+    compile_values = {
+        int(run["torch_compile_active"]) for run in runs if "torch_compile_active" in run
+    }
     compile_summary: dict[str, float | int] = {}
     if len(compile_values) == 1:
         compile_summary["torch_compile_active"] = next(iter(compile_values))
@@ -185,6 +209,22 @@ def _aggregate_bench_runs(runs: list[dict[str, float | int]]) -> dict[str, float
     }
 
 
+def _require_summary_float(summary: dict[str, Any], key: str) -> float:
+    value = summary.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    msg = f"Benchmark summary key '{key}' must be numeric, got {type(value).__name__}"
+    raise RuntimeError(msg)
+
+
+def _require_summary_int(summary: dict[str, Any], key: str) -> int:
+    value = summary.get(key)
+    if isinstance(value, (int, float)):
+        return int(value)
+    msg = f"Benchmark summary key '{key}' must be numeric, got {type(value).__name__}"
+    raise RuntimeError(msg)
+
+
 @app.command()
 def serve(
     pub: str = typer.Option(None, help="ZMQ PUB bind address (DistanceMatrix v2)"),
@@ -202,7 +242,9 @@ def serve(
         _default_gmdag_option(),
         help="Path to compiled .gmdag world cache for the canonical runtime",
     ),
-    sdf_max_steps: int = typer.Option(256, help="Maximum sphere-tracing iterations per ray for sdfdag backend"),
+    sdf_max_steps: int = typer.Option(
+        256, help="Maximum sphere-tracing iterations per ray for sdfdag backend"
+    ),
     actors: int = typer.Option(1, help="Number of actors sharing the scene"),
 ) -> None:
     """Start the Environment service."""
@@ -242,7 +284,9 @@ def serve_shortcut() -> None:
 
 @app.command("compile-gmdag")
 def compile_gmdag(
-    source: str = typer.Option(..., "--source", help="Input source model path (.glb/.obj/.ply/.stl)"),
+    source: str = typer.Option(
+        ..., "--source", help="Input source model path (.glb/.obj/.ply/.stl)"
+    ),
     output: str = typer.Option(..., "--output", help="Output .gmdag world cache path"),
     resolution: int = typer.Option(512, help="Compiler voxel resolution for DAG generation"),
 ) -> None:
@@ -270,7 +314,9 @@ def prepare_corpus(
     gmdag_root: str = typer.Option("", help="Root directory for compiled `.gmdag` outputs"),
     resolution: int = typer.Option(512, help="Compiler voxel resolution for corpus preparation"),
     min_scene_bytes: int = typer.Option(1000, help="Ignore tiny invalid scene files"),
-    force_recompile: bool = typer.Option(False, help="Overwrite compiled `.gmdag` outputs during refresh"),
+    force_recompile: bool = typer.Option(
+        False, help="Overwrite compiled `.gmdag` outputs during refresh"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON summary instead of text"),
 ) -> None:
     """Discover, compile, and summarize the canonical training corpus."""
@@ -326,11 +372,21 @@ def prepare_corpus(
 
 @app.command("check-sdfdag")
 def check_sdfdag(
-    gmdag_file: str = typer.Option("", help=".gmdag asset to validate alongside runtime readiness"),
-    gmdag_root: str = typer.Option("", help="Compiled corpus root to validate when checking the promoted corpus"),
-    manifest: str = typer.Option("", help="Compiled corpus manifest to validate against live promoted assets"),
-    expected_resolution: int = typer.Option(512, help="Expected canonical compiled resolution for corpus validation"),
-    json_output: bool = typer.Option(False, "--json", help="Emit a JSON validation summary instead of text"),
+    gmdag_file: str = typer.Option(
+        "", help=".gmdag asset to validate alongside runtime readiness"
+    ),
+    gmdag_root: str = typer.Option(
+        "", help="Compiled corpus root to validate when checking the promoted corpus"
+    ),
+    manifest: str = typer.Option(
+        "", help="Compiled corpus manifest to validate against live promoted assets"
+    ),
+    expected_resolution: int = typer.Option(
+        512, help="Expected canonical compiled resolution for corpus validation"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit a JSON validation summary instead of text"
+    ),
 ) -> None:
     """Validate the canonical SDF/DAG compiler/runtime path and asset metadata."""
     setup_logging("navi_environment_sdfdag_check")
@@ -359,14 +415,18 @@ def check_sdfdag(
                 "cuda_ready": status.cuda_ready,
                 "torch_sdf_ready": status.torch_sdf_ready,
                 "asset_loaded": status.asset_loaded,
-                "compiler_path": str(status.compiler_path) if status.compiler_path is not None else None,
+                "compiler_path": str(status.compiler_path)
+                if status.compiler_path is not None
+                else None,
                 "gmdag_path": str(status.gmdag_path) if status.gmdag_path is not None else None,
                 "resolution": status.resolution,
                 "node_count": status.node_count,
                 "bbox_min": list(status.bbox_min) if status.bbox_min is not None else None,
                 "bbox_max": list(status.bbox_max) if status.bbox_max is not None else None,
             },
-            "corpus": None if corpus_validation is None else {
+            "corpus": None
+            if corpus_validation is None
+            else {
                 "root": str(corpus_validation.gmdag_root),
                 "manifest": str(corpus_validation.manifest_path),
                 "manifest_present": corpus_validation.manifest_present,
@@ -422,13 +482,21 @@ def bench_sdfdag(
     actors: int = typer.Option(4, min=1, help="Number of actors to benchmark in one batch"),
     steps: int = typer.Option(200, min=1, help="Measured batch steps after warmup"),
     warmup_steps: int = typer.Option(25, min=0, help="Unmeasured warmup batch steps"),
-    repeats: int = typer.Option(1, min=1, help="Number of independent benchmark runs to aggregate by median"),
+    repeats: int = typer.Option(
+        1, min=1, help="Number of independent benchmark runs to aggregate by median"
+    ),
     azimuth_bins: int = typer.Option(256, help="Distance-matrix azimuth bins"),
     elevation_bins: int = typer.Option(48, help="Distance-matrix elevation bins"),
     max_distance: float = typer.Option(30.0, help="Distance normalization range"),
     sdf_max_steps: int = typer.Option(256, help="Maximum sphere-tracing iterations per ray"),
-    torch_compile: bool = typer.Option(True, "--torch-compile/--no-torch-compile", help="Compile tensor-only sdfdag helper graphs with torch.compile"),
-    json_output: bool = typer.Option(False, "--json", help="Emit a JSON benchmark summary instead of text"),
+    torch_compile: bool = typer.Option(
+        True,
+        "--torch-compile/--no-torch-compile",
+        help="Compile tensor-only sdfdag helper graphs with torch.compile",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit a JSON benchmark summary instead of text"
+    ),
 ) -> None:
     """Benchmark the canonical batched SDF/DAG environment path."""
     setup_logging("navi_environment_sdfdag_bench")
@@ -476,6 +544,15 @@ def bench_sdfdag(
         typer.echo(json.dumps(summary, indent=2))
         return
 
+    measured_sps = _require_summary_float(summary, "measured_sps")
+    rolling_sps = _require_summary_float(summary, "rolling_sps")
+    last_batch_ms = _require_summary_float(summary, "last_batch_ms")
+    ema_batch_ms = _require_summary_float(summary, "ema_batch_ms")
+    avg_batch_ms = _require_summary_float(summary, "avg_batch_ms")
+    avg_actor_ms = _require_summary_float(summary, "avg_actor_ms")
+    total_batches = _require_summary_int(summary, "total_batches")
+    total_actor_steps = _require_summary_int(summary, "total_actor_steps")
+
     typer.echo(
         "bench-sdfdag - "
         f"actors={actors}, "
@@ -483,21 +560,24 @@ def bench_sdfdag(
         f"warmup_steps={warmup_steps}, "
         f"repeats={repeats}, "
         f"aggregation={summary['aggregation']}, "
-        f"measured_sps={float(summary['measured_sps']):.2f}, "
-        f"rolling_sps={float(summary['rolling_sps']):.2f}, "
-        f"last_batch_ms={float(summary['last_batch_ms']):.2f}, "
-        f"ema_batch_ms={float(summary['ema_batch_ms']):.2f}, "
-        f"avg_batch_ms={float(summary['avg_batch_ms']):.2f}, "
-        f"avg_actor_ms={float(summary['avg_actor_ms']):.2f}, "
-        f"total_batches={int(summary['total_batches'])}, "
-        f"total_actor_steps={int(summary['total_actor_steps'])}"
+        f"measured_sps={measured_sps:.2f}, "
+        f"rolling_sps={rolling_sps:.2f}, "
+        f"last_batch_ms={last_batch_ms:.2f}, "
+        f"ema_batch_ms={ema_batch_ms:.2f}, "
+        f"avg_batch_ms={avg_batch_ms:.2f}, "
+        f"avg_actor_ms={avg_actor_ms:.2f}, "
+        f"total_batches={total_batches}, "
+        f"total_actor_steps={total_actor_steps}"
     )
     if repeats > 1:
+        measured_sps_min = _require_summary_float(summary, "measured_sps_min")
+        measured_sps_max = _require_summary_float(summary, "measured_sps_max")
+        measured_sps_mean = _require_summary_float(summary, "measured_sps_mean")
         typer.echo(
             "bench-sdfdag-runs - "
-            f"min_sps={float(summary['measured_sps_min']):.2f}, "
-            f"max_sps={float(summary['measured_sps_max']):.2f}, "
-            f"mean_sps={float(summary['measured_sps_mean']):.2f}"
+            f"min_sps={measured_sps_min:.2f}, "
+            f"max_sps={measured_sps_max:.2f}, "
+            f"mean_sps={measured_sps_mean:.2f}"
         )
 
 

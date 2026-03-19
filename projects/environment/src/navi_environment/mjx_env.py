@@ -142,16 +142,22 @@ class MjxEnvironment:
 
         # Scale normalised steering → physical velocity
         speed_factor = self._compute_speed_factor(prev_depth, max_distance)
-        linear = np.array([
-            float(raw_lin[0]) * self._speed_fwd * speed_factor,
-            float(raw_lin[1]) * self._speed_vert * speed_factor if len(raw_lin) > 1 else 0.0,
-            float(raw_lin[2]) * self._speed_lat * speed_factor if len(raw_lin) > 2 else 0.0,
-        ], dtype=np.float32)
-        angular = np.array([
-            float(raw_ang[0]),
-            float(raw_ang[1]) if len(raw_ang) > 1 else 0.0,
-            float(raw_ang[2]) * self._speed_yaw if len(raw_ang) > 2 else 0.0,  # yaw unscaled
-        ], dtype=np.float32)
+        linear = np.array(
+            [
+                float(raw_lin[0]) * self._speed_fwd * speed_factor,
+                float(raw_lin[1]) * self._speed_vert * speed_factor if len(raw_lin) > 1 else 0.0,
+                float(raw_lin[2]) * self._speed_lat * speed_factor if len(raw_lin) > 2 else 0.0,
+            ],
+            dtype=np.float32,
+        )
+        angular = np.array(
+            [
+                float(raw_ang[0]),
+                float(raw_ang[1]) if len(raw_ang) > 1 else 0.0,
+                float(raw_ang[2]) * self._speed_yaw if len(raw_ang) > 2 else 0.0,  # yaw unscaled
+            ],
+            dtype=np.float32,
+        )
 
         # Apply first-order exponential smoothing (momentum)
         a = self._smoothing

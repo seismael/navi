@@ -224,7 +224,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             return
 
         # Determine mode (Standard: Mode Detection)
-        has_training_data = (len(state.reward_history) > 0 or len(state.ppo_reward_ema_history) > 0)
+        has_training_data = len(state.reward_history) > 0 or len(state.ppo_reward_ema_history) > 0
         has_inference_data = state.latest_features is not None
 
         if self._manual_mode:
@@ -310,13 +310,17 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             return
         key = event.key()
         if key in (
-            QtCore.Qt.Key.Key_W, QtCore.Qt.Key.Key_S,
-            QtCore.Qt.Key.Key_Up, QtCore.Qt.Key.Key_Down,
+            QtCore.Qt.Key.Key_W,
+            QtCore.Qt.Key.Key_S,
+            QtCore.Qt.Key.Key_Up,
+            QtCore.Qt.Key.Key_Down,
         ):
             self._fwd = 0.0
         if key in (
-            QtCore.Qt.Key.Key_A, QtCore.Qt.Key.Key_D,
-            QtCore.Qt.Key.Key_Left, QtCore.Qt.Key.Key_Right,
+            QtCore.Qt.Key.Key_A,
+            QtCore.Qt.Key.Key_D,
+            QtCore.Qt.Key.Key_Left,
+            QtCore.Qt.Key.Key_Right,
         ):
             self._yaw = 0.0
         super().keyReleaseEvent(event)

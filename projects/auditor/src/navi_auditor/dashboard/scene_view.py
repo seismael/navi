@@ -23,17 +23,19 @@ __all__: list[str] = ["SceneView3D"]
 _log = logging.getLogger(__name__)
 
 # ── Face colours (RGBA float 0-1) ────────────────────────────────────
-_FLOOR_COLOR = (0.30, 0.45, 0.25, 0.95)       # earthy green, nearly opaque
-_CEILING_COLOR = (0.30, 0.30, 0.35, 0.06)     # barely visible
-_WALL_COLOR_BASE = np.array([0.42, 0.45, 0.55, 0.18], dtype=np.float32)  # semi-transparent blue-gray
-_WALL_EDGE_COLOR = (100, 110, 130, 50)          # subtle wireframe edges
+_FLOOR_COLOR = (0.30, 0.45, 0.25, 0.95)  # earthy green, nearly opaque
+_CEILING_COLOR = (0.30, 0.30, 0.35, 0.06)  # barely visible
+_WALL_COLOR_BASE = np.array(
+    [0.42, 0.45, 0.55, 0.18], dtype=np.float32
+)  # semi-transparent blue-gray
+_WALL_EDGE_COLOR = (100, 110, 130, 50)  # subtle wireframe edges
 
 # Drone & trail
-_DRONE_COLOR = (1.0, 0.55, 0.0, 1.0)           # bright orange
-_HEADING_COLOR = (0.0, 1.0, 0.8, 1.0)          # cyan-green heading arrow
-_TRAIL_MAX = 600                                 # max trail positions
-_TRAIL_COLOR_RECENT = np.array([0.2, 0.9, 0.9, 0.9])   # bright cyan (recent)
-_TRAIL_COLOR_OLD = np.array([0.15, 0.25, 0.35, 0.2])    # dim (old)
+_DRONE_COLOR = (1.0, 0.55, 0.0, 1.0)  # bright orange
+_HEADING_COLOR = (0.0, 1.0, 0.8, 1.0)  # cyan-green heading arrow
+_TRAIL_MAX = 600  # max trail positions
+_TRAIL_COLOR_RECENT = np.array([0.2, 0.9, 0.9, 0.9])  # bright cyan (recent)
+_TRAIL_COLOR_OLD = np.array([0.15, 0.25, 0.35, 0.2])  # dim (old)
 
 
 class SceneView3D:
@@ -93,7 +95,8 @@ class SceneView3D:
         # ── Height-based colouring for walls ─────────────────────────
         # Compute per-face centroid height (in GL Z-up coordinates)
         face_centroids_z = np.mean(
-            verts_gl[faces, 2], axis=1,
+            verts_gl[faces, 2],
+            axis=1,
         ).astype(np.float32)
         z_min = float(np.min(verts_gl[:, 2]))
         z_max = float(np.max(verts_gl[:, 2]))
@@ -163,7 +166,8 @@ class SceneView3D:
 
         # ── Heading arrow (short line from drone position) ───────────
         heading_pts = np.array(
-            [[0.0, 0.0, 1.0], [0.8, 0.0, 1.0]], dtype=np.float32,
+            [[0.0, 0.0, 1.0], [0.8, 0.0, 1.0]],
+            dtype=np.float32,
         )
         self._heading_line = gl.GLLinePlotItem(
             pos=heading_pts,
@@ -184,7 +188,9 @@ class SceneView3D:
         cam_dist = max(scene_radius * 1.8, 15.0)
 
         self._widget.setCameraPosition(
-            distance=cam_dist, elevation=65, azimuth=-90,
+            distance=cam_dist,
+            elevation=65,
+            azimuth=-90,
         )
         self._widget.opts["center"].setX(float(bbox_center[0]))
         self._widget.opts["center"].setY(float(bbox_center[1]))
@@ -194,8 +200,7 @@ class SceneView3D:
         self._scene_radius = scene_radius
 
         _log.info(
-            "SceneView3D: loaded %d verts, %d faces "
-            "(floor=%d, wall=%d, ceil=%d)  cam_dist=%.1f",
+            "SceneView3D: loaded %d verts, %d faces (floor=%d, wall=%d, ceil=%d)  cam_dist=%.1f",
             len(verts_gl),
             n_faces,
             int(np.sum(floor_mask)),
@@ -238,11 +243,10 @@ class SceneView3D:
         # ── Heading arrow ────────────────────────────────────────────
         arrow_len = 1.2
         # In sim: yaw rotates around Y-up → in GL: rotates around Z-up
-        dx = arrow_len * np.cos(yaw)   # forward in sim-X → GL-X
-        dy = arrow_len * np.sin(yaw)   # forward in sim-Z → GL-Y
+        dx = arrow_len * np.cos(yaw)  # forward in sim-X → GL-X
+        dy = arrow_len * np.sin(yaw)  # forward in sim-Z → GL-Y
         head_pts = np.array(
-            [[gl_x, gl_y, gl_z],
-             [gl_x + dx, gl_y + dy, gl_z]],
+            [[gl_x, gl_y, gl_z], [gl_x + dx, gl_y + dy, gl_z]],
             dtype=np.float32,
         )
         self._heading_line.setData(pos=head_pts)

@@ -129,7 +129,7 @@ function Cleanup-LegacyCanonicalSourceRoot {
 }
 
 $repoRoot = Get-RepoRoot
-$logsRoot = Join-Path $repoRoot "scripts\logs\corpus-refresh"
+$logsRoot = Join-Path $repoRoot "artifacts\tmp\corpus-refresh\logs"
 Ensure-Directory -PathToCreate $logsRoot
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $transcriptPath = Join-Path $logsRoot "refresh_$timestamp.log"

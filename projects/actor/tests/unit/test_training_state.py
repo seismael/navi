@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import tempfile
 from pathlib import Path
@@ -31,7 +32,8 @@ def _assert_same_device(actual: torch.device, expected: torch.device) -> None:
     """Treat CUDA default-device aliases as equivalent during device placement checks."""
     assert actual.type == expected.type
     if actual.type == "cuda":
-        assert (actual.index in (None, 0)) and (expected.index in (None, 0))
+        assert actual.index in (None, 0)
+        assert expected.index in (None, 0)
     else:
         assert actual.index == expected.index
 
@@ -100,15 +102,15 @@ def test_save_load_training_state_roundtrip() -> None:
 
     # Verify policy weights match
     for key in policy_sd:
-        assert torch.equal(
-            policy_sd[key], trainer2._learner_policy.state_dict()[key]
-        ), f"Policy param mismatch: {key}"
+        assert torch.equal(policy_sd[key], trainer2._learner_policy.state_dict()[key]), (
+            f"Policy param mismatch: {key}"
+        )
 
     # Verify RND weights match (including frozen target)
     for key in rnd_sd:
-        assert torch.equal(
-            rnd_sd[key], trainer2._rnd.state_dict()[key]
-        ), f"RND param mismatch: {key}"
+        assert torch.equal(rnd_sd[key], trainer2._rnd.state_dict()[key]), (
+            f"RND param mismatch: {key}"
+        )
 
     # Verify reward shaper step
     assert trainer2._reward_shaper._global_step == 12345
@@ -226,7 +228,9 @@ def test_dashboard_publish_gate_uses_configured_live_cadence() -> None:
 
     perf_values = iter((100.05, 100.11))
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr("navi_actor.training.ppo_trainer.time.perf_counter", lambda: next(perf_values))
+    monkeypatch.setattr(
+        "navi_actor.training.ppo_trainer.time.perf_counter", lambda: next(perf_values)
+    )
     try:
         assert trainer._should_publish_dashboard_observation() is False
         assert trainer._should_publish_dashboard_observation() is True
@@ -255,12 +259,18 @@ def test_active_actor_local_indices_preserve_selected_actor_order() -> None:
     active_actor_indices = torch.tensor([3, 1], dtype=torch.int64, device=trainer._device)
     selected_actor_indices = torch.tensor([1, 2, 3], dtype=torch.int64, device=trainer._device)
 
-    local_indices = trainer._active_actor_local_indices(active_actor_indices, selected_actor_indices)
+    local_indices = trainer._active_actor_local_indices(
+        active_actor_indices, selected_actor_indices
+    )
 
-    assert torch.equal(local_indices, torch.tensor([1, 0], dtype=torch.int64, device=trainer._device))
+    assert torch.equal(
+        local_indices, torch.tensor([1, 0], dtype=torch.int64, device=trainer._device)
+    )
 
 
-def test_run_ppo_update_bootstrap_ignores_hidden_state_on_canonical_core(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_ppo_update_bootstrap_ignores_hidden_state_on_canonical_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Canonical PPO bootstrap should not feed hidden state into the learner policy."""
     trainer = _make_trainer()
     n = trainer._n_actors
@@ -369,11 +379,21 @@ def test_extract_host_rollout_scalars_uses_selected_actor_subset() -> None:
     """Sparse rollout scalar extraction should select only the requested actor subset on device."""
     trainer = _make_trainer()
     batch = trainer._extract_host_rollout_scalars(
-        raw_rewards=torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=trainer._device),
-        shaped_rewards=torch.tensor([1.5, 2.5, 3.5, 4.5], dtype=torch.float32, device=trainer._device),
-        intrinsic_rewards=torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.float32, device=trainer._device),
-        loop_similarities=torch.tensor([0.0, 0.9, 0.2, 0.8], dtype=torch.float32, device=trainer._device),
-        done_flags=torch.tensor([False, True, False, True], dtype=torch.bool, device=trainer._device),
+        raw_rewards=torch.tensor(
+            [1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=trainer._device
+        ),
+        shaped_rewards=torch.tensor(
+            [1.5, 2.5, 3.5, 4.5], dtype=torch.float32, device=trainer._device
+        ),
+        intrinsic_rewards=torch.tensor(
+            [0.1, 0.2, 0.3, 0.4], dtype=torch.float32, device=trainer._device
+        ),
+        loop_similarities=torch.tensor(
+            [0.0, 0.9, 0.2, 0.8], dtype=torch.float32, device=trainer._device
+        ),
+        done_flags=torch.tensor(
+            [False, True, False, True], dtype=torch.bool, device=trainer._device
+        ),
         actor_indices=torch.tensor([1, 3], dtype=torch.int64, device=trainer._device),
     )
 
@@ -387,17 +407,33 @@ def test_extract_host_rollout_scalars_uses_selected_actor_subset() -> None:
     _assert_same_device(batch.intrinsic_reward_tensor.device, trainer._device)
     _assert_same_device(batch.loop_similarity_tensor.device, trainer._device)
     _assert_same_device(batch.done_tensor.device, trainer._device)
-    assert torch.equal(batch.raw_reward_tensor, torch.tensor([2.0, 4.0], dtype=torch.float32, device=trainer._device))
-    assert torch.equal(batch.shaped_reward_tensor, torch.tensor([2.5, 4.5], dtype=torch.float32, device=trainer._device))
-    assert torch.equal(batch.intrinsic_reward_tensor, torch.tensor([0.2, 0.4], dtype=torch.float32, device=trainer._device))
-    assert torch.equal(batch.loop_similarity_tensor, torch.tensor([0.9, 0.8], dtype=torch.float32, device=trainer._device))
-    assert torch.equal(batch.done_tensor, torch.tensor([True, True], dtype=torch.bool, device=trainer._device))
+    assert torch.equal(
+        batch.raw_reward_tensor,
+        torch.tensor([2.0, 4.0], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.equal(
+        batch.shaped_reward_tensor,
+        torch.tensor([2.5, 4.5], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.equal(
+        batch.intrinsic_reward_tensor,
+        torch.tensor([0.2, 0.4], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.equal(
+        batch.loop_similarity_tensor,
+        torch.tensor([0.9, 0.8], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.equal(
+        batch.done_tensor, torch.tensor([True, True], dtype=torch.bool, device=trainer._device)
+    )
 
 
 def test_extract_completed_episode_host_batch_uses_selected_actor_subset() -> None:
     """Completed-episode host extraction should only mirror the requested actor subset."""
     trainer = _make_trainer()
-    episode_returns = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=trainer._device)
+    episode_returns = torch.tensor(
+        [1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=trainer._device
+    )
     episode_lengths = torch.tensor([10, 20, 30, 40], dtype=torch.int32, device=trainer._device)
 
     batch = trainer._extract_completed_episode_host_batch(
@@ -601,7 +637,9 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
             assert step_id == 19
             assert actor_indices is not None
             assert materialize_results is False
-            assert torch.equal(actor_indices, torch.tensor([3], dtype=torch.int64, device=trainer._device))
+            assert torch.equal(
+                actor_indices, torch.tensor([3], dtype=torch.int64, device=trainer._device)
+            )
             return FakeTensorBatch(), ()
 
         def perf_snapshot(self) -> object:
@@ -621,11 +659,21 @@ def test_request_batch_step_tensor_actions_uses_runtime_action_tensor_seam() -> 
 
     step_batch = payload
     assert step_batch.observation_tensor.shape == (1, 3, 8, 4)
-    assert torch.allclose(step_batch.reward_tensor, torch.tensor([1.25], dtype=torch.float32, device=trainer._device))
-    assert torch.equal(step_batch.done_tensor, torch.tensor([False], dtype=torch.bool, device=trainer._device))
-    assert torch.equal(step_batch.truncated_tensor, torch.tensor([True], dtype=torch.bool, device=trainer._device))
-    assert torch.equal(step_batch.episode_id_tensor, torch.tensor([5], dtype=torch.int64, device=trainer._device))
-    assert torch.equal(step_batch.env_id_tensor, torch.tensor([3], dtype=torch.int64, device=trainer._device))
+    assert torch.allclose(
+        step_batch.reward_tensor, torch.tensor([1.25], dtype=torch.float32, device=trainer._device)
+    )
+    assert torch.equal(
+        step_batch.done_tensor, torch.tensor([False], dtype=torch.bool, device=trainer._device)
+    )
+    assert torch.equal(
+        step_batch.truncated_tensor, torch.tensor([True], dtype=torch.bool, device=trainer._device)
+    )
+    assert torch.equal(
+        step_batch.episode_id_tensor, torch.tensor([5], dtype=torch.int64, device=trainer._device)
+    )
+    assert torch.equal(
+        step_batch.env_id_tensor, torch.tensor([3], dtype=torch.int64, device=trainer._device)
+    )
     assert step_batch.published_observations == {}
 
 
@@ -646,22 +694,36 @@ def test_finalize_rollout_group_preserves_actor_local_transition_order() -> None
     trainer._multi_buffers.append_batch = capture_append_batch  # type: ignore[method-assign]
 
     actor_indices = torch.tensor([2, 0], dtype=torch.int64, device=trainer._device)
-    old_observations = torch.arange(2 * 3 * 8 * 4, dtype=torch.float32, device=trainer._device).reshape(2, 3, 8, 4)
+    old_observations = torch.arange(
+        2 * 3 * 8 * 4, dtype=torch.float32, device=trainer._device
+    ).reshape(2, 3, 8, 4)
     next_observations = torch.full((2, 3, 8, 4), 77.0, dtype=torch.float32, device=trainer._device)
-    current_obs_batch = torch.zeros((trainer._n_actors, 3, 8, 4), dtype=torch.float32, device=trainer._device)
+    current_obs_batch = torch.zeros(
+        (trainer._n_actors, 3, 8, 4), dtype=torch.float32, device=trainer._device
+    )
     aux_states = torch.zeros((trainer._n_actors, 3), dtype=torch.float32, device=trainer._device)
     reward_sum = torch.zeros((), dtype=torch.float32, device=trainer._device)
     reward_ema = torch.zeros((), dtype=torch.float32, device=trainer._device)
-    episode_returns = torch.zeros((trainer._n_actors,), dtype=torch.float32, device=trainer._device)
+    episode_returns = torch.zeros(
+        (trainer._n_actors,), dtype=torch.float32, device=trainer._device
+    )
     episode_lengths = torch.zeros((trainer._n_actors,), dtype=torch.int32, device=trainer._device)
 
     class FakeTensorBatch:
         def __init__(self) -> None:
             self.observation_tensor = next_observations
-            self.reward_tensor = torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device)
-            self.done_tensor = torch.tensor([False, False], dtype=torch.bool, device=trainer._device)
-            self.truncated_tensor = torch.tensor([False, False], dtype=torch.bool, device=trainer._device)
-            self.episode_id_tensor = torch.tensor([9, 10], dtype=torch.int64, device=trainer._device)
+            self.reward_tensor = torch.tensor(
+                [1.0, 2.0], dtype=torch.float32, device=trainer._device
+            )
+            self.done_tensor = torch.tensor(
+                [False, False], dtype=torch.bool, device=trainer._device
+            )
+            self.truncated_tensor = torch.tensor(
+                [False, False], dtype=torch.bool, device=trainer._device
+            )
+            self.episode_id_tensor = torch.tensor(
+                [9, 10], dtype=torch.int64, device=trainer._device
+            )
             self.env_id_tensor = actor_indices
             self.reward_component_tensor = None
             self.published_observations: dict[int, DistanceMatrix] = {}
@@ -672,7 +734,9 @@ def test_finalize_rollout_group_preserves_actor_local_transition_order() -> None
         observations=old_observations,
         aux_tensor=torch.zeros((2, 3), dtype=torch.float32, device=trainer._device),
         actions=torch.zeros((2, 4), dtype=torch.float32, device=trainer._device),
-        embeddings=torch.zeros((2, trainer._config.embedding_dim), dtype=torch.float32, device=trainer._device),
+        embeddings=torch.zeros(
+            (2, trainer._config.embedding_dim), dtype=torch.float32, device=trainer._device
+        ),
         log_probs=torch.zeros((2,), dtype=torch.float32, device=trainer._device),
         values=torch.zeros((2,), dtype=torch.float32, device=trainer._device),
         intrinsic_rewards=torch.zeros((2,), dtype=torch.float32, device=trainer._device),
@@ -708,9 +772,13 @@ def test_prepare_rollout_group_reads_updated_group_state_after_finalize() -> Non
     trainer._config.enable_reward_shaping = False
 
     actor_indices = trainer._rollout_group_indices[0]
-    current_obs_batch = torch.zeros((trainer._n_actors, 3, 8, 4), dtype=torch.float32, device=trainer._device)
+    current_obs_batch = torch.zeros(
+        (trainer._n_actors, 3, 8, 4), dtype=torch.float32, device=trainer._device
+    )
     aux_states = torch.zeros((trainer._n_actors, 3), dtype=torch.float32, device=trainer._device)
-    updated_rows = torch.full((int(actor_indices.numel()), 3, 8, 4), 11.0, dtype=torch.float32, device=trainer._device)
+    updated_rows = torch.full(
+        (int(actor_indices.numel()), 3, 8, 4), 11.0, dtype=torch.float32, device=trainer._device
+    )
 
     trainer._write_actor_rows(current_obs_batch, actor_indices, updated_rows)
     prepared = trainer._prepare_rollout_group(
@@ -787,7 +855,9 @@ def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
                     semantic=np.zeros((1, 8, 4), dtype=np.int32),
                     valid_mask=np.ones((1, 8, 4), dtype=np.bool_),
                     overhead=np.zeros((8, 8, 3), dtype=np.float32),
-                    robot_pose=RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0),
+                    robot_pose=RobotPose(
+                        x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0
+                    ),
                     step_id=0,
                     timestamp=1.0,
                 )
@@ -915,7 +985,9 @@ def test_load_initial_observation_batch_preserves_oracle_house_tensor_and_public
                     semantic=oracle.semantic[np.newaxis, ...],
                     valid_mask=oracle.valid[np.newaxis, ...],
                     overhead=np.zeros((8, 8, 3), dtype=np.float32),
-                    robot_pose=RobotPose(x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0),
+                    robot_pose=RobotPose(
+                        x=0.0, y=0.0, z=0.0, roll=0.0, pitch=0.0, yaw=0.0, timestamp=1.0
+                    ),
                     step_id=0,
                     timestamp=1.0,
                 )
@@ -932,13 +1004,19 @@ def test_load_initial_observation_batch_preserves_oracle_house_tensor_and_public
     obs_batch, published = trainer._load_initial_observation_batch()
 
     np.testing.assert_allclose(obs_batch[0, 0].detach().cpu().numpy(), oracle.depth)
-    np.testing.assert_allclose(obs_batch[0, 1].detach().cpu().numpy(), oracle.semantic.astype(np.float32))
-    np.testing.assert_allclose(obs_batch[0, 2].detach().cpu().numpy(), oracle.valid.astype(np.float32))
+    np.testing.assert_allclose(
+        obs_batch[0, 1].detach().cpu().numpy(), oracle.semantic.astype(np.float32)
+    )
+    np.testing.assert_allclose(
+        obs_batch[0, 2].detach().cpu().numpy(), oracle.valid.astype(np.float32)
+    )
     np.testing.assert_allclose(published[0].depth[0], oracle.depth)
     np.testing.assert_array_equal(published[0].valid_mask[0], oracle.valid)
 
 
-def test_extract_host_rollout_scalars_handles_oracle_motion_delta_without_host_shape_drift() -> None:
+def test_extract_host_rollout_scalars_handles_oracle_motion_delta_without_host_shape_drift() -> (
+    None
+):
     first = house_observation()
     second = house_observation_after_forward_motion()
 
@@ -989,11 +1067,25 @@ def test_extract_host_rollout_scalars_batches_telemetry_columns_when_needed() ->
     _assert_same_device(payload.intrinsic_reward_tensor.device, trainer._device)
     _assert_same_device(payload.loop_similarity_tensor.device, trainer._device)
     _assert_same_device(payload.done_tensor.device, trainer._device)
-    assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32, device=trainer._device))
-    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device))
-    assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device))
-    assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device))
-    assert torch.equal(payload.done_tensor, torch.tensor([True, False], dtype=torch.bool, device=trainer._device))
+    assert torch.allclose(
+        payload.raw_reward_tensor,
+        torch.tensor([0.5, 1.5], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.allclose(
+        payload.shaped_reward_tensor,
+        torch.tensor([1.0, 2.0], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.allclose(
+        payload.intrinsic_reward_tensor,
+        torch.tensor([3.0, 4.0], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.allclose(
+        payload.loop_similarity_tensor,
+        torch.tensor([5.0, 6.0], dtype=torch.float32, device=trainer._device),
+    )
+    assert torch.equal(
+        payload.done_tensor, torch.tensor([True, False], dtype=torch.bool, device=trainer._device)
+    )
 
 
 def test_materialize_step_telemetry_host_batch_packs_selected_columns_once() -> None:
@@ -1036,12 +1128,22 @@ def test_materialize_step_telemetry_host_batch_packs_selected_columns_once() -> 
     assert payload.forward_velocity_tensor.device.type == "cpu"
     assert payload.reward_component_tensor.device.type == "cpu"
     assert torch.allclose(payload.raw_reward_tensor, torch.tensor([0.5, 1.5], dtype=torch.float32))
-    assert torch.allclose(payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32))
-    assert torch.allclose(payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32))
-    assert torch.allclose(payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32))
+    assert torch.allclose(
+        payload.shaped_reward_tensor, torch.tensor([1.0, 2.0], dtype=torch.float32)
+    )
+    assert torch.allclose(
+        payload.intrinsic_reward_tensor, torch.tensor([3.0, 4.0], dtype=torch.float32)
+    )
+    assert torch.allclose(
+        payload.loop_similarity_tensor, torch.tensor([5.0, 6.0], dtype=torch.float32)
+    )
     assert torch.equal(payload.done_tensor, torch.tensor([True, False], dtype=torch.bool))
-    assert torch.allclose(payload.forward_velocity_tensor, torch.tensor([7.0, 9.0], dtype=torch.float32))
-    assert torch.allclose(payload.yaw_velocity_tensor, torch.tensor([8.0, 10.0], dtype=torch.float32))
+    assert torch.allclose(
+        payload.forward_velocity_tensor, torch.tensor([7.0, 9.0], dtype=torch.float32)
+    )
+    assert torch.allclose(
+        payload.yaw_velocity_tensor, torch.tensor([8.0, 10.0], dtype=torch.float32)
+    )
     assert torch.allclose(
         payload.reward_component_tensor,
         torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=torch.float32),
@@ -1076,7 +1178,9 @@ def test_extract_completed_episode_host_batch_packs_done_events_once() -> None:
     assert payload.episode_return_tensor.device.type == "cpu"
     assert payload.episode_length_tensor.device.type == "cpu"
     assert torch.equal(payload.actor_id_tensor, torch.tensor([1, 2], dtype=torch.int64))
-    assert torch.allclose(payload.episode_return_tensor, torch.tensor([2.5, 3.5], dtype=torch.float32))
+    assert torch.allclose(
+        payload.episode_return_tensor, torch.tensor([2.5, 3.5], dtype=torch.float32)
+    )
     assert torch.equal(payload.episode_length_tensor, torch.tensor([20, 30], dtype=torch.int32))
 
 
@@ -1107,7 +1211,9 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
     class FakeTensorStepBatch:
         def __init__(self, device: torch.device, actor_indices: torch.Tensor) -> None:
             actor_count = int(actor_indices.shape[0])
-            self.observation_tensor = torch.ones((actor_count, 3, 8, 4), dtype=torch.float32, device=device)
+            self.observation_tensor = torch.ones(
+                (actor_count, 3, 8, 4), dtype=torch.float32, device=device
+            )
             self.reward_tensor = torch.ones((actor_count,), dtype=torch.float32, device=device)
             self.done_tensor = torch.zeros((actor_count,), dtype=torch.bool, device=device)
             self.truncated_tensor = torch.zeros((actor_count,), dtype=torch.bool, device=device)
@@ -1179,20 +1285,214 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
         actions = torch.zeros((actor_count, 4), dtype=torch.float32, device=trainer._device)
         log_probs = torch.zeros((actor_count,), dtype=torch.float32, device=trainer._device)
         values = torch.zeros((actor_count,), dtype=torch.float32, device=trainer._device)
-        embeddings = torch.zeros((actor_count, trainer._config.embedding_dim), dtype=torch.float32, device=trainer._device)
+        embeddings = torch.zeros(
+            (actor_count, trainer._config.embedding_dim),
+            dtype=torch.float32,
+            device=trainer._device,
+        )
         return actions, log_probs, values, None, embeddings
 
     update_calls: list[int] = []
 
     monkeypatch.setattr(trainer._rollout_policy, "forward", fake_forward)
-    monkeypatch.setattr(trainer._rnd, "intrinsic_reward", lambda z_t: torch.zeros((z_t.shape[0],), dtype=torch.float32, device=trainer._device))
+    monkeypatch.setattr(
+        trainer._rnd,
+        "intrinsic_reward",
+        lambda z_t: torch.zeros((z_t.shape[0],), dtype=torch.float32, device=trainer._device),
+    )
     monkeypatch.setattr(trainer, "_publish_dashboard_observations", lambda observations: None)
     monkeypatch.setattr(trainer, "_should_publish_dashboard_observation", lambda: False)
-    monkeypatch.setattr(trainer, "_publish_update_telemetry", lambda step_id, reward_ema, metrics: None)
-    monkeypatch.setattr(trainer, "_run_ppo_update", lambda **kwargs: update_calls.append(len(kwargs["multi_buffer"])))
+    monkeypatch.setattr(
+        trainer, "_publish_update_telemetry", lambda step_id, reward_ema, metrics: None
+    )
+    monkeypatch.setattr(
+        trainer,
+        "_run_ppo_update",
+        lambda **kwargs: update_calls.append(len(kwargs["multi_buffer"])),
+    )
 
     metrics = trainer.train(total_steps=8, log_every=0)
 
     assert metrics.total_steps == 8
-    assert trainer._runtime.step_calls == 4  # type: ignore[union-attr]
+    assert trainer._runtime.step_calls == 2  # type: ignore[union-attr]
     assert update_calls == [8]
+
+
+def test_train_records_coarse_resource_metrics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Canonical trainer metrics should include coarse process/CUDA resource snapshots."""
+
+    run_root = tmp_path / "run"
+    metrics_root = run_root / "metrics"
+    manifest_root = run_root / "manifests"
+    log_root = run_root / "logs"
+    for directory in (metrics_root, manifest_root, log_root):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("NAVI_RUN_ID", "test-trainer-metrics")
+    monkeypatch.setenv("NAVI_RUN_ROOT", str(run_root))
+    monkeypatch.setenv("NAVI_METRICS_ROOT", str(metrics_root))
+    monkeypatch.setenv("NAVI_MANIFEST_ROOT", str(manifest_root))
+    monkeypatch.setenv("NAVI_LOG_ROOT", str(log_root))
+    monkeypatch.setenv("NAVI_REPO_ROOT", str(Path(__file__).resolve().parents[4]))
+    monkeypatch.setenv("NAVI_RUN_STARTED_AT", "2026-03-18T00:00:00+00:00")
+
+    cfg = ActorConfig(
+        sub_address="tcp://127.0.0.1:19200",
+        pub_address="tcp://127.0.0.1:19201",
+        step_endpoint="tcp://127.0.0.1:19202",
+        mode="step",
+        azimuth_bins=8,
+        elevation_bins=4,
+        embedding_dim=32,
+        n_actors=4,
+        rollout_length=32,
+        ppo_epochs=1,
+        minibatch_size=8,
+        bptt_len=4,
+        enable_episodic_memory=False,
+        enable_reward_shaping=False,
+        emit_observation_stream=False,
+        emit_training_telemetry=False,
+        emit_perf_telemetry=True,
+    )
+    trainer = PpoTrainer(cfg)
+
+    class FakeTensorStepBatch:
+        def __init__(self, device: torch.device, actor_indices: torch.Tensor) -> None:
+            actor_count = int(actor_indices.shape[0])
+            self.observation_tensor = torch.ones(
+                (actor_count, 3, 8, 4), dtype=torch.float32, device=device
+            )
+            self.reward_tensor = torch.ones((actor_count,), dtype=torch.float32, device=device)
+            self.done_tensor = torch.zeros((actor_count,), dtype=torch.bool, device=device)
+            self.truncated_tensor = torch.zeros((actor_count,), dtype=torch.bool, device=device)
+            self.episode_id_tensor = torch.zeros((actor_count,), dtype=torch.int64, device=device)
+            self.env_id_tensor = actor_indices.clone()
+            self.reward_component_tensor = None
+            self.published_observations: dict[int, DistanceMatrix] = {}
+
+    class FakeRuntime:
+        def __init__(self, device: torch.device) -> None:
+            self._device = device
+            self.step_calls = 0
+
+        def reset_tensor(
+            self,
+            episode_id: int,
+            *,
+            actor_id: int = 0,
+            materialize: bool = False,
+        ) -> tuple[torch.Tensor, DistanceMatrix | None]:
+            del episode_id, actor_id, materialize
+            return torch.ones((3, 8, 4), dtype=torch.float32, device=self._device), None
+
+        def batch_step_tensor_actions(
+            self,
+            action_tensor: torch.Tensor,
+            step_id: int,
+            *,
+            actor_indices: torch.Tensor | None = None,
+            scratch_slot: int = 0,
+            publish_actor_ids: tuple[int, ...] = (),
+            materialize_results: bool = False,
+        ) -> tuple[FakeTensorStepBatch, tuple[object, ...]]:
+            del step_id, publish_actor_ids, scratch_slot
+            assert actor_indices is not None
+            assert materialize_results is False
+            actor_count = int(actor_indices.shape[0])
+            assert action_tensor.shape == (actor_count, 4)
+            self.step_calls += 1
+            return FakeTensorStepBatch(self._device, actor_indices), ()
+
+        def perf_snapshot(self) -> object:
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "sps": 42.0,
+                    "last_batch_step_ms": 2.5,
+                    "ema_batch_step_ms": 2.0,
+                    "avg_batch_step_ms": 2.25,
+                    "avg_actor_step_ms": 0.56,
+                    "total_batches": self.step_calls,
+                    "total_actor_steps": self.step_calls * 4,
+                },
+            )()
+
+        def close(self) -> None:
+            return None
+
+    trainer._runtime = FakeRuntime(trainer._device)  # type: ignore[assignment]
+
+    def fake_forward(
+        obs_tensor: torch.Tensor,
+        hidden: torch.Tensor | None = None,
+        aux_tensor: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, torch.Tensor]:
+        del hidden, aux_tensor
+        actor_count = obs_tensor.shape[0]
+        actions = torch.zeros((actor_count, 4), dtype=torch.float32, device=trainer._device)
+        log_probs = torch.zeros((actor_count,), dtype=torch.float32, device=trainer._device)
+        values = torch.zeros((actor_count,), dtype=torch.float32, device=trainer._device)
+        embeddings = torch.zeros(
+            (actor_count, trainer._config.embedding_dim),
+            dtype=torch.float32,
+            device=trainer._device,
+        )
+        return actions, log_probs, values, None, embeddings
+
+    monkeypatch.setattr(trainer._rollout_policy, "forward", fake_forward)
+    monkeypatch.setattr(
+        trainer._rnd,
+        "intrinsic_reward",
+        lambda z_t: torch.zeros((z_t.shape[0],), dtype=torch.float32, device=trainer._device),
+    )
+    monkeypatch.setattr(trainer, "_publish_dashboard_observations", lambda observations: None)
+    monkeypatch.setattr(trainer, "_should_publish_dashboard_observation", lambda: False)
+    monkeypatch.setattr(
+        trainer, "_publish_update_telemetry", lambda step_id, reward_ema, metrics: None
+    )
+    monkeypatch.setattr(
+        trainer,
+        "_run_ppo_update",
+        lambda **kwargs: setattr(
+            trainer,
+            "_last_opt_metrics",
+            type(
+                "Metrics",
+                (),
+                {
+                    "n_updates": 1,
+                    "policy_eval_ms_total": 1.0,
+                    "backward_ms_total": 1.0,
+                    "optimizer_step_ms_total": 1.0,
+                    "rnd_step_ms_total": 0.0,
+                    "epoch_total_ms": 3.0,
+                },
+            )(),
+        ),
+    )
+
+    metrics = trainer.train(total_steps=8, log_every=4)
+
+    assert metrics.total_steps == 8
+    metrics_path = metrics_root / "actor_training.jsonl"
+    assert metrics_path.exists()
+    records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
+    streams = {record["stream"] for record in records}
+    assert "training_perf" in streams
+    assert "runtime_perf" in streams
+    assert "training_summary" in streams
+
+    perf_payload = next(record["payload"] for record in records if record["stream"] == "training_perf")
+    assert perf_payload["operation"] == "rollout_heartbeat"
+    assert "proc_rss_mb" in perf_payload
+    assert "cuda_available" in perf_payload
+
+    summary_payload = next(
+        record["payload"] for record in records if record["stream"] == "training_summary"
+    )
+    assert summary_payload["operation"] == "training_summary"
+    assert summary_payload["total_steps"] == 8

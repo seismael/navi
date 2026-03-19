@@ -53,12 +53,18 @@ def _write_forward_wall_obj(path: Path) -> None:
         (1.5, 2.0, 1.0),
     ]
     faces = [
-        (1, 2, 3), (1, 3, 4),
-        (5, 6, 7), (5, 7, 8),
-        (1, 2, 6), (1, 6, 5),
-        (2, 3, 7), (2, 7, 6),
-        (3, 4, 8), (3, 8, 7),
-        (4, 1, 5), (4, 5, 8),
+        (1, 2, 3),
+        (1, 3, 4),
+        (5, 6, 7),
+        (5, 7, 8),
+        (1, 2, 6),
+        (1, 6, 5),
+        (2, 3, 7),
+        (2, 7, 6),
+        (3, 4, 8),
+        (3, 8, 7),
+        (4, 1, 5),
+        (4, 5, 8),
     ]
     lines = [*(f"v {x} {y} {z}" for x, y, z in vertices), *(f"f {a} {b} {c}" for a, b, c in faces)]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -76,7 +82,9 @@ def _compile_forward_wall_gmdag(output_dir: Path) -> Path:
     _write_forward_wall_obj(source)
 
     vertices, indices, bbox_min, bbox_max = mesh_ingestor.load_obj(str(source))
-    grid, voxel_size, cube_min = compute_dense_sdf(vertices, indices, bbox_min, bbox_max, 64, padding=0.0)
+    grid, voxel_size, cube_min = compute_dense_sdf(
+        vertices, indices, bbox_min, bbox_max, 64, padding=0.0
+    )
     dag = compress_to_dag(grid, 64)
     write_gmdag(output, dag, 64, cube_min, voxel_size)
     return output
@@ -106,7 +114,9 @@ def test_compiled_forward_wall_materializes_centered_auditor_signal(tmp_path: Pa
     try:
         initial_pose = torch.tensor([0.0, 1.0, 0.0], device=backend._device, dtype=torch.float32)
         backend._spawn_positions[0].copy_(initial_pose)
-        observation_tensor, published = backend.reset_tensor(episode_id=1, actor_id=0, materialize=True)
+        observation_tensor, published = backend.reset_tensor(
+            episode_id=1, actor_id=0, materialize=True
+        )
         assert published is not None
 
         centered_depth = _center_forward_azimuth(published.depth[0])

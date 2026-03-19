@@ -13,6 +13,8 @@ from navi_actor.cognitive_policy import CognitiveMambaPolicy
 from navi_actor.config import TemporalCoreName
 from navi_actor.gru_core import GRUTemporalCore
 from navi_actor.mambapy_core import MambapyTemporalCore
+
+
 def _make_policy(*, temporal_core: TemporalCoreName = "gru") -> CognitiveMambaPolicy:
     return CognitiveMambaPolicy(
         embedding_dim=128,
@@ -55,6 +57,7 @@ def test_act_returns_list() -> None:
     assert isinstance(action_list, list)
     assert len(action_list) == 4
     assert all(isinstance(x, float) for x in action_list)
+
 
 def test_encode_returns_embedding() -> None:
     """encode() should return spatial embedding without temporal processing."""
@@ -124,7 +127,10 @@ def test_checkpoint_roundtrip() -> None:
         ckpt = Path(tmpdir) / "test.pt"
         policy.save_checkpoint(ckpt)
         loaded = CognitiveMambaPolicy.load_checkpoint(
-            ckpt, embedding_dim=128, azimuth_bins=64, elevation_bins=32,
+            ckpt,
+            embedding_dim=128,
+            azimuth_bins=64,
+            elevation_bins=32,
         )
     for key in policy.state_dict():
         assert torch.equal(policy.state_dict()[key], loaded.state_dict()[key])
@@ -165,7 +171,8 @@ def test_evaluate_value_stop_gradient() -> None:
 
     # Critic head SHOULD have gradients
     critic_grads = [
-        p.grad for p in policy.heads.critic.parameters()
+        p.grad
+        for p in policy.heads.critic.parameters()
         if p.grad is not None and not torch.all(p.grad == 0)
     ]
     assert len(critic_grads) > 0, "Critic head must receive value-loss gradients"
@@ -191,7 +198,8 @@ def test_evaluate_sequence_value_stop_gradient() -> None:
         )
 
     critic_grads = [
-        p.grad for p in policy.heads.critic.parameters()
+        p.grad
+        for p in policy.heads.critic.parameters()
         if p.grad is not None and not torch.all(p.grad == 0)
     ]
     assert len(critic_grads) > 0, "Critic head must receive value-loss gradients"
@@ -209,13 +217,15 @@ def test_evaluate_actor_gradient_flows_to_backbone() -> None:
 
     # Encoder and temporal core SHOULD have gradients from policy loss
     encoder_grads = [
-        p.grad for p in policy.encoder.parameters()
+        p.grad
+        for p in policy.encoder.parameters()
         if p.grad is not None and not torch.all(p.grad == 0)
     ]
     assert len(encoder_grads) > 0, "Encoder must receive policy-loss gradients"
 
     temporal_grads = [
-        p.grad for p in policy.temporal_core.parameters()
+        p.grad
+        for p in policy.temporal_core.parameters()
         if p.grad is not None and not torch.all(p.grad == 0)
     ]
     assert len(temporal_grads) > 0, "Temporal core must receive policy-loss gradients"

@@ -72,7 +72,9 @@ def canonical_node_hash(payload: bytes, seed: int = 0) -> int:
     for block_idx in range(block_count):
         offset = block_idx * 16
         k1 = int.from_bytes(data[offset : offset + 8], byteorder="little", signed=False)
-        k2 = int.from_bytes(data[offset + 8 : offset + 16], byteorder="little", signed=False)
+        k2 = int.from_bytes(
+            data[offset + 8 : offset + 16], byteorder="little", signed=False
+        )
 
         k1 = (k1 * _MURMUR_C1) & _UINT64_MASK
         k1 = _rotl64(k1, 31)
@@ -186,7 +188,9 @@ class MeshIngestor:
     """Minimal OBJ loader used by the Python verification surface."""
 
     @staticmethod
-    def load_obj(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def load_obj(
+        path: str | Path,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         vertices: list[list[float]] = []
         faces: list[list[int]] = []
         obj_path = Path(path)
@@ -216,13 +220,26 @@ class MeshIngestor:
             bbox_min = np.zeros(3, dtype=np.float32)
             bbox_max = np.zeros(3, dtype=np.float32)
 
-        index_array = np.asarray(faces, dtype=np.int32) if faces else np.zeros((0, 3), dtype=np.int32)
-        return vertex_array, index_array, bbox_min.astype(np.float32), bbox_max.astype(np.float32)
+        index_array = (
+            np.asarray(faces, dtype=np.int32)
+            if faces
+            else np.zeros((0, 3), dtype=np.int32)
+        )
+        return (
+            vertex_array,
+            index_array,
+            bbox_min.astype(np.float32),
+            bbox_max.astype(np.float32),
+        )
 
 
 def _point_triangle_distance_sq(
-    px: float, py: float, pz: float,
-    v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
+    px: float,
+    py: float,
+    pz: float,
+    v0: np.ndarray,
+    v1: np.ndarray,
+    v2: np.ndarray,
 ) -> float:
     """Closest-point distance² from point to triangle (Eberly algorithm)."""
     diff = np.array([px - v0[0], py - v0[1], pz - v0[2]], dtype=np.float64)
@@ -245,7 +262,11 @@ def _point_triangle_distance_sq(
                     s = 1.0 if -b0 >= a00 else -b0 / max(a00, 1e-30)
                 else:
                     s = 0.0
-                    t = 0.0 if b1 >= 0 else (1.0 if -b1 >= a11 else -b1 / max(a11, 1e-30))
+                    t = (
+                        0.0
+                        if b1 >= 0
+                        else (1.0 if -b1 >= a11 else -b1 / max(a11, 1e-30))
+                    )
             else:
                 s = 0.0
                 t = 0.0 if b1 >= 0 else (1.0 if -b1 >= a11 else -b1 / max(a11, 1e-30))
@@ -325,7 +346,11 @@ def compute_dense_sdf(
     """Return a cubic dense unsigned distance field using triangle-mesh distances + Eikonal propagation."""
     res = _next_power_of_two(resolution)
     if vertices.size == 0:
-        return np.zeros((res, res, res), dtype=np.float32), 1.0 / float(res), np.zeros(3, dtype=np.float32)
+        return (
+            np.zeros((res, res, res), dtype=np.float32),
+            1.0 / float(res),
+            np.zeros(3, dtype=np.float32),
+        )
 
     bbox_min = np.asarray(bbox_min, dtype=np.float32)
     bbox_max = np.asarray(bbox_max, dtype=np.float32)
@@ -352,7 +377,11 @@ def compute_dense_sdf(
             else:
                 plane_dist = np.abs(cube_min[2] + coords - plane_value)
                 field = np.broadcast_to(plane_dist[:, None, None], (res, res, res))
-            return field.astype(np.float32, copy=True), float(cell_size), cube_min.astype(np.float32)
+            return (
+                field.astype(np.float32, copy=True),
+                float(cell_size),
+                cube_min.astype(np.float32),
+            )
 
     # Degenerate single-point geometry falls back to Euclidean point distance.
     if vertices.shape[0] == 1:
@@ -366,7 +395,11 @@ def compute_dense_sdf(
             + (y_coords[None, :, None] - float(vertex[1])) ** 2
             + (z_coords[:, None, None] - float(vertex[2])) ** 2
         )
-        return np.broadcast_to(field, (res, res, res)).astype(np.float32, copy=True), float(cell_size), cube_min.astype(np.float32)
+        return (
+            np.broadcast_to(field, (res, res, res)).astype(np.float32, copy=True),
+            float(cell_size),
+            cube_min.astype(np.float32),
+        )
 
     # --- General mesh: seed with exact triangle distances, then Eikonal sweep ---
     field = np.full((res, res, res), float("inf"), dtype=np.float64)
@@ -405,8 +438,14 @@ def compute_dense_sdf(
 
     # Eikonal fast-sweeping propagation (8 diagonal passes)
     sweep_dirs = [
-        (1, 1, 1), (-1, 1, 1), (1, -1, 1), (-1, -1, 1),
-        (1, 1, -1), (-1, 1, -1), (1, -1, -1), (-1, -1, -1),
+        (1, 1, 1),
+        (-1, 1, 1),
+        (1, -1, 1),
+        (-1, -1, 1),
+        (1, 1, -1),
+        (-1, 1, -1),
+        (1, -1, -1),
+        (-1, -1, -1),
     ]
     for sx, sy, sz in sweep_dirs:
         xr = range(0, res, 1) if sx > 0 else range(res - 1, -1, -1)
@@ -422,7 +461,11 @@ def compute_dense_sdf(
                     if updated < field[iz, iy, ix]:
                         field[iz, iy, ix] = updated
 
-    return field.astype(np.float32, copy=False), float(cell_size), cube_min.astype(np.float32)
+    return (
+        field.astype(np.float32, copy=False),
+        float(cell_size),
+        cube_min.astype(np.float32),
+    )
 
 
 def _float_to_half_bits(value: float) -> int:
@@ -474,15 +517,23 @@ def _build_signature_tree(
         leaf_signature = _leaf_signature_from_block(np.array([0.1], dtype=np.float32))
         specs.setdefault(
             leaf_signature,
-            _LeafSpec(signature=leaf_signature, node_word=int(_leaf_node_from_signature(leaf_signature))),
+            _LeafSpec(
+                signature=leaf_signature,
+                node_word=int(_leaf_node_from_signature(leaf_signature)),
+            ),
         )
         return leaf_signature
 
-    if min(block.shape) <= 1 or bool(np.allclose(block, block.flat[0], atol=1e-6, rtol=0.0)):
+    if min(block.shape) <= 1 or bool(
+        np.allclose(block, block.flat[0], atol=1e-6, rtol=0.0)
+    ):
         leaf_signature = _leaf_signature_from_block(block)
         specs.setdefault(
             leaf_signature,
-            _LeafSpec(signature=leaf_signature, node_word=int(_leaf_node_from_signature(leaf_signature))),
+            _LeafSpec(
+                signature=leaf_signature,
+                node_word=int(_leaf_node_from_signature(leaf_signature)),
+            ),
         )
         return leaf_signature
 
@@ -491,7 +542,9 @@ def _build_signature_tree(
     x_half = max(1, block.shape[2] // 2)
 
     # Octant diagonal extent for void detection
-    octant_extent = max(z_half, y_half, x_half) * cell_size * 1.7321 if cell_size > 0.0 else 0.0
+    octant_extent = (
+        max(z_half, y_half, x_half) * cell_size * 1.7321 if cell_size > 0.0 else 0.0
+    )
 
     child_signatures: list[bytes | None] = []
     mask = 0
@@ -506,7 +559,11 @@ def _build_signature_tree(
         ]
 
         # Void octant detection: skip if min SDF > octant diagonal
-        if octant_extent > 0.0 and child_block.size > 0 and float(child_block.min()) > octant_extent:
+        if (
+            octant_extent > 0.0
+            and child_block.size > 0
+            and float(child_block.min()) > octant_extent
+        ):
             child_signatures.append(None)
             continue
 
@@ -518,7 +575,10 @@ def _build_signature_tree(
         leaf_signature = _leaf_signature_from_block(block)
         specs.setdefault(
             leaf_signature,
-            _LeafSpec(signature=leaf_signature, node_word=int(_leaf_node_from_signature(leaf_signature))),
+            _LeafSpec(
+                signature=leaf_signature,
+                node_word=int(_leaf_node_from_signature(leaf_signature)),
+            ),
         )
         return leaf_signature
 
@@ -569,16 +629,22 @@ def _emit_signature(
 
     child_indices: list[int] = []
     for child_signature in spec.unique_child_signatures:
-        child_indices.append(_emit_signature(child_signature, specs, dag_pool, emitted_indices))
+        child_indices.append(
+            _emit_signature(child_signature, specs, dag_pool, emitted_indices)
+        )
 
     for offset, unique_child_idx in enumerate(spec.remap):
         dag_pool[child_base + offset] = np.uint64(child_indices[unique_child_idx])
 
-    dag_pool[node_index] = np.uint64((int(spec.mask) << _INTERNAL_NODE_MASK_SHIFT) | child_base)
+    dag_pool[node_index] = np.uint64(
+        (int(spec.mask) << _INTERNAL_NODE_MASK_SHIFT) | child_base
+    )
     return node_index
 
 
-def compress_to_dag(grid: np.ndarray, resolution: int, cell_size: float = 0.0) -> np.ndarray:
+def compress_to_dag(
+    grid: np.ndarray, resolution: int, cell_size: float = 0.0
+) -> np.ndarray:
     """Return a fast native-format DAG payload compatible with the CUDA test backend."""
     res = _next_power_of_two(resolution)
     dense = np.asarray(grid, dtype=np.float32)
@@ -586,7 +652,9 @@ def compress_to_dag(grid: np.ndarray, resolution: int, cell_size: float = 0.0) -
         dense = np.reshape(dense, (res, res, res)).astype(np.float32, copy=False)
 
     if dense.size == 0:
-        return np.array([np.uint64((1 << 63) | _float_to_half_bits(0.1))], dtype=np.uint64)
+        return np.array(
+            [np.uint64((1 << 63) | _float_to_half_bits(0.1))], dtype=np.uint64
+        )
 
     specs: dict[bytes, _LeafSpec | _InternalSpec] = {}
     root_signature = _build_signature_tree(dense, specs, cell_size=cell_size)
@@ -595,7 +663,13 @@ def compress_to_dag(grid: np.ndarray, resolution: int, cell_size: float = 0.0) -
     return np.asarray(dag_pool, dtype=np.uint64)
 
 
-def write_gmdag(path: str | Path, dag: np.ndarray, resolution: int, bbox_min: np.ndarray, voxel_size: float) -> None:
+def write_gmdag(
+    path: str | Path,
+    dag: np.ndarray,
+    resolution: int,
+    bbox_min: np.ndarray,
+    voxel_size: float,
+) -> None:
     """Write a `.gmdag` file with the canonical 32-byte header plus node payload."""
     target = Path(path)
     dag_u64 = np.asarray(dag, dtype=np.uint64)
@@ -635,11 +709,17 @@ def write_gmdag(path: str | Path, dag: np.ndarray, resolution: int, bbox_min: np
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Compile an OBJ mesh into a simple .gmdag verification artifact.")
+    parser = argparse.ArgumentParser(
+        description="Compile an OBJ mesh into a simple .gmdag verification artifact."
+    )
     parser.add_argument("--input", required=True, help="Input OBJ mesh path")
     parser.add_argument("--output", required=True, help="Output .gmdag path")
-    parser.add_argument("--resolution", type=int, default=512, help="Target cubic resolution")
-    parser.add_argument("--padding", type=float, default=0.1, help="Relative cubic padding")
+    parser.add_argument(
+        "--resolution", type=int, default=512, help="Target cubic resolution"
+    )
+    parser.add_argument(
+        "--padding", type=float, default=0.1, help="Relative cubic padding"
+    )
     return parser
 
 

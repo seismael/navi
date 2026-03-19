@@ -7,7 +7,6 @@ class SettingsConfigDict(ConfigDict, total=False):
     env_file: str | PathLike[str]
     env_file_encoding: str
 
-
 class BaseSettings(BaseModel):
     model_config: ClassVar[SettingsConfigDict]
 

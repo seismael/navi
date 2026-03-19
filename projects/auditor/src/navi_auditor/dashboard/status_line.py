@@ -41,7 +41,9 @@ def build_status_metrics_line(
 ) -> str:
     """Build a compact one-line telemetry summary for the dashboard top bar."""
     if state is None:
-        return "stall=-- | rollout_sps=-- | env_sps=-- | per_actor_sps=-- | ema=-- | ep=0 | step=--"
+        return (
+            "stall=-- | rollout_sps=-- | env_sps=-- | per_actor_sps=-- | ema=-- | ep=0 | step=--"
+        )
 
     now_ts = time.time() if now is None else now
     stall_s = None

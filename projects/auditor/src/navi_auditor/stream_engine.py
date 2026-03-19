@@ -313,10 +313,12 @@ class StreamEngine:
         action = Action(
             env_ids=np.array([0], dtype=np.int32),
             linear_velocity=np.array(
-                [[linear_velocity, 0.0, 0.0]], dtype=np.float32,
+                [[linear_velocity, 0.0, 0.0]],
+                dtype=np.float32,
             ),
             angular_velocity=np.array(
-                [[0.0, 0.0, yaw_rate]], dtype=np.float32,
+                [[0.0, 0.0, yaw_rate]],
+                dtype=np.float32,
             ),
             policy_id="dashboard-manual",
             step_id=self._step_counter,
@@ -476,7 +478,9 @@ class StreamEngine:
             self._route_telemetry(msg, state)
 
     def _route_telemetry(
-        self, event: TelemetryEvent, state: StreamState,
+        self,
+        event: TelemetryEvent,
+        state: StreamState,
     ) -> None:
         """Parse telemetry event type and push into typed ring buffers."""
         et = event.event_type
@@ -558,6 +562,3 @@ class StreamEngine:
             # Action published: [fwd, lateral, vertical, yaw]
             state.forward_cmd_history.append(float(p[0]))
             state.yaw_cmd_history.append(float(p[3]))
-
-
-

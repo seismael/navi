@@ -17,7 +17,8 @@ This is an operator-confidence workflow, not a formal proof system.
 - default fleet: `4` actors
 - hard-gate policy: fail fast before the soak if preflight or bounded qualification fails
 - soft-warning policy: collect warnings for drift or attach instability without aborting a healthy run
-- artifact root: `artifacts/nightly/<timestamp>/`
+- artifact root: `artifacts/nightly/<run_id>/`
+- run identity: one nightly `run_id` is propagated into wrapper manifests, child-process logs, metrics, and the top-level summary
 
 ## 3. Canonical Command
 
@@ -33,7 +34,7 @@ Optional duration override:
 
 ## 4. Phase Layout
 
-1. bootstrap artifact root and run manifest
+1. bootstrap governed run root, cleanup stale transient outputs, and write the wrapper manifest
 2. reclaim ports and stop stale Navi processes
 3. runtime preflight via `check-sdfdag` and `dataset-audit`
 4. focused actor, environment, voxel-dag, torch-sdf, and auditor regression suites
@@ -77,9 +78,24 @@ The top-level artifacts to inspect are:
 - `validation/check-sdfdag-corpus.json`
 - `validation/check-sdfdag-asset.json`
 - `validation/bench-sdfdag-sample.json`
+- `manifests/run-nightly-validation.json`
+- `logs/`
+- `metrics/`
 
 Those reports should be enough to decide whether the night was healthy before opening raw logs.
 
-## 8. Windows Launch Note
+## 8. Run Layout
+
+The nightly wrapper owns one structured run root:
+
+- `logs/` for redirected wrapper and child-process logs
+- `metrics/` for machine-readable streams and summaries
+- `manifests/` for wrapper and process manifests
+- `reports/` for morning-facing summaries and diffs
+- `checkpoints/` for run-scoped bounded and soak checkpoints
+
+The stable top-level `logs/` surface remains available for tailing, but nightly review should start from the run root so every file shares the same `run_id`.
+
+## 9. Windows Launch Note
 
 On Windows, the machine-readable preflight and benchmark JSON commands are resolved to the project-local Python interpreters and routed through `scripts/run-structured-surface.py` under the wrapper's native .NET process capture path. This avoids PowerShell's native-command stderr promotion and the observed nested CLI-hosting stall while preserving explicit timeout, stdout, and stderr artifacts.

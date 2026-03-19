@@ -37,6 +37,7 @@ __all__: list[str] = [
     "materialize_distance_matrix",
     "normalize_depth_metres",
     "remap_semantic_ids",
+    "sanitize_depth_metres",
     "transpose_equirectangular_grid",
 ]
 
@@ -79,7 +80,9 @@ class RigidTransformSpec:
         if matrix.shape != (4, 4):
             msg = f"transform matrix for {self.name} must have shape (4, 4); got {matrix.shape}"
             raise ValueError(msg)
-        if not np.allclose(matrix[3], np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), atol=1e-6, rtol=0.0):
+        if not np.allclose(
+            matrix[3], np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), atol=1e-6, rtol=0.0
+        ):
             msg = f"transform matrix for {self.name} must end with homogeneous row [0, 0, 0, 1]"
             raise ValueError(msg)
         if self.handedness not in _VALID_HANDEDNESS:
@@ -156,7 +159,10 @@ class EquirectangularDatasetAdapter:
             msg = f"default_overhead_shape must be strictly positive; got {self.default_overhead_shape}"
             raise ValueError(msg)
 
-        canonical_ids = {int(self.unknown_semantic_id), *(int(value) for value in self.semantic_remap.values())}
+        canonical_ids = {
+            int(self.unknown_semantic_id),
+            *(int(value) for value in self.semantic_remap.values()),
+        }
         if min(canonical_ids) < 0:
             msg = f"semantic remap must produce non-negative canonical ids; got {sorted(canonical_ids)}"
             raise ValueError(msg)
@@ -302,12 +308,27 @@ def normalize_depth_metres(
         msg = f"max_distance must be positive; got {max_distance}"
         raise ValueError(msg)
 
+    sanitized, valid = sanitize_depth_metres(depth_metres, max_distance=max_distance)
+    normalized = (sanitized / float(max_distance)).astype(np.float32, copy=False)
+    return normalized, valid.astype(np.bool_, copy=False)
+
+
+def sanitize_depth_metres(
+    depth_metres: NDArray[Any],
+    *,
+    max_distance: float | None = None,
+) -> tuple[NDArray[np.float32], NDArray[np.bool_]]:
+    """Sanitize metre depths by zeroing invalid cells and preserving valid hits."""
     depth = np.asarray(depth_metres, dtype=np.float32)
     finite = np.isfinite(depth)
-    valid = finite & (depth > 0.0) & (depth <= float(max_distance))
-    clamped = np.clip(np.where(finite, depth, float(max_distance)), 0.0, float(max_distance))
-    normalized = (clamped / float(max_distance)).astype(np.float32, copy=False)
-    return normalized, valid.astype(np.bool_, copy=False)
+    valid = finite & (depth > 0.0)
+    if max_distance is not None:
+        if max_distance <= 0.0:
+            msg = f"max_distance must be positive; got {max_distance}"
+            raise ValueError(msg)
+        valid = valid & (depth <= float(max_distance))
+    sanitized = np.where(valid, depth, 0.0).astype(np.float32, copy=False)
+    return sanitized, valid.astype(np.bool_, copy=False)
 
 
 def remap_semantic_ids(
@@ -337,7 +358,9 @@ def compute_delta_depth(
 
     previous = np.asarray(previous_depth, dtype=np.float32)
     if previous.shape != current.shape:
-        msg = f"previous_depth must match current_depth shape {current.shape}; got {previous.shape}"
+        msg = (
+            f"previous_depth must match current_depth shape {current.shape}; got {previous.shape}"
+        )
         raise ValueError(msg)
     return (current - previous).astype(np.float32, copy=False)
 
@@ -380,10 +403,18 @@ def materialize_distance_matrix(
     timestamp: float | None = None,
 ) -> DistanceMatrix:
     """Build a canonical public observation from already-adapted batched arrays."""
-    depth_array = _require_canonical_observation_array(depth, name="depth", dtype=np.float32)
-    delta_array = _require_canonical_observation_array(delta_depth, name="delta_depth", dtype=np.float32)
-    semantic_array = _require_canonical_observation_array(semantic, name="semantic", dtype=np.int32)
-    valid_array = _require_canonical_observation_array(valid_mask, name="valid_mask", dtype=np.bool_)
+    depth_array = _require_canonical_observation_array(
+        depth, name="depth", dtype=np.dtype(np.float32)
+    )
+    delta_array = _require_canonical_observation_array(
+        delta_depth, name="delta_depth", dtype=np.dtype(np.float32)
+    )
+    semantic_array = _require_canonical_observation_array(
+        semantic, name="semantic", dtype=np.dtype(np.int32)
+    )
+    valid_array = _require_canonical_observation_array(
+        valid_mask, name="valid_mask", dtype=np.dtype(np.bool_)
+    )
 
     expected_shape = depth_array.shape
     for name, value in (

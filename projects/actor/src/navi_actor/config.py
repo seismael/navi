@@ -74,7 +74,7 @@ class ActorConfig(BaseSettings):
     value_coeff: float = 0.5
     max_grad_norm: float = 0.5
     ppo_epochs: int = 2
-    rollout_length: int = 512
+    rollout_length: int = 256
     minibatch_size: int = 64
     bptt_len: int = 8
     n_actors: int = 1
@@ -103,6 +103,18 @@ class ActorConfig(BaseSettings):
     emit_training_telemetry: bool = True
     emit_update_loss_telemetry: bool = False
     emit_perf_telemetry: bool = True
+    emit_internal_stats: bool = Field(
+        default=True,
+        validation_alias="NAVI_ACTOR_EMIT_INTERNAL_STATS",
+    )
+    attach_resource_snapshots: bool = Field(
+        default=True,
+        validation_alias="NAVI_ACTOR_ATTACH_RESOURCE_SNAPSHOTS",
+    )
+    print_performance_summary: bool = Field(
+        default=True,
+        validation_alias="NAVI_ACTOR_PRINT_PERFORMANCE_SUMMARY",
+    )
     profile_cuda_events: bool = False
     reward_shaping_torch_compile: bool = Field(
         default=True,

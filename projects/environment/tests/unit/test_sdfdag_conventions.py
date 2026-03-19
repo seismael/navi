@@ -72,13 +72,15 @@ def test_observation_profile_tracks_starvation_and_near_geometry() -> None:
     depth = np.array([[1.0, 0.02], [0.10, 0.50]], dtype=np.float32)
     valid = np.array([[False, True], [True, True]], dtype=np.bool_)
 
-    starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = _observation_profile(
-        depth,
-        valid,
-        max_distance=30.0,
-        proximity_distance_threshold=1.0,
-        structure_band_min_distance=1.5,
-        structure_band_max_distance=10.0,
+    starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = (
+        _observation_profile(
+            depth,
+            valid,
+            max_distance=30.0,
+            proximity_distance_threshold=1.0,
+            structure_band_min_distance=1.5,
+            structure_band_max_distance=10.0,
+        )
     )
 
     assert math.isclose(starvation_ratio, 0.25)
@@ -102,7 +104,7 @@ def test_select_spawn_yaw_rotates_structure_into_forward_sector() -> None:
     )
 
     azimuth_bins = depth.shape[0]
-    shift = int(round((yaw / (2.0 * math.pi)) * azimuth_bins)) % azimuth_bins
+    shift = round((yaw / (2.0 * math.pi)) * azimuth_bins) % azimuth_bins
     rotated_depth = np.roll(depth, -shift, axis=0)
     rotated_valid = np.roll(valid, -shift, axis=0)
     before_forward = _observation_profile(
@@ -196,7 +198,9 @@ def test_reset_uses_precomputed_spawn_yaw() -> None:
     assert float(backend._actor_yaws[0]) == pytest.approx(1.25)
 
 
-def test_reset_tensor_uses_tensor_ratios_when_materialization_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reset_tensor_uses_tensor_ratios_when_materialization_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     backend = object.__new__(SdfDagBackend)
     backend._initial_resets_remaining = 0
     backend._maybe_rotate_scene = lambda *, is_natural: False  # type: ignore[method-assign]
@@ -235,11 +239,15 @@ def test_reset_tensor_uses_tensor_ratios_when_materialization_disabled(monkeypat
         torch.tensor([0.3], dtype=torch.float32),
         torch.tensor([0.4], dtype=torch.float32),
     )
-    backend._materialize_observation = lambda **kwargs: (_ for _ in ()).throw(AssertionError("not used"))  # type: ignore[method-assign]
+    backend._materialize_observation = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("not used")
+    )  # type: ignore[method-assign]
 
     monkeypatch.setattr(
         "navi_environment.backends.sdfdag_backend._observation_profile",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected numpy profile call")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unexpected numpy profile call")
+        ),
     )
 
     obs_tensor, published = backend.reset_tensor(episode_id=7, actor_id=0, materialize=False)
@@ -291,19 +299,24 @@ def _make_tensor_action_backend_stub(*, n_actors: int = 4) -> SdfDagBackend:
     backend._bbox_max = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
     backend._record_perf_sample = lambda **kwargs: None  # type: ignore[method-assign]
     backend._advance_reset_bookkeeping = lambda reset_count: None  # type: ignore[method-assign]
-    backend._reset_tensor_actor_batch = lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected reset path"))  # type: ignore[method-assign]
+    backend._reset_tensor_actor_batch = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("unexpected reset path")
+    )  # type: ignore[method-assign]
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 8})()  # type: ignore[method-assign]
+
     def cast_rays(*args: object, **kwargs: object) -> None:
         del kwargs
-        out_distances = cast(torch.Tensor, args[3])
-        out_semantics = cast(torch.Tensor, args[4])
+        out_distances = cast("torch.Tensor", args[3])
+        out_semantics = cast("torch.Tensor", args[4])
         out_distances.fill_(2.5)
         out_semantics.zero_()
 
     backend._torch_sdf = type("TorchSdfStub", (), {"cast_rays": staticmethod(cast_rays)})()
 
-    def scratch_slot_views(*, scratch_slot: int, actor_count: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def scratch_slot_views(
+        *, scratch_slot: int, actor_count: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         origins = torch.zeros((actor_count, backend._n_rays, 3), dtype=torch.float32)
         dirs_world = torch.zeros((actor_count, backend._n_rays, 3), dtype=torch.float32)
         out_distances = torch.zeros((actor_count, backend._n_rays), dtype=torch.float32)
@@ -312,25 +325,40 @@ def _make_tensor_action_backend_stub(*, n_actors: int = 4) -> SdfDagBackend:
 
     backend._scratch_slot_views = scratch_slot_views  # type: ignore[method-assign]
 
-    def step_kinematics_indexed(*, actor_indices: torch.Tensor, actions_linear: torch.Tensor, actions_angular: torch.Tensor) -> None:
-        backend._actor_positions[actor_indices, 0] = actor_indices.to(dtype=torch.float32) + actions_linear[:, 0]
+    def step_kinematics_indexed(
+        *, actor_indices: torch.Tensor, actions_linear: torch.Tensor, actions_angular: torch.Tensor
+    ) -> None:
+        backend._actor_positions[actor_indices, 0] = (
+            actor_indices.to(dtype=torch.float32) + actions_linear[:, 0]
+        )
         backend._actor_yaws[actor_indices] = actions_angular[:, 2]
 
     backend._step_kinematics_indexed = step_kinematics_indexed  # type: ignore[method-assign]
 
     def compute_reward_batch(**kwargs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        actor_indices = cast(torch.Tensor, kwargs["actor_indices"])
+        actor_indices = cast("torch.Tensor", kwargs["actor_indices"])
         rewards = actor_indices.to(dtype=torch.float32) + 0.5
         components = torch.zeros((int(actor_indices.shape[0]), 9), dtype=torch.float32)
         return rewards, components
 
     backend._compute_reward_batch = compute_reward_batch  # type: ignore[method-assign]
 
-    def consume_observation_batch(*, actor_indices: torch.Tensor, depth_batch: torch.Tensor, semantic_batch: torch.Tensor, valid_batch: torch.Tensor, current_clearances: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def consume_observation_batch(
+        *,
+        actor_indices: torch.Tensor,
+        depth_batch: torch.Tensor,
+        semantic_batch: torch.Tensor,
+        valid_batch: torch.Tensor,
+        current_clearances: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         actor_count = int(actor_indices.shape[0])
-        obs_batch = torch.zeros((actor_count, 3, backend._az_bins, backend._el_bins), dtype=torch.float32)
+        obs_batch = torch.zeros(
+            (actor_count, 3, backend._az_bins, backend._el_bins), dtype=torch.float32
+        )
         obs_batch[:, 0, :, :] = actor_indices.to(dtype=torch.float32).view(-1, 1, 1)
-        delta_batch = torch.zeros((actor_count, backend._az_bins, backend._el_bins), dtype=torch.float32)
+        delta_batch = torch.zeros(
+            (actor_count, backend._az_bins, backend._el_bins), dtype=torch.float32
+        )
         return obs_batch, delta_batch
 
     backend._consume_observation_batch = consume_observation_batch  # type: ignore[method-assign]
@@ -353,7 +381,9 @@ def test_batch_step_tensor_actions_preserves_subset_actor_ids() -> None:
     assert torch.equal(step_batch.env_id_tensor, torch.tensor([2, 0], dtype=torch.int64))
     assert torch.equal(step_batch.episode_id_tensor, torch.tensor([102, 100], dtype=torch.int64))
     assert torch.allclose(step_batch.reward_tensor, torch.tensor([2.5, 0.5], dtype=torch.float32))
-    assert torch.allclose(step_batch.observation_tensor[:, 0, 0, 0], torch.tensor([2.0, 0.0], dtype=torch.float32))
+    assert torch.allclose(
+        step_batch.observation_tensor[:, 0, 0, 0], torch.tensor([2.0, 0.0], dtype=torch.float32)
+    )
     assert float(backend._actor_positions[2, 0]) == pytest.approx(3.0)
     assert float(backend._actor_positions[0, 0]) == pytest.approx(2.0)
     assert float(backend._actor_positions[1, 0]) == pytest.approx(0.0)
@@ -362,8 +392,12 @@ def test_batch_step_tensor_actions_preserves_subset_actor_ids() -> None:
 
 def test_batch_step_tensor_actions_skips_publish_materialization_when_unrequested() -> None:
     backend = _make_tensor_action_backend_stub()
-    backend._select_publish_rows = lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected publish-row selection"))  # type: ignore[method-assign]
-    backend._materialize_selected_observations = lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected observation materialization"))  # type: ignore[method-assign]
+    backend._select_publish_rows = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("unexpected publish-row selection")
+    )  # type: ignore[method-assign]
+    backend._materialize_selected_observations = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("unexpected observation materialization")
+    )  # type: ignore[method-assign]
 
     step_batch, ordered_results = backend.batch_step_tensor_actions(
         torch.tensor([[0.5, 0.0, 0.0, 0.0]], dtype=torch.float32),
@@ -399,22 +433,28 @@ def test_forward_structure_reward_scales_with_forward_visibility() -> None:
 
 
 def test_inspection_reward_requires_structure_and_tracks_information_gain() -> None:
-    assert _inspection_reward(
-        0.10,
-        0.35,
-        previous_forward_structure_ratio=0.05,
-        current_forward_structure_ratio=0.20,
-        reward_scale=0.25,
-        activation_threshold=0.05,
-    ) > 0.0
-    assert _inspection_reward(
-        0.35,
-        0.10,
-        previous_forward_structure_ratio=0.20,
-        current_forward_structure_ratio=0.05,
-        reward_scale=0.25,
-        activation_threshold=0.05,
-    ) < 0.0
+    assert (
+        _inspection_reward(
+            0.10,
+            0.35,
+            previous_forward_structure_ratio=0.05,
+            current_forward_structure_ratio=0.20,
+            reward_scale=0.25,
+            activation_threshold=0.05,
+        )
+        > 0.0
+    )
+    assert (
+        _inspection_reward(
+            0.35,
+            0.10,
+            previous_forward_structure_ratio=0.20,
+            current_forward_structure_ratio=0.05,
+            reward_scale=0.25,
+            activation_threshold=0.05,
+        )
+        < 0.0
+    )
 
 
 def test_validate_unit_direction_tensor_rejects_unnormalized_vectors() -> None:
@@ -668,9 +708,11 @@ def test_postprocess_cast_outputs_preserves_oracle_house_profile() -> None:
     out_distances = torch.from_numpy(metric.reshape(1, -1))
     out_semantics = torch.from_numpy(oracle.semantic.reshape(1, -1))
 
-    depth_batch, semantic_batch, valid_batch, min_distances, *_rest = backend._postprocess_cast_outputs(
-        out_distances,
-        out_semantics,
+    depth_batch, semantic_batch, valid_batch, min_distances, *_rest = (
+        backend._postprocess_cast_outputs(
+            out_distances,
+            out_semantics,
+        )
     )
 
     np.testing.assert_allclose(depth_batch[0].numpy(), oracle.depth)
@@ -744,15 +786,19 @@ def test_coerce_batch_actor_indices_rejects_duplicates() -> None:
 def test_materialize_observation_preserves_oracle_house_arrays() -> None:
     backend = object.__new__(SdfDagBackend)
     backend._episode_ids = torch.tensor([17], dtype=torch.int64)
-    backend.actor_pose = lambda actor_id: type("Pose", (), {
-        "x": float(actor_id),
-        "y": 0.0,
-        "z": 0.0,
-        "roll": 0.0,
-        "pitch": 0.0,
-        "yaw": 0.0,
-        "timestamp": 1.0,
-    })()  # type: ignore[method-assign]
+    backend.actor_pose = lambda actor_id: type(
+        "Pose",
+        (),
+        {
+            "x": float(actor_id),
+            "y": 0.0,
+            "z": 0.0,
+            "roll": 0.0,
+            "pitch": 0.0,
+            "yaw": 0.0,
+            "timestamp": 1.0,
+        },
+    )()  # type: ignore[method-assign]
 
     oracle = house_observation()
     delta = np.zeros_like(oracle.depth)

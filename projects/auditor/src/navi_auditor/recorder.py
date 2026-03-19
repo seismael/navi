@@ -56,23 +56,23 @@ _FWD_FOV_DEG = 120.0
 _MAIN_FOV_DEG = 95.0
 
 # ── first-person renderer constants ──────────────────────────────────
-_FP_SKY_TOP: tuple[int, int, int] = (80, 40, 10)      # dark blue sky (BGR)
-_FP_SKY_BOT: tuple[int, int, int] = (160, 100, 50)    # lighter horizon sky
-_FP_FLOOR_TOP: tuple[int, int, int] = (50, 70, 90)    # near floor (tan/brown)
-_FP_FLOOR_BOT: tuple[int, int, int] = (25, 35, 45)    # far floor (darker)
+_FP_SKY_TOP: tuple[int, int, int] = (80, 40, 10)  # dark blue sky (BGR)
+_FP_SKY_BOT: tuple[int, int, int] = (160, 100, 50)  # lighter horizon sky
+_FP_FLOOR_TOP: tuple[int, int, int] = (50, 70, 90)  # near floor (tan/brown)
+_FP_FLOOR_BOT: tuple[int, int, int] = (25, 35, 45)  # far floor (darker)
 
 # Brighter semantic colours for first-person walls (BGR)
 _FP_SEMANTIC_COLORS: dict[int, tuple[int, int, int]] = {
-    0: (50, 50, 50),        # AIR
-    1: (140, 140, 140),     # WALL
-    2: (110, 160, 100),     # FLOOR
-    3: (140, 120, 100),     # CEILING
-    4: (80, 200, 240),      # PILLAR — bright cyan
-    5: (60, 150, 240),      # RAMP — orange
-    6: (100, 100, 240),     # OBSTACLE — red
-    7: (180, 180, 180),     # ROAD — silver
-    8: (140, 100, 70),      # BUILDING
-    9: (240, 230, 140),     # WINDOW — light cyan
+    0: (50, 50, 50),  # AIR
+    1: (140, 140, 140),  # WALL
+    2: (110, 160, 100),  # FLOOR
+    3: (140, 120, 100),  # CEILING
+    4: (80, 200, 240),  # PILLAR — bright cyan
+    5: (60, 150, 240),  # RAMP — orange
+    6: (100, 100, 240),  # OBSTACLE — red
+    7: (180, 180, 180),  # ROAD — silver
+    8: (140, 100, 70),  # BUILDING
+    9: (240, 230, 140),  # WINDOW — light cyan
 }
 
 
@@ -309,7 +309,9 @@ class LiveDashboard:
                 continue
             zbuf[v, u] = z_depth
 
-            base = np.array(_FP_SEMANTIC_COLORS.get(int(sem[idx]), (150, 150, 150)), dtype=np.float32)
+            base = np.array(
+                _FP_SEMANTIC_COLORS.get(int(sem[idx]), (150, 150, 150)), dtype=np.float32
+            )
             shade = max(0.2, 1.0 - float(d_norm[idx]) * 0.8)
             color = (base * shade).astype(np.uint8)
             img[v, u] = color
@@ -348,7 +350,9 @@ class LiveDashboard:
             return (200, 200, 100)
         return (50, 50, 50)
 
-    def _render_forward_polar(self, depth: np.ndarray, valid: np.ndarray, w: int, h: int) -> np.ndarray:
+    def _render_forward_polar(
+        self, depth: np.ndarray, valid: np.ndarray, w: int, h: int
+    ) -> np.ndarray:
         """Render forward 180° scan as a smoothed polar plot."""
         panel = np.full((h, w, 3), 18, dtype=np.uint8)
         az_bins = depth.shape[0]
@@ -394,7 +398,9 @@ class LiveDashboard:
         cv2.arrowedLine(panel, (cx, cy), (cx, cy - 24), (0, 255, 255), 2, tipLength=0.4)
         return panel
 
-    def _render_bev_occupancy(self, depth: np.ndarray, valid: np.ndarray, w: int, h: int) -> np.ndarray:
+    def _render_bev_occupancy(
+        self, depth: np.ndarray, valid: np.ndarray, w: int, h: int
+    ) -> np.ndarray:
         """Render 360° observation as top-down occupancy map."""
         panel = np.full((h, w, 3), 20, dtype=np.uint8)
         az_bins = depth.shape[0]
@@ -568,10 +574,10 @@ class LiveDashboard:
     def _compose_frame(self) -> np.ndarray:
         """Build the full dashboard BGR frame from latest matrix data.
 
-                Layout (1920x1080):
-                    Left (2/3 width, full height):   First-person control view
-                    Right-left column (1/6 x 1/3):   Interpreted forward/overhead/panorama
-                    Right-right column (1/6 x 1/3):  Raw forward/overhead/panorama
+        Layout (1920x1080):
+            Left (2/3 width, full height):   First-person control view
+            Right-left column (1/6 x 1/3):   Interpreted forward/overhead/panorama
+            Right-right column (1/6 x 1/3):  Raw forward/overhead/panorama
         """
         frame = np.full((_DISPLAY_H, _DISPLAY_W, 3), 30, dtype=np.uint8)
 
@@ -589,7 +595,7 @@ class LiveDashboard:
 
         if self._latest_matrix is not None:
             dm = self._latest_matrix
-            depth_2d = dm.depth[0]        # (azimuth, elevation)
+            depth_2d = dm.depth[0]  # (azimuth, elevation)
             semantic_2d = dm.semantic[0]  # (azimuth, elevation)
             valid_2d = dm.valid_mask[0]
 
@@ -607,7 +613,11 @@ class LiveDashboard:
 
             # ── top-left: first-person 3D view ──
             fp_img, center_dist_m = self._render_first_person(
-                fov_depth, fov_semantic, fov_valid, _MAIN_W, _DISPLAY_H,
+                fov_depth,
+                fov_semantic,
+                fov_valid,
+                _MAIN_W,
+                _DISPLAY_H,
             )
             frame[:, :_MAIN_W] = fp_img
             draw_panel_title("FIRST PERSON (PRIMARY CONTROL VIEW)", 0, 0, _MAIN_W)
@@ -625,14 +635,16 @@ class LiveDashboard:
             overhead_bgr = dm.overhead.astype(np.uint8, copy=False)
             if self._overhead_zoom > 1.01:
                 overhead_bgr = self._zoom_overhead(
-                    overhead_bgr, self._overhead_zoom,
+                    overhead_bgr,
+                    self._overhead_zoom,
                 )
             overhead_bgr = np.asarray(
                 cv2.convertScaleAbs(overhead_bgr, alpha=1.1, beta=45),
                 dtype=np.uint8,
             )
             oh = cv2.resize(
-                overhead_bgr, (_SIDE_COL_W, _STACK_H),
+                overhead_bgr,
+                (_SIDE_COL_W, _STACK_H),
                 interpolation=cv2.INTER_NEAREST,
             )
             self._overlay_overhead_annotations(oh, self._overhead_zoom)
@@ -645,14 +657,18 @@ class LiveDashboard:
             )
 
             # ── right-left bottom: interpreted 360 bird's-eye occupancy ──
-            pano = self._render_bev_occupancy(depth_2d, valid_2d, _SIDE_COL_W, _DISPLAY_H - 2 * _STACK_H)
+            pano = self._render_bev_occupancy(
+                depth_2d, valid_2d, _SIDE_COL_W, _DISPLAY_H - 2 * _STACK_H
+            )
             self._add_orientation_guides(pano, "LEFT", "RIGHT")
             frame[2 * _STACK_H : _DISPLAY_H, side_x0:side_x1] = pano
             draw_panel_title("BIRD'S EYE 360", side_x0, 2 * _STACK_H, _SIDE_COL_W)
 
             # ── right-right top: raw forward depth heatmap (previous view) ──
             raw_forward = self._depth_to_bgr(fov_depth, fov_valid)
-            raw_forward = cv2.resize(raw_forward, (_SIDE_COL_W, _STACK_H), interpolation=cv2.INTER_NEAREST)
+            raw_forward = cv2.resize(
+                raw_forward, (_SIDE_COL_W, _STACK_H), interpolation=cv2.INTER_NEAREST
+            )
             self._add_orientation_guides(raw_forward, "LEFT", "RIGHT")
             frame[0:_STACK_H, side_x1:_DISPLAY_W] = raw_forward
             draw_panel_title("RAW FORWARD DEPTH", side_x1, 0, _SIDE_COL_W)
@@ -709,15 +725,27 @@ class LiveDashboard:
             step_txt = f"step={dm.step_id}"
             pose_txt = f"({p.x:.1f}, {p.y:.1f}, {p.z:.1f}) yaw={p.yaw:.2f}"
             cv2.putText(
-                frame, step_txt, (8, 20),
-                _HUD_FONT, _HUD_SCALE, _HUD_COLOR, _HUD_THICK,
+                frame,
+                step_txt,
+                (8, 20),
+                _HUD_FONT,
+                _HUD_SCALE,
+                _HUD_COLOR,
+                _HUD_THICK,
             )
             cv2.putText(
-                frame, pose_txt, (8, 40),
-                _HUD_FONT, _HUD_SCALE, _HUD_COLOR, _HUD_THICK,
+                frame,
+                pose_txt,
+                (8, 40),
+                _HUD_FONT,
+                _HUD_SCALE,
+                _HUD_COLOR,
+                _HUD_THICK,
             )
             stale_s = max(0.0, time.time() - self._last_rx_time)
-            freshness_color = (0, 220, 0) if stale_s < 0.25 else (0, 180, 255) if stale_s < 1.0 else (0, 0, 255)
+            freshness_color = (
+                (0, 220, 0) if stale_s < 0.25 else (0, 180, 255) if stale_s < 1.0 else (0, 0, 255)
+            )
             cv2.putText(
                 frame,
                 f"stream_age={stale_s:.2f}s",
@@ -731,17 +759,27 @@ class LiveDashboard:
             # Crosshair on first-person view
             cx_fp, cy_fp = _MAIN_W // 2, _DISPLAY_H // 2
             cv2.line(
-                frame, (cx_fp - 10, cy_fp), (cx_fp + 10, cy_fp),
-                (0, 255, 0), 1,
+                frame,
+                (cx_fp - 10, cy_fp),
+                (cx_fp + 10, cy_fp),
+                (0, 255, 0),
+                1,
             )
             cv2.line(
-                frame, (cx_fp, cy_fp - 10), (cx_fp, cy_fp + 10),
-                (0, 255, 0), 1,
+                frame,
+                (cx_fp, cy_fp - 10),
+                (cx_fp, cy_fp + 10),
+                (0, 255, 0),
+                1,
             )
 
             # Panel separator lines
             cv2.line(
-                frame, (_MAIN_W, 0), (_MAIN_W, _DISPLAY_H), _PANEL_BORDER_COLOR, 2,
+                frame,
+                (_MAIN_W, 0),
+                (_MAIN_W, _DISPLAY_H),
+                _PANEL_BORDER_COLOR,
+                2,
             )
             cv2.line(
                 frame,
@@ -751,7 +789,11 @@ class LiveDashboard:
                 2,
             )
             cv2.line(
-                frame, (_MAIN_W, _STACK_H), (_DISPLAY_W, _STACK_H), _PANEL_BORDER_COLOR, 2,
+                frame,
+                (_MAIN_W, _STACK_H),
+                (_DISPLAY_W, _STACK_H),
+                _PANEL_BORDER_COLOR,
+                2,
             )
             cv2.line(
                 frame,
@@ -763,27 +805,38 @@ class LiveDashboard:
 
         else:
             cv2.putText(
-                frame, "waiting for distance_matrix_v2 stream...",
+                frame,
+                "waiting for distance_matrix_v2 stream...",
                 (20, _DISPLAY_H // 2),
-                _HUD_FONT, 0.7, _HUD_COLOR, 1,
+                _HUD_FONT,
+                0.7,
+                _HUD_COLOR,
+                1,
             )
 
         # control status bar
         bar_y = _DISPLAY_H - 30
         if self._manual_mode:
-            ctrl = (
-                f"MANUAL  fwd={self._forward:+.1f}  yaw={self._yaw:+.1f}"
-                "  [WASD]  Tab=toggle"
-            )
+            ctrl = f"MANUAL  fwd={self._forward:+.1f}  yaw={self._yaw:+.1f}  [WASD]  Tab=toggle"
             cv2.putText(
-                frame, ctrl, (8, bar_y),
-                _HUD_FONT, _HUD_SCALE, (0, 255, 100), _HUD_THICK,
+                frame,
+                ctrl,
+                (8, bar_y),
+                _HUD_FONT,
+                _HUD_SCALE,
+                (0, 255, 100),
+                _HUD_THICK,
             )
         else:
             mode_txt = "OBSERVER (AI driving) | Tab=manual | +/-=zoom"
             cv2.putText(
-                frame, mode_txt, (8, bar_y),
-                _HUD_FONT, _HUD_SCALE, (180, 180, 180), _HUD_THICK,
+                frame,
+                mode_txt,
+                (8, bar_y),
+                _HUD_FONT,
+                _HUD_SCALE,
+                (180, 180, 180),
+                _HUD_THICK,
             )
 
         return frame
@@ -833,10 +886,12 @@ class LiveDashboard:
         action = Action(
             env_ids=np.array([0], dtype=np.int32),
             linear_velocity=np.array(
-                [[self._forward, 0.0, 0.0]], dtype=np.float32,
+                [[self._forward, 0.0, 0.0]],
+                dtype=np.float32,
             ),
             angular_velocity=np.array(
-                [[0.0, 0.0, self._yaw]], dtype=np.float32,
+                [[0.0, 0.0, self._yaw]],
+                dtype=np.float32,
             ),
             policy_id="dashboard-manual",
             step_id=step_id,

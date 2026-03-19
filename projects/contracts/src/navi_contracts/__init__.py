@@ -15,6 +15,15 @@ from navi_contracts.models import (
     StepResult,
     TelemetryEvent,
 )
+from navi_contracts.observability import (
+    JsonlMetricsSink,
+    RunContext,
+    build_phase_metrics_payload,
+    collect_process_resource_snapshot,
+    get_or_create_run_context,
+    get_run_id,
+    write_process_manifest,
+)
 from navi_contracts.serialization import deserialize, serialize
 from navi_contracts.testing.oracle_house import (
     OracleObservation,
@@ -55,7 +64,9 @@ __all__: list[str] = [
     "ActorControlResponse",
     "BatchStepRequest",
     "BatchStepResult",
+    "build_phase_metrics_payload",
     "OracleObservation",
+    "collect_process_resource_snapshot",
     "DeltaDepthMatrix",
     "DepthMatrix",
     "DistanceMatrix",
@@ -64,6 +75,7 @@ __all__: list[str] = [
     "MatrixShape",
     # Models
     "RobotPose",
+    "RunContext",
     "SemanticMatrix",
     "StepRequest",
     "StepResult",
@@ -71,14 +83,18 @@ __all__: list[str] = [
     "TelemetryPayload",
     "ValidMask",
     "VelocityMatrix",
+    "JsonlMetricsSink",
     "canonical_house_bbox",
     "deserialize",
+    "get_or_create_run_context",
+    "get_run_id",
     "house_metric_distances",
     "house_observation",
     "house_observation_after_forward_motion",
     "house_observation_delta",
+    "write_process_manifest",
+    "write_square_house_obj",
     # Serialization
     "serialize",
     "setup_logging",
-    "write_square_house_obj",
 ]

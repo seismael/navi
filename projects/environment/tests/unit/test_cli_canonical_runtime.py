@@ -41,7 +41,9 @@ def test_build_backend_rejects_unknown_backend() -> None:
         ("gmdag_resolution", 0),
     ],
 )
-def test_environment_config_rejects_nonpositive_runtime_parameters(field_name: str, value: float | int) -> None:
+def test_environment_config_rejects_nonpositive_runtime_parameters(
+    field_name: str, value: float | int
+) -> None:
     with pytest.raises(ValidationError):
         EnvironmentConfig.model_validate({field_name: value})
 

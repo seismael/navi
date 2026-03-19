@@ -21,9 +21,18 @@ __all__: list[str] = [
 
 _EXPORT_MAP: dict[str, tuple[str, str]] = {
     "DatasetAdapter": ("navi_environment.backends.adapter", "DatasetAdapter"),
-    "EquirectangularDatasetAdapter": ("navi_environment.backends.adapter", "EquirectangularDatasetAdapter"),
-    "habitat_camera_transform_spec": ("navi_environment.backends.adapter", "habitat_camera_transform_spec"),
-    "materialize_distance_matrix": ("navi_environment.backends.adapter", "materialize_distance_matrix"),
+    "EquirectangularDatasetAdapter": (
+        "navi_environment.backends.adapter",
+        "EquirectangularDatasetAdapter",
+    ),
+    "habitat_camera_transform_spec": (
+        "navi_environment.backends.adapter",
+        "habitat_camera_transform_spec",
+    ),
+    "materialize_distance_matrix": (
+        "navi_environment.backends.adapter",
+        "materialize_distance_matrix",
+    ),
     "EnvironmentConfig": ("navi_environment.config", "EnvironmentConfig"),
     "EnvironmentServer": ("navi_environment.server", "EnvironmentServer"),
     "MjxBackendInfo": ("navi_environment.mjx_env", "MjxBackendInfo"),

@@ -33,19 +33,17 @@ def _ensure_cuda_home() -> None:
 _ensure_cuda_home()
 
 setup(
-    name='torch_sdf',
-    version='0.1.0',
+    name="torch_sdf",
+    version="0.1.0",
     ext_modules=[
         CUDAExtension(
-            name='torch_sdf_backend',
+            name="torch_sdf_backend",
             sources=[
-                os.path.join(cpp_src_dir, 'bindings.cpp'),
-                os.path.join(cpp_src_dir, 'kernel.cu'),
+                os.path.join(cpp_src_dir, "bindings.cpp"),
+                os.path.join(cpp_src_dir, "kernel.cu"),
             ],
-            extra_compile_args={'cxx': ['-O3'], 'nvcc': ['-O3', '-lineinfo']}
+            extra_compile_args={"cxx": ["-O3"], "nvcc": ["-O3", "-lineinfo"]},
         )
     ],
-    cmdclass={
-        'build_ext': BuildExtension
-    }
+    cmdclass={"build_ext": BuildExtension},
 )

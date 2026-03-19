@@ -73,7 +73,7 @@ class EnvironmentServer:
         self._step_id = 0
         self._last_obs: DistanceMatrix | None = None
         self._last_obs_bytes: bytes | None = None  # cached serialized DM
-        self._initial_obs_bytes: list[bytes] = []   # per-actor initial obs
+        self._initial_obs_bytes: list[bytes] = []  # per-actor initial obs
         self._running = False
 
         # ZMQ
@@ -116,13 +116,23 @@ class EnvironmentServer:
             self._last_obs = obs
             self._publish(obs)
             self._initial_obs_bytes.append(self._last_obs_bytes)  # type: ignore[arg-type]
-            pose = self._backend.actor_pose(actor_id) if hasattr(self._backend, "actor_pose") else self._backend.pose
+            pose = (
+                self._backend.actor_pose(actor_id)
+                if hasattr(self._backend, "actor_pose")
+                else self._backend.pose
+            )
             self._publish_telemetry(
                 event_type="environment.startup",
                 step_id=0,
-                payload=np.array([
-                    pose.x, pose.y, pose.z, pose.yaw,
-                ], dtype=np.float32),
+                payload=np.array(
+                    [
+                        pose.x,
+                        pose.y,
+                        pose.z,
+                        pose.yaw,
+                    ],
+                    dtype=np.float32,
+                ),
                 actor_id=actor_id,
             )
 
@@ -186,11 +196,7 @@ class EnvironmentServer:
             if self._rep_socket not in events:
                 # Re-publish all initial actor observations for late
                 # subscribers.  Only fires before the first step request.
-                if (
-                    self._step_id == 0
-                    and self._initial_obs_bytes
-                    and self._pub_socket is not None
-                ):
+                if self._step_id == 0 and self._initial_obs_bytes and self._pub_socket is not None:
                     for obs_bytes in self._initial_obs_bytes:
                         with contextlib.suppress(zmq.Again):
                             self._pub_socket.send_multipart(
@@ -204,7 +210,8 @@ class EnvironmentServer:
                 msg = deserialize(data)
                 if isinstance(msg, BatchStepRequest):
                     observations, results = self._backend.batch_step(
-                        msg.actions, msg.step_id,
+                        msg.actions,
+                        msg.step_id,
                     )
                     batch_result = BatchStepResult(
                         results=results,
@@ -216,11 +223,7 @@ class EnvironmentServer:
                     if msg.step_id == 0 or msg.step_id % 100 == 0:
                         for obs, action in zip(observations, msg.actions, strict=True):
                             self._publish(obs)
-                            actor_id = (
-                                int(action.env_ids[0])
-                                if len(action.env_ids) > 0
-                                else 0
-                            )
+                            actor_id = int(action.env_ids[0]) if len(action.env_ids) > 0 else 0
                             pose = (
                                 self._backend.actor_pose(actor_id)
                                 if hasattr(self._backend, "actor_pose")
@@ -229,9 +232,15 @@ class EnvironmentServer:
                             self._publish_telemetry(
                                 event_type="environment.step",
                                 step_id=msg.step_id,
-                                payload=np.array([
-                                    pose.x, pose.y, pose.z, pose.yaw,
-                                ], dtype=np.float32),
+                                payload=np.array(
+                                    [
+                                        pose.x,
+                                        pose.y,
+                                        pose.z,
+                                        pose.yaw,
+                                    ],
+                                    dtype=np.float32,
+                                ),
                                 actor_id=actor_id,
                             )
                         self._publish_backend_perf(step_id=msg.step_id)
@@ -240,7 +249,9 @@ class EnvironmentServer:
                     # Extract actor_id from action env_ids (default 0)
                     actor_id = int(msg.action.env_ids[0]) if len(msg.action.env_ids) > 0 else 0
                     obs, result = self._backend.step(
-                        msg.action, msg.step_id, actor_id=actor_id,
+                        msg.action,
+                        msg.step_id,
+                        actor_id=actor_id,
                     )
                     self._last_obs = obs
                     self._rep_socket.send(serialize(result))
@@ -253,9 +264,15 @@ class EnvironmentServer:
                     self._publish_telemetry(
                         event_type="environment.step",
                         step_id=msg.step_id,
-                        payload=np.array([
-                            pose.x, pose.y, pose.z, pose.yaw,
-                        ], dtype=np.float32),
+                        payload=np.array(
+                            [
+                                pose.x,
+                                pose.y,
+                                pose.z,
+                                pose.yaw,
+                            ],
+                            dtype=np.float32,
+                        ),
                         actor_id=actor_id,
                     )
                     self._step_id = msg.step_id
@@ -301,12 +318,15 @@ class EnvironmentServer:
             self._publish_telemetry(
                 event_type="environment.async_step",
                 step_id=self._step_id,
-                payload=np.array([
-                    self._backend.pose.x,
-                    self._backend.pose.y,
-                    self._backend.pose.z,
-                    self._backend.pose.yaw,
-                ], dtype=np.float32),
+                payload=np.array(
+                    [
+                        self._backend.pose.x,
+                        self._backend.pose.y,
+                        self._backend.pose.z,
+                        self._backend.pose.yaw,
+                    ],
+                    dtype=np.float32,
+                ),
             )
             self._step_id += 1
 
@@ -388,4 +408,3 @@ class EnvironmentServer:
     def pose(self) -> DistanceMatrix | None:
         """Current robot pose (delegates to backend)."""
         return None
-

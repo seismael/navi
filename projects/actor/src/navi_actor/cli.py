@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random as _random
+import time
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -12,7 +13,13 @@ import typer
 
 from navi_actor.config import SUPPORTED_TEMPORAL_CORES, ActorConfig, TemporalCoreName
 from navi_actor.server import ActorServer
-from navi_contracts import setup_logging
+from navi_contracts import (
+    JsonlMetricsSink,
+    build_phase_metrics_payload,
+    get_or_create_run_context,
+    setup_logging,
+    write_process_manifest,
+)
 from navi_environment.integration.corpus import PreparedSceneCorpus, prepare_training_scene_corpus
 
 if TYPE_CHECKING:
@@ -21,6 +28,28 @@ if TYPE_CHECKING:
 __all__: list[str] = ["app"]
 
 app = typer.Typer(name="navi-actor", help="Brain Layer — Sacred Cognitive Engine")
+
+
+def _emit_command_phase_metric(
+    sink: JsonlMetricsSink | None,
+    *,
+    operation: str,
+    started_at: float,
+    include_resources: bool,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    if sink is None:
+        return
+    sink.emit(
+        "command_phase",
+        build_phase_metrics_payload(
+            operation,
+            started_at=started_at,
+            cuda_device="cuda" if metadata and metadata.get("cuda_expected") else None,
+            include_resources=include_resources,
+            metadata=metadata,
+        ),
+    )
 
 
 def _configure_torch_training_runtime() -> None:
@@ -247,12 +276,20 @@ def train(
     corpus_root: str = typer.Option("", help="Root directory for canonical scene discovery"),
     gmdag_root: str = typer.Option("", help="Root directory for compiled corpus outputs"),
     actors: int = typer.Option(4, help="Number of parallel environments"),
-    total_steps: int = typer.Option(0, help="Total environment steps (0 = continuous until stopped)"),
+    total_steps: int = typer.Option(
+        0, help="Total environment steps (0 = continuous until stopped)"
+    ),
     min_scene_bytes: int = typer.Option(1000, help="Ignore small scene files"),
     shuffle: bool = typer.Option(True, help="Shuffle scene pool"),
-    gmdag_file: str = typer.Option("", help="Single compiled .gmdag cache for canonical sdfdag training"),
-    compile_resolution: int = typer.Option(512, help="Compiler voxel resolution for source-scene corpus preparation"),
-    force_corpus_refresh: bool = typer.Option(False, help="Force overwrite/recompile of the prepared training corpus"),
+    gmdag_file: str = typer.Option(
+        "", help="Single compiled .gmdag cache for canonical sdfdag training"
+    ),
+    compile_resolution: int = typer.Option(
+        512, help="Compiler voxel resolution for source-scene corpus preparation"
+    ),
+    force_corpus_refresh: bool = typer.Option(
+        False, help="Force overwrite/recompile of the prepared training corpus"
+    ),
     temporal_core: str = typer.Option(
         "",
         help="Temporal core selector: gru (default) or mambapy.",
@@ -262,7 +299,7 @@ def train(
     embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
     learning_rate: float = typer.Option(3e-4, help="Adam learning rate"),
     learning_rate_final: float = typer.Option(3e-5, help="Final annealed learning rate"),
-    rollout_length: int = typer.Option(512, help="Steps per rollout"),
+    rollout_length: int = typer.Option(256, help="Steps per rollout"),
     ppo_epochs: int = typer.Option(2, help="PPO epochs per update"),
     minibatch_size: int = typer.Option(64, help="Minibatch size"),
     bptt_len: int = typer.Option(8, help="BPTT sequence length"),
@@ -302,7 +339,9 @@ def train(
     log_every: int = typer.Option(100, help="Steps between log messages"),
     # Telemetry fan-out (performance)
     telemetry_actor_id: int = typer.Option(0, help="Actor ID to emit telemetry for (default: 0)."),
-    telemetry_all_actors: bool = typer.Option(False, help="Emit telemetry for all actors (higher overhead)."),
+    telemetry_all_actors: bool = typer.Option(
+        False, help="Emit telemetry for all actors (higher overhead)."
+    ),
     emit_observation_stream: bool = typer.Option(
         True,
         help="Emit low-volume DistanceMatrix frames for the selected telemetry actor; use --telemetry-all-actors for diagnostic fan-out.",
@@ -324,6 +363,21 @@ def train(
         True,
         help="Emit actor/environment performance telemetry events.",
     ),
+    emit_internal_stats: bool | None = typer.Option(
+        None,
+        "--emit-internal-stats/--no-emit-internal-stats",
+        help="Write internal run-scoped machine-readable performance metrics under the run root.",
+    ),
+    attach_resource_snapshots: bool | None = typer.Option(
+        None,
+        "--attach-resource-snapshots/--no-attach-resource-snapshots",
+        help="Attach coarse process and CUDA memory snapshots to internal metrics records.",
+    ),
+    print_performance_summary: bool | None = typer.Option(
+        None,
+        "--print-performance-summary/--no-print-performance-summary",
+        help="Print a concise internal performance summary and metrics paths from the train command.",
+    ),
     profile_cuda_events: bool = typer.Option(
         False,
         help="Diagnostic-only: force CUDA event timing and synchronization around PPO learner stages.",
@@ -338,128 +392,289 @@ def train(
 ) -> None:
     """Single canonical PPO training surface with direct in-process sdfdag stepping."""
     setup_logging("navi_actor_train")
+    run_context = get_or_create_run_context("actor-train")
+    command_metrics_sink: JsonlMetricsSink | None = None
 
-    default_config = ActorConfig()
-    resolved_temporal_core = _resolve_temporal_core(temporal_core, default_config)
+    trainer: PpoTrainer | None = None
+    trainer_started = False
+    try:
+        default_config = ActorConfig()
+        resolved_temporal_core = _resolve_temporal_core(temporal_core, default_config)
 
-    # Resolve actor config
-    config = ActorConfig(
-        pub_address=actor_pub or default_config.pub_address,
-        control_address=actor_control or default_config.control_address,
-        mode="step",
-        temporal_core=resolved_temporal_core,
-        azimuth_bins=azimuth_bins,
-        elevation_bins=elevation_bins,
-        n_actors=actors,
-        embedding_dim=embedding_dim,
-        learning_rate=learning_rate,
-        learning_rate_final=learning_rate_final,
-        rollout_length=rollout_length,
-        ppo_epochs=ppo_epochs,
-        minibatch_size=minibatch_size,
-        bptt_len=bptt_len,
-        clip_ratio=clip_ratio,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        entropy_coeff=entropy_coeff,
-        value_coeff=value_coeff,
-        collision_penalty=collision_penalty,
-        existential_tax=existential_tax,
-        velocity_weight=velocity_weight,
-        intrinsic_coeff_init=intrinsic_coeff_init,
-        intrinsic_coeff_final=intrinsic_coeff_final,
-        intrinsic_anneal_steps=intrinsic_anneal_steps,
-        rnd_learning_rate=rnd_learning_rate,
-        rnd_learning_rate_final=rnd_learning_rate_final,
-        memory_capacity=memory_capacity,
-        memory_exclusion_window=memory_exclusion_window,
-        loop_threshold=loop_threshold,
-        loop_penalty_coeff=loop_penalty_coeff,
-        enable_episodic_memory=enable_episodic_memory,
-        enable_reward_shaping=enable_reward_shaping,
-        telemetry_actor_id=telemetry_actor_id,
-        telemetry_all_actors=telemetry_all_actors,
-        emit_observation_stream=emit_observation_stream,
-        dashboard_observation_hz=dashboard_observation_hz,
-        emit_training_telemetry=emit_training_telemetry,
-        emit_update_loss_telemetry=emit_update_loss_telemetry,
-        emit_perf_telemetry=emit_perf_telemetry,
-        profile_cuda_events=profile_cuda_events,
-        reward_shaping_torch_compile=reward_shaping_torch_compile,
-    )
-
-    if profile_cuda_events:
-        warnings.warn(
-            "CUDA event profiling is diagnostic-only and will lower training throughput while timings synchronize.",
-            stacklevel=1,
+        # Resolve actor config
+        config = ActorConfig(
+            pub_address=actor_pub or default_config.pub_address,
+            control_address=actor_control or default_config.control_address,
+            mode="step",
+            temporal_core=resolved_temporal_core,
+            azimuth_bins=azimuth_bins,
+            elevation_bins=elevation_bins,
+            n_actors=actors,
+            embedding_dim=embedding_dim,
+            learning_rate=learning_rate,
+            learning_rate_final=learning_rate_final,
+            rollout_length=rollout_length,
+            ppo_epochs=ppo_epochs,
+            minibatch_size=minibatch_size,
+            bptt_len=bptt_len,
+            clip_ratio=clip_ratio,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            entropy_coeff=entropy_coeff,
+            value_coeff=value_coeff,
+            collision_penalty=collision_penalty,
+            existential_tax=existential_tax,
+            velocity_weight=velocity_weight,
+            intrinsic_coeff_init=intrinsic_coeff_init,
+            intrinsic_coeff_final=intrinsic_coeff_final,
+            intrinsic_anneal_steps=intrinsic_anneal_steps,
+            rnd_learning_rate=rnd_learning_rate,
+            rnd_learning_rate_final=rnd_learning_rate_final,
+            memory_capacity=memory_capacity,
+            memory_exclusion_window=memory_exclusion_window,
+            loop_threshold=loop_threshold,
+            loop_penalty_coeff=loop_penalty_coeff,
+            enable_episodic_memory=enable_episodic_memory,
+            enable_reward_shaping=enable_reward_shaping,
+            telemetry_actor_id=telemetry_actor_id,
+            telemetry_all_actors=telemetry_all_actors,
+            emit_observation_stream=emit_observation_stream,
+            dashboard_observation_hz=dashboard_observation_hz,
+            emit_training_telemetry=emit_training_telemetry,
+            emit_update_loss_telemetry=emit_update_loss_telemetry,
+            emit_perf_telemetry=emit_perf_telemetry,
+            emit_internal_stats=(
+                default_config.emit_internal_stats
+                if emit_internal_stats is None
+                else emit_internal_stats
+            ),
+            attach_resource_snapshots=(
+                default_config.attach_resource_snapshots
+                if attach_resource_snapshots is None
+                else attach_resource_snapshots
+            ),
+            print_performance_summary=(
+                default_config.print_performance_summary
+                if print_performance_summary is None
+                else print_performance_summary
+            ),
+            profile_cuda_events=profile_cuda_events,
+            reward_shaping_torch_compile=reward_shaping_torch_compile,
         )
 
-    corpus = _load_training_scenes(
-        scene=scene,
-        manifest=manifest,
-        gmdag_file=gmdag_file,
-        corpus_root=corpus_root,
-        gmdag_root=gmdag_root,
-        compile_resolution=compile_resolution,
-        min_scene_bytes=min_scene_bytes,
-        force_corpus_refresh=force_corpus_refresh,
-    )
+        if config.emit_internal_stats:
+            command_metrics_sink = JsonlMetricsSink(
+                run_context.metrics_root / "actor_training.command.jsonl",
+                run_id=run_context.run_id,
+                project_name="navi_actor_train",
+            )
 
-    scenes = [str(entry.compiled_path) for entry in corpus.scene_entries]
+        if profile_cuda_events:
+            warnings.warn(
+                "CUDA event profiling is diagnostic-only and will lower training throughput while timings synchronize.",
+                stacklevel=1,
+            )
 
-    if shuffle:
-        _random.shuffle(scenes)
+        t_corpus_prepare = time.perf_counter()
+        corpus = _load_training_scenes(
+            scene=scene,
+            manifest=manifest,
+            gmdag_file=gmdag_file,
+            corpus_root=corpus_root,
+            gmdag_root=gmdag_root,
+            compile_resolution=compile_resolution,
+            min_scene_bytes=min_scene_bytes,
+            force_corpus_refresh=force_corpus_refresh,
+        )
+        scenes = [str(entry.compiled_path) for entry in corpus.scene_entries]
+        _emit_command_phase_metric(
+            command_metrics_sink,
+            operation="corpus_prepare",
+            started_at=t_corpus_prepare,
+            include_resources=config.attach_resource_snapshots,
+            metadata={
+                "cuda_expected": False,
+                "scene_count": len(scenes),
+                "source_root": str(corpus.source_root),
+                "compiled_manifest_path": str(corpus.compiled_manifest_path),
+                "force_corpus_refresh": bool(force_corpus_refresh),
+            },
+        )
 
-    bootstrap_scene = _select_bootstrap_scene(scenes)
+        if shuffle:
+            _random.shuffle(scenes)
 
-    total_steps_label = "continuous" if total_steps <= 0 else f"{total_steps} total steps"
-    typer.echo(
-        f"Scene pool: {len(scenes)} scenes, {actors} actors, "
-        f"{total_steps_label}, shuffle={shuffle}, runtime=sdfdag, temporal={config.temporal_core}"
-    )
-    typer.echo(f"  Source root: {corpus.source_root}")
-    typer.echo(f"  Source manifest: {corpus.source_manifest_path}")
-    typer.echo(f"  Compiled manifest: {corpus.compiled_manifest_path}")
-    for i, s in enumerate(scenes[:5]):
-        typer.echo(f"  [{i+1}] {Path(s).stem}")
-    if len(scenes) > 5:
-        typer.echo(f"  ... and {len(scenes) - 5} more")
+        bootstrap_scene = _select_bootstrap_scene(scenes)
+        resolved_checkpoint_dir = checkpoint_dir
+        if checkpoint_dir == "checkpoints":
+            resolved_checkpoint_dir = str(run_context.run_root / "checkpoints")
 
-    _validate_bindable(config.pub_address, "Actor PUB")
-    _configure_torch_training_runtime()
+        total_steps_label = "continuous" if total_steps <= 0 else f"{total_steps} total steps"
+        typer.echo(
+            f"Scene pool: {len(scenes)} scenes, {actors} actors, "
+            f"{total_steps_label}, shuffle={shuffle}, runtime=sdfdag, temporal={config.temporal_core}"
+        )
+        typer.echo(f"  Source root: {corpus.source_root}")
+        typer.echo(f"  Source manifest: {corpus.source_manifest_path}")
+        typer.echo(f"  Compiled manifest: {corpus.compiled_manifest_path}")
+        for i, s in enumerate(scenes[:5]):
+            typer.echo(f"  [{i + 1}] {Path(s).stem}")
+        if len(scenes) > 5:
+            typer.echo(f"  ... and {len(scenes) - 5} more")
+        typer.echo(f"  Run ID: {run_context.run_id}")
+        typer.echo(f"  Run Root: {run_context.run_root}")
+        typer.echo(
+            "  Internal stats: "
+            f"metrics={'on' if config.emit_internal_stats else 'off'} "
+            f"snapshots={'on' if config.attach_resource_snapshots else 'off'} "
+            f"perf-telemetry={'on' if config.emit_perf_telemetry else 'off'}"
+        )
+        if config.emit_internal_stats:
+            typer.echo(f"  Metrics root: {run_context.metrics_root}")
 
-    trainer = _build_canonical_trainer(
-        config,
-        gmdag_file=bootstrap_scene,
-        scene_pool=tuple(scenes),
-    )
+        write_process_manifest(
+            "navi_actor_train",
+            context=run_context,
+            metadata={
+                "command": "train",
+                "actors": actors,
+                "temporal_core": config.temporal_core,
+                "azimuth_bins": azimuth_bins,
+                "elevation_bins": elevation_bins,
+                "scene_count": len(scenes),
+                "bootstrap_scene": bootstrap_scene,
+                "checkpoint_dir": resolved_checkpoint_dir,
+                "checkpoint_every": checkpoint_every,
+                "log_every": log_every,
+                "emit_internal_stats": config.emit_internal_stats,
+                "attach_resource_snapshots": config.attach_resource_snapshots,
+                "print_performance_summary": config.print_performance_summary,
+            },
+            file_name="navi_actor_train.command.json",
+        )
 
-    if checkpoint:
-        trainer.load_training_state(checkpoint)
-        typer.echo(f"Loaded checkpoint: {checkpoint}")
+        _validate_bindable(config.pub_address, "Actor PUB")
+        _configure_torch_training_runtime()
 
-    try:
-        trainer.start()
+        t_trainer_build = time.perf_counter()
+        trainer = _build_canonical_trainer(
+            config,
+            gmdag_file=bootstrap_scene,
+            scene_pool=tuple(scenes),
+        )
+        _emit_command_phase_metric(
+            command_metrics_sink,
+            operation="trainer_build",
+            started_at=t_trainer_build,
+            include_resources=config.attach_resource_snapshots,
+            metadata={
+                "cuda_expected": True,
+                "actors": actors,
+                "temporal_core": config.temporal_core,
+                "bootstrap_scene": bootstrap_scene,
+            },
+        )
+
+        if checkpoint:
+            t_checkpoint_load = time.perf_counter()
+            trainer.load_training_state(checkpoint)
+            _emit_command_phase_metric(
+                command_metrics_sink,
+                operation="checkpoint_load",
+                started_at=t_checkpoint_load,
+                include_resources=config.attach_resource_snapshots,
+                metadata={
+                    "cuda_expected": True,
+                    "checkpoint_path": checkpoint,
+                },
+            )
+            typer.echo(f"Loaded checkpoint: {checkpoint}")
+
+        t_trainer_start = time.perf_counter()
+        trainer.start()  # type: ignore[no-untyped-call]
+        trainer_started = True
+        _emit_command_phase_metric(
+            command_metrics_sink,
+            operation="trainer_start",
+            started_at=t_trainer_start,
+            include_resources=config.attach_resource_snapshots,
+            metadata={
+                "cuda_expected": True,
+                "actors": actors,
+            },
+        )
+
+        t_train_run = time.perf_counter()
         metrics = trainer.train(
             total_steps=total_steps,
             log_every=log_every,
             checkpoint_every=checkpoint_every,
-            checkpoint_dir=checkpoint_dir,
+            checkpoint_dir=resolved_checkpoint_dir,
         )
-    finally:
-        trainer.stop()
+        _emit_command_phase_metric(
+            command_metrics_sink,
+            operation="train_run",
+            started_at=t_train_run,
+            include_resources=config.attach_resource_snapshots,
+            metadata={
+                "cuda_expected": True,
+                "total_steps": metrics.total_steps,
+                "episodes": metrics.episodes,
+                "reward_ema": metrics.reward_ema,
+                "sps_mean": metrics.sps_mean,
+                "ppo_update_ms_mean": metrics.ppo_update_ms_mean,
+            },
+        )
 
-    # Save final checkpoint
-    final_ckpt = Path(checkpoint_dir) / "policy_final.pt"
-    final_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    trainer.save_training_state(final_ckpt)
-    typer.echo(
-        f"\nTraining complete | {len(scenes)} scenes | "
-        f"steps={metrics.total_steps} episodes={metrics.episodes} "
-        f"reward_ema={metrics.reward_ema:.4f} "
-        f"policy_loss={metrics.policy_loss:.4f} | "
-        f"Final checkpoint: {final_ckpt}"
-    )
+        final_ckpt = Path(resolved_checkpoint_dir) / "policy_final.pt"
+        final_ckpt.parent.mkdir(parents=True, exist_ok=True)
+        t_final_checkpoint = time.perf_counter()
+        trainer.save_training_state(final_ckpt)
+        _emit_command_phase_metric(
+            command_metrics_sink,
+            operation="final_checkpoint_save",
+            started_at=t_final_checkpoint,
+            include_resources=config.attach_resource_snapshots,
+            metadata={
+                "cuda_expected": True,
+                "checkpoint_path": str(final_ckpt),
+                "step_id": metrics.total_steps,
+            },
+        )
+        typer.echo(
+            f"\nTraining complete | {len(scenes)} scenes | "
+            f"steps={metrics.total_steps} episodes={metrics.episodes} "
+            f"reward_ema={metrics.reward_ema:.4f} "
+            f"policy_loss={metrics.policy_loss:.4f} | "
+            f"Final checkpoint: {final_ckpt}"
+        )
+        if config.print_performance_summary:
+            typer.echo(
+                "Performance summary | "
+                f"sps_mean={metrics.sps_mean:.2f} "
+                f"ppo_update_ms_mean={metrics.ppo_update_ms_mean:.2f} "
+                f"internal_stats={'on' if config.emit_internal_stats else 'off'} "
+                f"resource_snapshots={'on' if config.attach_resource_snapshots else 'off'}"
+            )
+            if config.emit_internal_stats:
+                typer.echo(
+                    "Internal metrics | "
+                    f"command={run_context.metrics_root / 'actor_training.command.jsonl'} "
+                    f"trainer={run_context.metrics_root / 'actor_training.jsonl'}"
+                )
+    finally:
+        if trainer is not None and trainer_started:
+            t_trainer_stop = time.perf_counter()
+            trainer.stop()  # type: ignore[no-untyped-call]
+            _emit_command_phase_metric(
+                command_metrics_sink,
+                operation="trainer_stop",
+                started_at=t_trainer_stop,
+                include_resources=(config.attach_resource_snapshots if "config" in locals() else True),
+                metadata={"cuda_expected": True},
+            )
+        if command_metrics_sink is not None:
+            command_metrics_sink.close()
 
 
 @app.command("profile")  # type: ignore[untyped-decorator]
@@ -495,17 +710,17 @@ def profile(
     runtime = SdfDagBackend(env_cfg)
     trainer = PpoTrainer(config, runtime=runtime, gmdag_file=scene)
 
-    trainer.start()
+    trainer.start()  # type: ignore[no-untyped-call]
     typer.echo(f"Starting CUDA profile for {steps} steps...")
 
     # Warmup
     trainer.train(actors * 2)
 
-    torch.cuda.profiler.start()
+    torch.cuda.profiler.start()  # type: ignore[no-untyped-call]
     trainer.train(steps)
-    torch.cuda.profiler.stop()
+    torch.cuda.profiler.stop()  # type: ignore[no-untyped-call]
 
-    trainer.stop()
+    trainer.stop()  # type: ignore[no-untyped-call]
     typer.echo("Profiling complete.")
 
 
@@ -513,7 +728,9 @@ def profile(
 def brain(
     ctx: click.Context,
     mode: str = typer.Argument(..., help="Operation mode: train, serve, audit, or profile"),
-    scene: str = typer.Option("", help="[train/audit/profile] Explicit scene name or path override"),
+    scene: str = typer.Option(
+        "", help="[train/audit/profile] Explicit scene name or path override"
+    ),
     checkpoint: str = typer.Option("", help="[train/serve] Checkpoint path (.pt) to load"),
     actors: int = typer.Option(4, help="[train/audit/profile] Number of parallel actors"),
     azimuth_bins: int = typer.Option(256, help="Azimuth resolution"),
@@ -537,7 +754,13 @@ def brain(
             train_args.extend(["--checkpoint", checkpoint])
         app(train_args)
     elif mode == "serve":
-        serve_args = ["serve", "--azimuth-bins", str(azimuth_bins), "--elevation-bins", str(elevation_bins)]
+        serve_args = [
+            "serve",
+            "--azimuth-bins",
+            str(azimuth_bins),
+            "--elevation-bins",
+            str(elevation_bins),
+        ]
         if checkpoint:
             serve_args.extend(["--policy-checkpoint", checkpoint])
         app(serve_args)

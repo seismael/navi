@@ -37,17 +37,19 @@ _RATE_LOG_INTERVAL: float = 10.0
 
 
 class _RuntimePolicyProtocol(Protocol):
-    def act(self, observation: DistanceMatrix, step_id: int) -> Action:
-        ...
+    def act(self, observation: DistanceMatrix, step_id: int) -> Action: ...
 
 
 class _StatefulPolicyProtocol(Protocol):
     """Protocol for policies with recurrent hidden state."""
 
     def act(
-        self, obs: Any, step_id: int, hidden: Any,
-    ) -> tuple[list[float], Any]:
-        ...
+        self,
+        obs: Any,
+        step_id: int,
+        hidden: Any,
+    ) -> tuple[list[float], Any]: ...
+
 
 __all__: list[str] = ["ActorServer"]
 
@@ -136,7 +138,9 @@ class ActorServer:
         """
         if self._stateful:
             action_list, self._hidden_state = self._policy.act(
-                update, step_id=self._step_counter, hidden=self._hidden_state,
+                update,
+                step_id=self._step_counter,
+                hidden=self._hidden_state,
             )
             return Action(
                 env_ids=np.asarray(update.env_ids, dtype=np.int32),
@@ -144,9 +148,7 @@ class ActorServer:
                     [[action_list[0], action_list[1], action_list[2]]],
                     dtype=np.float32,
                 ),
-                angular_velocity=np.array(
-                    [[0.0, 0.0, action_list[3]]], dtype=np.float32
-                ),
+                angular_velocity=np.array([[0.0, 0.0, action_list[3]]], dtype=np.float32),
                 policy_id="cognitive-mamba",
                 step_id=self._step_counter,
                 timestamp=time.time(),
@@ -277,7 +279,9 @@ class ActorServer:
                     rate = self._rate_steps / elapsed
                     _log.info(
                         "step_rate=%.1f steps/s  (steps=%d, window=%.1fs)",
-                        rate, self._rate_steps, elapsed,
+                        rate,
+                        self._rate_steps,
+                        elapsed,
                     )
                     self._rate_t0 = now
                     self._rate_steps = 0

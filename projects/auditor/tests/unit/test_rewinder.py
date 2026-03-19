@@ -65,7 +65,9 @@ class TestRewinder:
         sleep_calls: list[float] = []
 
         monkeypatch.setattr(rewinder_module.zmq, "Context", lambda: context)
-        monkeypatch.setattr(rewinder_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+        monkeypatch.setattr(
+            rewinder_module.time, "sleep", lambda seconds: sleep_calls.append(seconds)
+        )
 
         config = AuditorConfig(output_path="session.zarr", pub_address="tcp://*:5558")
         backend = _BackendSpy()

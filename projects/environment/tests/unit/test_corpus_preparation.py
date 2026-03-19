@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from navi_environment.integration.corpus import prepare_training_scene_corpus, validate_compiled_scene_corpus
+from navi_environment.integration.corpus import (
+    prepare_training_scene_corpus,
+    validate_compiled_scene_corpus,
+)
 
 
 def test_prepare_training_scene_corpus_discovers_and_compiles_sources(

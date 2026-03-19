@@ -143,11 +143,7 @@ class ActorCriticHeads(nn.Module):
         action_mean = self.action_mean(features)
         inv_var = torch.exp(-2.0 * self.log_std)
         # Gaussian log-prob per dim, then sum.
-        log_p = (
-            -0.5 * ((actions - action_mean) ** 2) * inv_var
-            - self.log_std
-            - _HALF_LOG_TWO_PI
-        )
+        log_p = -0.5 * ((actions - action_mean) ** 2) * inv_var - self.log_std - _HALF_LOG_TWO_PI
         log_prob: Tensor = log_p.sum(dim=-1)
         return log_prob
 
@@ -179,9 +175,7 @@ class ActorCriticHeads(nn.Module):
         noise = torch.randn_like(action_mean)
         actions = action_mean + noise * std
         action_delta = actions.detach() - action_mean
-        log_probs = (
-            -0.5 * ((action_delta / std) ** 2)
-            - self.log_std
-            - _HALF_LOG_TWO_PI
-        ).sum(dim=-1)
+        log_probs = (-0.5 * ((action_delta / std) ** 2) - self.log_std - _HALF_LOG_TWO_PI).sum(
+            dim=-1
+        )
         return actions, log_probs, values

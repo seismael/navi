@@ -22,5 +22,7 @@ def test_zero_or_negative_interval_disables_saving() -> None:
 
 def test_subsequent_intervals_use_last_checkpoint_step() -> None:
     """Subsequent saves are measured from the last saved step."""
-    assert not _should_save_checkpoint(step_id=3900, last_checkpoint_step=2000, checkpoint_every=2000)
+    assert not _should_save_checkpoint(
+        step_id=3900, last_checkpoint_step=2000, checkpoint_every=2000
+    )
     assert _should_save_checkpoint(step_id=4000, last_checkpoint_step=2000, checkpoint_every=2000)

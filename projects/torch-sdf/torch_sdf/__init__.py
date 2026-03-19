@@ -1,6 +1,5 @@
 import os
 import sys
-import torch
 
 # Windows-specific CUDA DLL loading for Python 3.8+
 if sys.platform == "win32":

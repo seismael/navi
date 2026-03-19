@@ -180,9 +180,7 @@ class StatusBar(QtWidgets.QFrame):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(44)
-        self.setStyleSheet(
-            "QFrame { background: #0d0d1a; border-bottom: 1px solid #333; }"
-        )
+        self.setStyleSheet("QFrame { background: #0d0d1a; border-bottom: 1px solid #333; }")
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(8, 2, 8, 2)
@@ -195,7 +193,9 @@ class StatusBar(QtWidgets.QFrame):
         )
         layout.addWidget(self._mode_label)
 
-        self._metrics_label = QtWidgets.QLabel("stall=-- | rollout_sps=-- | env_sps=-- | per_actor_sps=-- | ema=-- | ep=0 | step=--")
+        self._metrics_label = QtWidgets.QLabel(
+            "stall=-- | rollout_sps=-- | env_sps=-- | per_actor_sps=-- | ema=-- | ep=0 | step=--"
+        )
         self._metrics_label.setStyleSheet(
             "color: #d5dde8; font-weight: 700; font-size: 14px; padding: 2px 4px;"
         )
@@ -211,9 +211,7 @@ class StatusBar(QtWidgets.QFrame):
             "TRAINING": "color: #5bc0de; font-weight: 700; font-size: 14px; padding: 2px 8px; background: #002233;",
         }
         self._mode_label.setText(f"[ {mode} ]")
-        self._mode_label.setStyleSheet(
-            styles.get(mode, styles["OBSERVER"])
-        )
+        self._mode_label.setStyleSheet(styles.get(mode, styles["OBSERVER"]))
 
     def set_metrics_text(self, text: str) -> None:
         """Update compact telemetry details rendered beside mode."""

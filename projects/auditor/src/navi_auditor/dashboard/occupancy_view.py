@@ -69,7 +69,9 @@ class OccupancyMap:
         # 0 = unexplored, 1 = free, 2 = occupied
         self._occ = np.zeros((self._n, self._n), dtype=np.uint8)
         self._depth_m = np.full(
-            (self._n, self._n), np.nan, dtype=np.float32,
+            (self._n, self._n),
+            np.nan,
+            dtype=np.float32,
         )
 
         self._trail: deque[tuple[float, float, float]] = deque(
@@ -139,7 +141,9 @@ class OccupancyMap:
             mesh: trimesh.Trimesh = raw  # type: ignore[assignment]
         except Exception:
             _log.warning(
-                "Failed to load scene mesh: %s", scene_path, exc_info=True,
+                "Failed to load scene mesh: %s",
+                scene_path,
+                exc_info=True,
             )
             return
 
@@ -151,16 +155,15 @@ class OccupancyMap:
         # Warn if mesh exceeds grid extent
         xmin, xmax = float(verts[:, 0].min()), float(verts[:, 0].max())
         zmin, zmax = float(verts[:, 2].min()), float(verts[:, 2].max())
-        if (
-            xmin < -self._half
-            or xmax > self._half
-            or zmin < -self._half
-            or zmax > self._half
-        ):
+        if xmin < -self._half or xmax > self._half or zmin < -self._half or zmax > self._half:
             _log.warning(
                 "Scene mesh bounds (%.1f-%.1f, %.1f-%.1f) exceed grid "
                 "extent ±%.0fm — geometry will be clipped",
-                xmin, xmax, zmin, zmax, self._half,
+                xmin,
+                xmax,
+                zmin,
+                zmax,
+                self._half,
             )
 
         # Classify faces
@@ -194,8 +197,8 @@ class OccupancyMap:
         # Vectorised conversion from world XZ to grid indices for all triangles at once
         # faces.shape = (N, 3), verts[faces].shape = (N, 3, 3)
         tris = verts[faces]  # (N, 3, 3)
-        wx = tris[:, :, 0]    # (N, 3)
-        wz = tris[:, :, 2]    # (N, 3)
+        wx = tris[:, :, 0]  # (N, 3)
+        wz = tris[:, :, 2]  # (N, 3)
 
         gx = ((wx - self._ox) / self._cell).astype(np.int32)
         gz = ((wz - self._oz) / self._cell).astype(np.int32)
@@ -247,7 +250,11 @@ class OccupancyMap:
         # Simulation convention: bin 0 is 0° (Forward), rotating clockwise.
         # local_angles[0] = 0, local_angles[N/4] = pi/2 (Right), etc.
         local_angles = np.linspace(
-            0, 2 * np.pi, az_bins, endpoint=False, dtype=np.float32,
+            0,
+            2 * np.pi,
+            az_bins,
+            endpoint=False,
+            dtype=np.float32,
         )
         # The underlay mesh uses Z-forward (0, 0, -1), so we subtract yaw
         # for a standard top-down cartesian map (X=right, Z=up/forward).
@@ -347,7 +354,6 @@ class OccupancyMap:
             colored = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
             img[occ_mask] = colored.reshape(-1, 3)
 
-
         # ── resize to output ─────────────────────────────────────────
         out = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)
 
@@ -394,8 +400,13 @@ class OccupancyMap:
         hx = int(dpx + arrow_len * np.cos(cyaw))
         hy = int(dpy + arrow_len * np.sin(cyaw))
         cv2.arrowedLine(
-            out, (dpx, dpy), (hx, hy),
-            _HEADING_BGR, 2, cv2.LINE_AA, tipLength=0.35,
+            out,
+            (dpx, dpy),
+            (hx, hy),
+            _HEADING_BGR,
+            2,
+            cv2.LINE_AA,
+            tipLength=0.35,
         )
 
         # ── range rings ──────────────────────────────────────────────
@@ -408,26 +419,50 @@ class OccupancyMap:
             cv2.circle(out, (dpx, dpy), r_px, ring_color, 1, cv2.LINE_AA)
             lx = min(dpx + r_px + 3, width - 25)
             cv2.putText(
-                out, f"{int(r_m)}m", (lx, dpy - 3),
-                _HUD_FONT, 0.30, label_color, 1, cv2.LINE_AA,
+                out,
+                f"{int(r_m)}m",
+                (lx, dpy - 3),
+                _HUD_FONT,
+                0.30,
+                label_color,
+                1,
+                cv2.LINE_AA,
             )
 
         # ── HUD title ────────────────────────────────────────────────
         cv2.putText(
-            out, "LIVE MAP", (8, 18),
-            _HUD_FONT, 0.45, (180, 180, 180), 1, cv2.LINE_AA,
+            out,
+            "LIVE MAP",
+            (8, 18),
+            _HUD_FONT,
+            0.45,
+            (180, 180, 180),
+            1,
+            cv2.LINE_AA,
         )
         if self._scene_name:
             cv2.putText(
-                out, self._scene_name, (8, 34),
-                _HUD_FONT, 0.32, (100, 110, 130), 1, cv2.LINE_AA,
+                out,
+                self._scene_name,
+                (8, 34),
+                _HUD_FONT,
+                0.32,
+                (100, 110, 130),
+                1,
+                cv2.LINE_AA,
             )
 
         # Explored-area fraction
         total = max(1, int(np.sum(self._occ > 0)))
         cv2.putText(
-            out, f"cells: {total}", (8, height - 10),
-            _HUD_FONT, 0.32, (120, 120, 120), 1, cv2.LINE_AA,
+            out,
+            f"cells: {total}",
+            (8, height - 10),
+            _HUD_FONT,
+            0.32,
+            (120, 120, 120),
+            1,
+            cv2.LINE_AA,
         )
 
         return out

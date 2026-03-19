@@ -24,18 +24,15 @@ from torch import Tensor, nn
 class TemporalCoreLike(Protocol):
     """Protocol for candidate temporal cores used by the bake-off harness."""
 
-    def eval(self) -> TemporalCoreLike:
-        ...
+    def eval(self) -> TemporalCoreLike: ...
 
-    def forward(self, z_seq: Tensor) -> tuple[Tensor, Tensor | None]:
-        ...
+    def forward(self, z_seq: Tensor) -> tuple[Tensor, Tensor | None]: ...
 
     def forward_step(
         self,
         z_t: Tensor,
         hidden: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor | None]:
-        ...
+    ) -> tuple[Tensor, Tensor | None]: ...
 
 
 @dataclass

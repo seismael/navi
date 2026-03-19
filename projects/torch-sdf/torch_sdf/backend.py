@@ -33,13 +33,17 @@ def _validate_cuda_tensor(
     shape: tuple[int, ...] | None = None,
 ) -> None:
     if not tensor.is_cuda:
-        raise RuntimeError(f"{name} must be a CUDA tensor. CPU tensors are not supported.")
+        raise RuntimeError(
+            f"{name} must be a CUDA tensor. CPU tensors are not supported."
+        )
     if tensor.dtype != dtype:
         raise RuntimeError(f"{name} must have dtype {dtype}; got {tensor.dtype}.")
     if not tensor.is_contiguous():
         raise RuntimeError(f"{name} must be contiguous.")
     if shape is not None and _shape_tuple(tensor) != shape:
-        raise RuntimeError(f"{name} must have shape {shape}; got {_shape_tuple(tensor)}.")
+        raise RuntimeError(
+            f"{name} must have shape {shape}; got {_shape_tuple(tensor)}."
+        )
 
 
 def _validate_cast_rays_inputs(
@@ -52,14 +56,20 @@ def _validate_cast_rays_inputs(
     if not dag_tensor.is_cuda:
         raise RuntimeError("dag_tensor must be on CUDA. CPU tensors are not supported.")
     if dag_tensor.dtype != _DAG_DTYPE:
-        raise RuntimeError(f"dag_tensor must have dtype {_DAG_DTYPE}; got {dag_tensor.dtype}.")
+        raise RuntimeError(
+            f"dag_tensor must have dtype {_DAG_DTYPE}; got {dag_tensor.dtype}."
+        )
     if not dag_tensor.is_contiguous():
         raise RuntimeError("dag_tensor must be contiguous.")
 
     if origins.dim() != 3 or origins.size(2) != 3:
-        raise RuntimeError(f"origins must have shape [batch, rays, 3]; got {_shape_tuple(origins)}.")
+        raise RuntimeError(
+            f"origins must have shape [batch, rays, 3]; got {_shape_tuple(origins)}."
+        )
     if dirs.dim() != 3 or dirs.size(2) != 3:
-        raise RuntimeError(f"dirs must have shape [batch, rays, 3]; got {_shape_tuple(dirs)}.")
+        raise RuntimeError(
+            f"dirs must have shape [batch, rays, 3]; got {_shape_tuple(dirs)}."
+        )
 
     batch = int(origins.size(0))
     rays = int(origins.size(1))
@@ -86,7 +96,9 @@ def _validate_cast_rays_inputs(
         _validate_direction_norms(dirs)
 
 
-def _validate_direction_norms(dirs: torch.Tensor, *, eps: float = _DIRECTION_NORM_EPS) -> None:
+def _validate_direction_norms(
+    dirs: torch.Tensor, *, eps: float = _DIRECTION_NORM_EPS
+) -> None:
     norms = torch.linalg.vector_norm(dirs, dim=-1)
     if bool((~torch.isfinite(norms)).any().item()):
         raise RuntimeError("dirs must contain only finite direction vectors.")
@@ -120,7 +132,9 @@ def _validate_runtime_parameters(
     if max_steps <= 0:
         raise RuntimeError(f"max_steps must be a positive integer; got {max_steps}.")
     if not math.isfinite(max_distance) or max_distance <= 0.0:
-        raise RuntimeError(f"max_distance must be a finite positive float; got {max_distance}.")
+        raise RuntimeError(
+            f"max_distance must be a finite positive float; got {max_distance}."
+        )
     if resolution <= 0:
         raise RuntimeError(f"resolution must be a positive integer; got {resolution}.")
     _validate_bounds(bbox_min, bbox_max)
@@ -147,7 +161,9 @@ def cast_rays(
             "torch_sdf_backend is not available. Build/install the CUDA extension in torch-sdf before running TopoNav."
         )
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. TopoNav requires CUDA and does not support CPU fallback.")
+        raise RuntimeError(
+            "CUDA is not available. TopoNav requires CUDA and does not support CPU fallback."
+        )
     _validate_cast_rays_inputs(dag_tensor, origins, dirs, out_distances, out_semantics)
     _validate_runtime_parameters(
         max_steps=max_steps,

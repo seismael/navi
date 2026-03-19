@@ -279,7 +279,9 @@ def test_record_single_sub_uses_one_endpoint(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "AuditorConfig", _StubConfig)
     monkeypatch.setattr(cli, "Recorder", _RecorderSpy)
 
-    result = runner.invoke(cli.app, ["record", "--sub", "tcp://localhost:5557", "--out", "capture.zarr"])
+    result = runner.invoke(
+        cli.app, ["record", "--sub", "tcp://localhost:5557", "--out", "capture.zarr"]
+    )
 
     assert result.exit_code == 0
     assert _RecorderSpy.run_calls == 1
@@ -407,7 +409,9 @@ def test_dataset_audit_uses_explicit_gmdag_override_for_benchmark(monkeypatch: A
             subprocess.CompletedProcess(
                 args=["uv", "check-sdfdag"],
                 returncode=0,
-                stdout=json.dumps({"profile": "check-sdfdag", "ok": True, "issues": [], "corpus": None}),
+                stdout=json.dumps(
+                    {"profile": "check-sdfdag", "ok": True, "issues": [], "corpus": None}
+                ),
                 stderr="",
             ),
             subprocess.CompletedProcess(
@@ -433,7 +437,9 @@ def test_dataset_audit_uses_explicit_gmdag_override_for_benchmark(monkeypatch: A
 
         monkeypatch.setattr(cli.subprocess, "run", _fake_run)
 
-        result = runner.invoke(cli.app, ["dataset-audit", "--gmdag-file", str(gmdag_path), "--json"])
+        result = runner.invoke(
+            cli.app, ["dataset-audit", "--gmdag-file", str(gmdag_path), "--json"]
+        )
 
         assert result.exit_code == 0
         assert "--gmdag-file" in seen_commands[0]

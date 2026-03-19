@@ -7,7 +7,7 @@ param(
     [switch]$AutoCompileGmDag,
     [int]$GmDagResolution = 512,
     [int]$TotalSteps = 0,
-    [string]$CheckpointDir = "checkpoints/train",
+    [string]$CheckpointDir = "",
     [string]$ResumeCheckpoint = "",
     [int]$AzimuthBins = 256,
     [int]$ElevationBins = 48,
@@ -19,15 +19,13 @@ param(
     [int]$BpttLen = 8,
     [int]$RolloutLength = 512,
     [int]$CheckpointEvery = 25000,
-    [string]$LogDir = "scripts/logs/train",
+    [string]$LogDir = "",
     [int]$ActorTelemetryPort = 5557,
     [ValidateSet("gru", "mambapy")]
     [string]$TemporalCore = "gru",
-    [string]$PythonVersion = "3.12"
+    [string]$PythonVersion = "3.12",
+    [int]$NumActors = 4
 )
-
-# Standard Ghost-Matrix Fleet Size
-$NumActors = 4
 
 $ErrorActionPreference = "Stop"
 
@@ -116,8 +114,92 @@ function Stop-NaviProcesses {
     }
 }
 
+function Wait-ForTrainingReady {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$Port,
+        [string[]]$LogFiles,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($null -ne $Process) {
+            try {
+                $Process.Refresh()
+                if ($Process.HasExited) {
+                    return @{
+                        Ready = $false
+                        Reason = "process-exited"
+                        ExitCode = $Process.ExitCode
+                    }
+                }
+            }
+            catch {
+            }
+        }
+
+        $hit = netstat -ano 2>$null | Select-String "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+\d+\s*$"
+        if ($hit) {
+            return @{
+                Ready = $true
+                Reason = "port-bound"
+            }
+        }
+
+        foreach ($logFile in $LogFiles) {
+            if (-not $logFile -or -not (Test-Path $logFile)) {
+                continue
+            }
+
+            $tail = Get-Content $logFile -Tail 40 -ErrorAction SilentlyContinue
+            if (-not $tail) {
+                continue
+            }
+
+            $tailText = ($tail -join "`n")
+            if (
+                $tailText -match "Async telemetry worker started on .*:$Port" -or
+                $tailText -match "Canonical PPO trainer started: .* pub=tcp://localhost:$Port"
+            ) {
+                return @{
+                    Ready = $true
+                    Reason = "log-ready"
+                }
+            }
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    return @{
+        Ready = $false
+        Reason = "timeout"
+    }
+}
+
 $repoRoot = Get-RepoRoot
+$observabilityModule = Join-Path $repoRoot "tools\Navi.Observability.psm1"
+Import-Module $observabilityModule -Force
+$cleanupStartedAt = Get-Date
+$cleanupSummary = Invoke-NaviGeneratedCleanup -RepoRoot $repoRoot
+$runContext = New-NaviRunContext -RepoRoot $repoRoot -Profile "canonical-train" -BaseRelativeRoot "artifacts\runs"
+Write-NaviRunManifest -RunContext $runContext -Metadata ([ordered]@{
+    actors = $NumActors
+    temporal_core = $TemporalCore
+    cleanup_removed = @($cleanupSummary.removed)
+}) -FileName "train-wrapper.json"
+Write-NaviPhaseMetric -RunContext $runContext -Operation "wrapper_cleanup" -StartedAt $cleanupStartedAt -Metadata ([ordered]@{
+    removed_count = @($cleanupSummary.removed).Count
+}) | Out-Null
 Initialize-CudaEnvironment
+
+if ([string]::IsNullOrWhiteSpace($CheckpointDir)) {
+    $CheckpointDir = $runContext.CheckpointRoot
+}
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+    $LogDir = $runContext.LogRoot
+}
 
 $resolvedGmDagFile = if (-not [string]::IsNullOrWhiteSpace($GmDagFile)) {
     (Resolve-Path $GmDagFile).Path
@@ -162,12 +244,15 @@ Write-Host "  Steps      : $(if ($TotalSteps -le 0) { 'continuous until stopped'
 Write-Host "  Actors     : $NumActors (Standard Fleet)"
 Write-Host "  Resolution : ${AzimuthBins}x${ElevationBins}"
 Write-Host "  Runtime    : sdfdag (canonical)"
+Write-Host "  Run ID     : $($runContext.RunId)"
+Write-Host "  Run Root   : $($runContext.RunRoot)"
 Write-Host "  Temporal   : $TemporalCore"
 Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
 Write-Host "  Checkpoint : $CheckpointDir (every $CheckpointEvery)"
 Write-Host "  Optimizer  : LR=$LearningRate, Batch=$MinibatchSize, Epochs=$PpoEpochs"
 Write-Host "  Rollout    : $RolloutLength"
 Write-Host "  Reward     : Tax=$ExistentialTax, Entropy=$EntropyCoeff"
+Write-Host "  Metrics    : $($runContext.MetricsRoot)"
 Write-Host "========================================================"
 Write-Host ""
 
@@ -227,8 +312,50 @@ $logErr = Join-Path $LogDir "train.err.log"
 Write-Host "  Starting canonical training engine..."
 Write-Host "  Logs: $logErr"
 
-Start-Process -FilePath "uv" -ArgumentList $actorArgs `
+$trainLaunchStartedAt = Get-Date
+$trainProc = Start-Process -FilePath "uv" -ArgumentList $actorArgs `
     -WorkingDirectory $repoRoot `
     -RedirectStandardOutput $logOut `
     -RedirectStandardError $logErr `
-    -NoNewWindow -Wait
+    -NoNewWindow -PassThru
+
+Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_launch" -StartedAt $trainLaunchStartedAt -ProcessId $trainProc.Id -Metadata ([ordered]@{
+    actors = $NumActors
+    temporal_core = $TemporalCore
+    telemetry_port = $ActorTelemetryPort
+}) | Out-Null
+
+Write-Host "  PID: $($trainProc.Id)"
+Write-Host "  Metrics : $($runContext.MetricsRoot)"
+Write-Host "  Verifying training telemetry readiness ($ActorTelemetryPort)..."
+
+$trainingReadyStartedAt = Get-Date
+$trainingReady = Wait-ForTrainingReady -Process $trainProc -Port $ActorTelemetryPort -LogFiles @($logErr) -TimeoutSeconds 180
+Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_ready" -StartedAt $trainingReadyStartedAt -ProcessId $(if ($null -ne $trainProc) { $trainProc.Id } else { 0 }) -Metadata ([ordered]@{
+    ready = [bool]$trainingReady.Ready
+    reason = [string]$trainingReady.Reason
+    exit_code = if ($trainingReady.ContainsKey('ExitCode')) { $trainingReady.ExitCode } else { $null }
+    telemetry_port = $ActorTelemetryPort
+}) | Out-Null
+
+if (-not $trainingReady.Ready) {
+    if ($null -ne $trainProc) {
+        Stop-ProcessTreeById -ProcessId $trainProc.Id
+    }
+    if ($trainingReady.Reason -eq "process-exited") {
+        throw "Canonical training exited before telemetry became ready (exit code $($trainingReady.ExitCode))."
+    }
+    throw "Training telemetry failed readiness check ($ActorTelemetryPort, reason=$($trainingReady.Reason))."
+}
+
+$trainExitStartedAt = Get-Date
+Wait-Process -Id $trainProc.Id
+$trainProc.Refresh()
+$exitCode = if ($null -eq $trainProc.ExitCode) { 0 } else { [int]$trainProc.ExitCode }
+Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_exit" -StartedAt $trainExitStartedAt -Metadata ([ordered]@{
+    exit_code = $exitCode
+}) | Out-Null
+
+if ($exitCode -ne 0) {
+    throw "Canonical training exited with code $exitCode. See $logErr"
+}

@@ -2,7 +2,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from voxel_dag.compiler import canonical_node_hash, compress_to_dag, deduplicate_signatures
+from voxel_dag.compiler import (
+    canonical_node_hash,
+    compress_to_dag,
+    deduplicate_signatures,
+)
 
 
 def _decode_leaf_distance(node_word: np.uint64) -> float:
@@ -74,6 +78,8 @@ def test_compress_to_dag_preserves_octant_child_order() -> None:
 
     assert int(dag[0] >> 63) == 0
     child_indices = [int(value) for value in dag[1:9].tolist()]
-    decoded_distances = [_decode_leaf_distance(dag[child_index]) for child_index in child_indices]
+    decoded_distances = [
+        _decode_leaf_distance(dag[child_index]) for child_index in child_indices
+    ]
 
     assert decoded_distances == pytest.approx(expected_distances, rel=0.0, abs=1e-3)

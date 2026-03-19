@@ -15,18 +15,24 @@ import zmq
 
 from navi_auditor.config import AuditorConfig
 from navi_auditor.dashboard.renderers import depth_to_viridis, render_first_person
-from navi_contracts import TOPIC_ACTION, TOPIC_DISTANCE_MATRIX, TOPIC_TELEMETRY_EVENT, setup_logging
+from navi_contracts import (
+    TOPIC_ACTION,
+    TOPIC_DISTANCE_MATRIX,
+    TOPIC_TELEMETRY_EVENT,
+    get_or_create_run_context,
+    setup_logging,
+)
 
 if TYPE_CHECKING:
-    from navi_auditor.matrix_viewer import MatrixViewer
-    from navi_auditor.recorder import Recorder
-    from navi_auditor.rewinder import Rewinder
-    from navi_auditor.storage.zarr_backend import ZarrBackend
+    from navi_auditor.matrix_viewer import MatrixViewer as _MatrixViewerType
+    from navi_auditor.recorder import Recorder as _RecorderType
+    from navi_auditor.rewinder import Rewinder as _RewinderType
+    from navi_auditor.storage.zarr_backend import ZarrBackend as _ZarrBackendType
 
-MatrixViewer: Any | None = None
-Recorder: Any | None = None
-Rewinder: Any | None = None
-ZarrBackend: Any | None = None
+MatrixViewer: type[_MatrixViewerType] | None = None
+Recorder: type[_RecorderType] | None = None
+Rewinder: type[_RewinderType] | None = None
+ZarrBackend: type[_ZarrBackendType] | None = None
 
 
 def _get_matrix_viewer_class() -> Any:
@@ -63,6 +69,7 @@ def _get_zarr_backend_class() -> Any:
 
         ZarrBackend = _ZarrBackend
     return ZarrBackend
+
 
 __all__: list[str] = ["app"]
 
@@ -114,7 +121,9 @@ def _parse_json_stdout(command_name: str, stdout: str) -> dict[str, Any]:
     return cast("dict[str, Any]", payload)
 
 
-def _run_environment_json_command(command_name: str, arguments: list[str]) -> tuple[int, dict[str, Any]]:
+def _run_environment_json_command(
+    command_name: str, arguments: list[str]
+) -> tuple[int, dict[str, Any]]:
     completed = subprocess.run(  # noqa: S603 - command is fixed to the repo-local environment CLI surface
         [*_environment_cli_command(), *arguments, "--json"],
         capture_output=True,
@@ -233,7 +242,9 @@ def _wait_for_dashboard_attach(actor_sub: str, timeout_seconds: float) -> dict[s
         "topic": "",
         "payload_bytes": 0,
         "elapsed_seconds": round(time.perf_counter() - started_at, 6),
-        "issues": [f"No dashboard-observable actor traffic arrived on {actor_sub} within {timeout_seconds:.1f}s"],
+        "issues": [
+            f"No dashboard-observable actor traffic arrived on {actor_sub} within {timeout_seconds:.1f}s"
+        ],
     }
 
 
@@ -250,7 +261,9 @@ def record(
     config = AuditorConfig()
 
     final_out = out or config.output_path
-    addresses = tuple(s.strip() for s in sub.split(",") if s.strip()) if sub else config.sub_addresses
+    addresses = (
+        tuple(s.strip() for s in sub.split(",") if s.strip()) if sub else config.sub_addresses
+    )
 
     matrix_sub_address = config.matrix_sub_address
     actor_sub_address = config.actor_sub_address
@@ -265,7 +278,7 @@ def record(
     config = AuditorConfig(
         matrix_sub_address=matrix_sub_address,
         actor_sub_address=actor_sub_address,
-        output_path=final_out
+        output_path=final_out,
     )
 
     storage = _get_zarr_backend_class()()
@@ -328,7 +341,9 @@ def dashboard(
     hz: float = typer.Option(30.0, help="Dashboard + teleop tick rate"),
     linear_speed: float = typer.Option(1.5, help="Max horizontal linear speed"),
     yaw_rate: float = typer.Option(1.5, help="Max yaw rate"),
-    max_distance: float | None = typer.Option(None, min=0.01, help="Observation normalization horizon in meters."),
+    max_distance: float | None = typer.Option(
+        None, min=0.01, help="Observation normalization horizon in meters."
+    ),
     scene: str = typer.Option(
         "",
         help="Path to .glb/.obj mesh for 3D environment view",
@@ -339,11 +354,23 @@ def dashboard(
     config = AuditorConfig()
 
     # CLI overrides
-    m_sub = "" if passive else (matrix_sub if matrix_sub is not None else config.matrix_sub_address)
+    m_sub = (
+        "" if passive else (matrix_sub if matrix_sub is not None else config.matrix_sub_address)
+    )
     a_sub = actor_sub if actor_sub is not None else config.actor_sub_address
-    a_ctl = actor_control_endpoint if actor_control_endpoint is not None else config.actor_control_address
-    s_end = "" if passive else (step_endpoint if step_endpoint is not None else config.step_endpoint)
-    resolved_max_distance = float(max_distance) if max_distance is not None else float(config.observation_max_distance_m)
+    a_ctl = (
+        actor_control_endpoint
+        if actor_control_endpoint is not None
+        else config.actor_control_address
+    )
+    s_end = (
+        "" if passive else (step_endpoint if step_endpoint is not None else config.step_endpoint)
+    )
+    resolved_max_distance = (
+        float(max_distance)
+        if max_distance is not None
+        else float(config.observation_max_distance_m)
+    )
 
     typer.echo("Initialising Ghost-Matrix RL Dashboard...")
     typer.echo("  Tab=toggle manual/AI  WASD/arrows=move  ESC=quit")
@@ -370,7 +397,9 @@ def dashboard(
 @app.command("dashboard-attach-check")
 def dashboard_attach_check(
     actor_sub: str = typer.Option(None, help="Actor or replay PUB SUB address to observe."),
-    timeout_seconds: float = typer.Option(15.0, min=0.1, help="Maximum time to wait for actor-visible traffic."),
+    timeout_seconds: float = typer.Option(
+        15.0, min=0.1, help="Maximum time to wait for actor-visible traffic."
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON summary instead of text."),
 ) -> None:
     """Headless proof that the passive dashboard surface can attach to a live actor-style stream."""
@@ -404,9 +433,13 @@ def dashboard_attach_check(
 def dashboard_capture_frame(
     actor_sub: str = typer.Option(None, help="Actor PUB SUB address to observe."),
     actor_id: int = typer.Option(0, min=0, help="Actor env_id to capture."),
-    timeout_seconds: float = typer.Option(15.0, min=0.1, help="Maximum time to wait for a matching frame."),
+    timeout_seconds: float = typer.Option(
+        15.0, min=0.1, help="Maximum time to wait for a matching frame."
+    ),
     output_dir: str = typer.Option("", help="Optional output directory override."),
-    max_distance: float | None = typer.Option(None, min=0.01, help="Observation normalization horizon in meters."),
+    max_distance: float | None = typer.Option(
+        None, min=0.01, help="Observation normalization horizon in meters."
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON summary instead of text."),
 ) -> None:
     """Capture one live dashboard-visible DistanceMatrix frame plus rendered diagnostics."""
@@ -418,7 +451,9 @@ def dashboard_capture_frame(
         actor_id=actor_id,
         timeout_seconds=timeout_seconds,
         output_dir=Path(output_dir) if output_dir else None,
-        max_distance_m=float(max_distance) if max_distance is not None else float(config.observation_max_distance_m),
+        max_distance_m=float(max_distance)
+        if max_distance is not None
+        else float(config.observation_max_distance_m),
     )
 
     if json_output:
@@ -477,7 +512,10 @@ def _capture_dashboard_frame(
             if current_actor_id != actor_id:
                 continue
 
-            artifact_root = output_dir or (_repo_root() / "artifacts" / "dashboard-captures" / time.strftime("%Y%m%d-%H%M%S"))
+            run_context = get_or_create_run_context("dashboard-capture")
+            artifact_root = output_dir or (
+                run_context.run_root / "captures" / f"dashboard-actor{actor_id}"
+            )
             artifact_root.mkdir(parents=True, exist_ok=True)
 
             raw_depth = np.asarray(msg.depth[0], dtype=np.float32)
@@ -513,6 +551,7 @@ def _capture_dashboard_frame(
             summary = {
                 "profile": "dashboard-capture-frame",
                 "ok": True,
+                "run_id": run_context.run_id,
                 "actor_sub": actor_sub,
                 "actor_id": actor_id,
                 "step_id": int(msg.step_id),
@@ -553,14 +592,20 @@ def dataset_audit(
         help="Optional .gmdag asset override. When omitted, use the first promoted corpus asset.",
     ),
     expected_resolution: int = typer.Option(512, help="Expected canonical compiled resolution."),
-    benchmark: bool = typer.Option(True, help="Run a real-runtime benchmark after runtime preflight succeeds."),
+    benchmark: bool = typer.Option(
+        True, help="Run a real-runtime benchmark after runtime preflight succeeds."
+    ),
     actors: int = typer.Option(1, min=1, help="Number of actors for the benchmark batch."),
     steps: int = typer.Option(8, min=1, help="Measured benchmark batch steps."),
     warmup_steps: int = typer.Option(1, min=0, help="Unmeasured benchmark warmup steps."),
     azimuth_bins: int = typer.Option(64, min=1, help="Benchmark azimuth bins."),
     elevation_bins: int = typer.Option(16, min=1, help="Benchmark elevation bins."),
-    max_distance: float = typer.Option(30.0, min=0.01, help="Benchmark distance normalization range."),
-    sdf_max_steps: int = typer.Option(256, min=1, help="Benchmark maximum sphere-tracing iterations per ray."),
+    max_distance: float = typer.Option(
+        30.0, min=0.01, help="Benchmark distance normalization range."
+    ),
+    sdf_max_steps: int = typer.Option(
+        256, min=1, help="Benchmark maximum sphere-tracing iterations per ray."
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON summary instead of text."),
 ) -> None:
     """Run the first passive runtime-backed dataset QA surface through the environment CLI."""
@@ -570,7 +615,9 @@ def dataset_audit(
     if gmdag_file:
         check_arguments.extend(["--gmdag-file", gmdag_file])
 
-    check_returncode, check_payload = _run_environment_json_command("check-sdfdag", check_arguments)
+    check_returncode, check_payload = _run_environment_json_command(
+        "check-sdfdag", check_arguments
+    )
     issues = list(cast("list[str]", check_payload.get("issues", [])))
 
     benchmark_payload: dict[str, Any] | None = None
@@ -596,7 +643,9 @@ def dataset_audit(
             "--sdf-max-steps",
             str(sdf_max_steps),
         ]
-        benchmark_returncode, benchmark_payload = _run_environment_json_command("bench-sdfdag", benchmark_arguments)
+        benchmark_returncode, benchmark_payload = _run_environment_json_command(
+            "bench-sdfdag", benchmark_arguments
+        )
         benchmark_ok = benchmark_returncode == 0
         if not benchmark_ok:
             issues.extend(cast("list[str]", benchmark_payload.get("issues", [])))

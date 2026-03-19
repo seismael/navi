@@ -152,9 +152,7 @@ class RNDModule(nn.Module):  # type: ignore[misc]
         """
         delta = other_mean - self._running_mean
         total_count = self._count + other_count
-        self._running_mean = (
-            self._running_mean + delta * other_count / total_count
-        )
+        self._running_mean = self._running_mean + delta * other_count / total_count
         m_a = self._running_var * self._count
         m_b = other_var * other_count
         m2 = m_a + m_b + delta**2 * self._count * other_count / total_count

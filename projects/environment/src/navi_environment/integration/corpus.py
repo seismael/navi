@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -131,7 +131,9 @@ def _load_manifest_entries(manifest_path: Path) -> list[SceneSourceEntry]:
             if isinstance(item, str):
                 path = _resolve_manifest_scene_path(item, manifest_path)
                 raw_entries.append(
-                    SceneSourceEntry(path=path, dataset="manifest", scene_name=_canonical_scene_name(path))
+                    SceneSourceEntry(
+                        path=path, dataset="manifest", scene_name=_canonical_scene_name(path)
+                    )
                 )
         return raw_entries
 
@@ -148,7 +150,9 @@ def _load_manifest_entries(manifest_path: Path) -> list[SceneSourceEntry]:
                 continue
             seen.add(path)
             raw_entries.append(
-                SceneSourceEntry(path=path, dataset="manifest", scene_name=_canonical_scene_name(path))
+                SceneSourceEntry(
+                    path=path, dataset="manifest", scene_name=_canonical_scene_name(path)
+                )
             )
         return raw_entries
 
@@ -157,7 +161,9 @@ def _load_manifest_entries(manifest_path: Path) -> list[SceneSourceEntry]:
             if isinstance(item, str):
                 path = _resolve_manifest_scene_path(item, manifest_path)
                 raw_entries.append(
-                    SceneSourceEntry(path=path, dataset="manifest", scene_name=_canonical_scene_name(path))
+                    SceneSourceEntry(
+                        path=path, dataset="manifest", scene_name=_canonical_scene_name(path)
+                    )
                 )
                 continue
             if not isinstance(item, dict):
@@ -166,9 +172,12 @@ def _load_manifest_entries(manifest_path: Path) -> list[SceneSourceEntry]:
             if not isinstance(raw_path, str):
                 continue
             path = _resolve_manifest_scene_path(raw_path, manifest_path)
-            dataset = item.get("dataset") if isinstance(item.get("dataset"), str) else "manifest"
+            raw_dataset = item.get("dataset")
+            dataset = raw_dataset if isinstance(raw_dataset, str) else "manifest"
             raw_entries.append(
-                SceneSourceEntry(path=path, dataset=dataset, scene_name=_canonical_scene_name(path))
+                SceneSourceEntry(
+                    path=path, dataset=dataset, scene_name=_canonical_scene_name(path)
+                )
             )
         return raw_entries
 
@@ -211,10 +220,18 @@ def _load_compiled_manifest_entries(manifest_path: Path) -> list[CompiledSceneEn
         compiled_path = _resolve_manifest_scene_path(raw_compiled_path, manifest_path)
         if compiled_path.suffix.lower() != ".gmdag":
             continue
-        raw_source_path = item.get("source_path") if isinstance(item.get("source_path"), str) else raw_compiled_path
+        raw_source_path = (
+            item.get("source_path")
+            if isinstance(item.get("source_path"), str)
+            else raw_compiled_path
+        )
+        if not isinstance(raw_source_path, str):
+            continue
         source_path = _resolve_manifest_scene_path(raw_source_path, manifest_path)
-        dataset = item.get("dataset") if isinstance(item.get("dataset"), str) else "compiled"
-        scene_name = item.get("scene_name") if isinstance(item.get("scene_name"), str) else compiled_path.stem
+        raw_dataset = item.get("dataset")
+        dataset = raw_dataset if isinstance(raw_dataset, str) else "compiled"
+        raw_scene_name = item.get("scene_name")
+        scene_name = raw_scene_name if isinstance(raw_scene_name, str) else compiled_path.stem
         entries.append(
             CompiledSceneEntry(
                 source_path=source_path,
@@ -281,7 +298,10 @@ def discover_scene_sources(
     for entry in entries:
         if not entry.path.exists():
             continue
-        if entry.path.suffix.lower() in _SUPPORTED_SOURCE_SUFFIXES and entry.path.stat().st_size < min_scene_bytes:
+        if (
+            entry.path.suffix.lower() in _SUPPORTED_SOURCE_SUFFIXES
+            and entry.path.stat().st_size < min_scene_bytes
+        ):
             continue
         if entry.path in seen_paths:
             continue
@@ -413,13 +433,15 @@ def _compiled_output_path(source_path: Path, *, source_root: Path, gmdag_root: P
         relative = source_path.resolve().relative_to(source_root.resolve())
         return (gmdag_root / relative).with_suffix(".gmdag")
     except ValueError:
-        digest = hashlib.sha1(source_path.resolve().as_posix().encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha256(source_path.resolve().as_posix().encode("utf-8")).hexdigest()[:12]
         return gmdag_root / f"external_{source_path.stem}_{digest}.gmdag"
 
 
-def _write_source_manifest(entries: list[SceneSourceEntry], manifest_path: Path, *, source_root: Path) -> None:
+def _write_source_manifest(
+    entries: list[SceneSourceEntry], manifest_path: Path, *, source_root: Path
+) -> None:
     payload = {
-        "generated": datetime.now(timezone.utc).isoformat(),
+        "generated": datetime.now(UTC).isoformat(),
         "source_root": str(source_root),
         "scene_count": len(entries),
         "scenes": [
@@ -465,7 +487,7 @@ def _write_compiled_manifest(
         )
 
     payload = {
-        "generated": datetime.now(timezone.utc).isoformat(),
+        "generated": datetime.now(UTC).isoformat(),
         "source_root": str(source_root),
         "gmdag_root": str(gmdag_root),
         "scene_count": len(entries),
@@ -525,22 +547,24 @@ def prepare_training_scene_corpus(
         )
 
     if not force_recompile:
-        compiled_entries = discover_compiled_scene_entries(
+        discovered_compiled_entries = discover_compiled_scene_entries(
             resolved_gmdag_root,
             manifest_path=resolved_manifest_path,
         )
-        if compiled_entries:
+        if discovered_compiled_entries:
             if scene:
-                compiled_entries = [resolve_compiled_scene_query(scene, compiled_entries)]
+                discovered_compiled_entries = [
+                    resolve_compiled_scene_query(scene, discovered_compiled_entries)
+                ]
             return PreparedSceneCorpus(
                 source_root=resolved_source_root,
                 gmdag_root=resolved_gmdag_root,
                 source_manifest_path=resolved_source_manifest,
                 compiled_manifest_path=resolved_compiled_manifest,
-                scene_entries=tuple(compiled_entries),
+                scene_entries=tuple(discovered_compiled_entries),
             )
 
-    discovered = discover_scene_sources(
+    discovered: list[SceneSourceEntry] = discover_scene_sources(
         resolved_source_root,
         manifest_path=resolved_manifest_path,
         min_scene_bytes=min_scene_bytes,
@@ -552,15 +576,18 @@ def prepare_training_scene_corpus(
     _write_source_manifest(discovered, resolved_source_manifest, source_root=resolved_source_root)
 
     compiled_entries: list[CompiledSceneEntry] = []
-    for entry in discovered:
+    for source_entry in discovered:
         compiled_path = _compiled_output_path(
-            entry.path,
+            source_entry.path,
             source_root=resolved_source_root,
             gmdag_root=resolved_gmdag_root,
         )
-        if entry.path.suffix.lower() != ".gmdag":
+        if source_entry.path.suffix.lower() != ".gmdag":
             needs_compile = force_recompile or not compiled_path.exists()
-            if compiled_path.exists() and compiled_path.stat().st_mtime < entry.path.stat().st_mtime:
+            if (
+                compiled_path.exists()
+                and compiled_path.stat().st_mtime < source_entry.path.stat().st_mtime
+            ):
                 needs_compile = True
             if compiled_path.exists():
                 try:
@@ -573,16 +600,16 @@ def prepare_training_scene_corpus(
             if needs_compile:
                 compiled_path.parent.mkdir(parents=True, exist_ok=True)
                 compile_gmdag_world(
-                    source_path=entry.path,
+                    source_path=source_entry.path,
                     output_path=compiled_path,
                     resolution=resolution,
                 )
         compiled_entries.append(
             CompiledSceneEntry(
-                source_path=entry.path,
+                source_path=source_entry.path,
                 compiled_path=compiled_path,
-                dataset=entry.dataset,
-                scene_name=entry.scene_name,
+                dataset=source_entry.dataset,
+                scene_name=source_entry.scene_name,
             )
         )
 
@@ -611,7 +638,11 @@ def validate_compiled_scene_corpus(
 ) -> CompiledCorpusValidation:
     """Validate the promoted compiled corpus manifest against live `.gmdag` assets."""
     resolved_root = (gmdag_root or find_default_gmdag_corpus_root()).resolve()
-    resolved_manifest = (manifest_path.resolve() if manifest_path is not None else _default_compiled_manifest_path(resolved_root))
+    resolved_manifest = (
+        manifest_path.resolve()
+        if manifest_path is not None
+        else _default_compiled_manifest_path(resolved_root)
+    )
 
     issues: list[str] = []
     live_entries = _scan_compiled_scene_entries(resolved_root)
@@ -676,12 +707,15 @@ def validate_compiled_scene_corpus(
             )
 
     requested_resolution = manifest_payload.get("requested_resolution")
-    if expected_resolution is not None and requested_resolution is not None:
-        if int(requested_resolution) != int(expected_resolution):
-            issues.append(
-                "Compiled manifest requested_resolution mismatch: "
-                f"declares {requested_resolution}, expected {expected_resolution}"
-            )
+    if (
+        expected_resolution is not None
+        and requested_resolution is not None
+        and int(requested_resolution) != int(expected_resolution)
+    ):
+        issues.append(
+            "Compiled manifest requested_resolution mismatch: "
+            f"declares {requested_resolution}, expected {expected_resolution}"
+        )
 
     manifest_paths: set[Path] = set()
     for entry in manifest_entries:
@@ -725,7 +759,9 @@ def validate_compiled_scene_corpus(
 
     manifest_compiled_resolutions = manifest_payload.get("compiled_resolutions")
     if manifest_compiled_resolutions is not None:
-        manifest_resolution_tuple = tuple(sorted(int(value) for value in manifest_compiled_resolutions))
+        manifest_resolution_tuple = tuple(
+            sorted(int(value) for value in manifest_compiled_resolutions)
+        )
         live_resolution_tuple = tuple(sorted(compiled_resolutions))
         if manifest_resolution_tuple != live_resolution_tuple:
             issues.append(

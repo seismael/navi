@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from navi_auditor.config import AuditorConfig
 from navi_auditor import recorder as recorder_module
+from navi_auditor.config import AuditorConfig
 from navi_auditor.recorder import Recorder
 from navi_auditor.storage.zarr_backend import ZarrBackend
 
@@ -80,7 +80,10 @@ class TestRecorder:
         monkeypatch.setattr(recorder_module.zmq, "Context", lambda: context)
 
         backend = _BackendSpy()
-        config = _ConfigStub(output_path="session.zarr", sub_addresses=("tcp://localhost:5557", "tcp://localhost:5557"))
+        config = _ConfigStub(
+            output_path="session.zarr",
+            sub_addresses=("tcp://localhost:5557", "tcp://localhost:5557"),
+        )
         recorder = Recorder(config=config, backend=backend)
 
         recorder.start()

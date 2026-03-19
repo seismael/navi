@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _pytest.tmpdir import TempPathFactory
 import pytest
+from _pytest.tmpdir import TempPathFactory
 
 
 def pytest_configure(config: pytest.Config) -> None:

@@ -241,7 +241,9 @@ def test_load_gmdag_asset_rejects_child_pointer_table_past_payload(tmp_path: Pat
         load_gmdag_asset(asset_path)
 
 
-def test_load_gmdag_asset_can_skip_deep_layout_validation_for_runtime_loads(tmp_path: Path) -> None:
+def test_load_gmdag_asset_can_skip_deep_layout_validation_for_runtime_loads(
+    tmp_path: Path,
+) -> None:
     asset_path = tmp_path / "runtime_only_bad_layout.gmdag"
     internal_word = np.uint64((1 << 55) | 5)
     nodes = np.array([internal_word], dtype=np.uint64)
@@ -264,7 +266,9 @@ def test_load_gmdag_asset_can_skip_deep_layout_validation_for_runtime_loads(tmp_
     assert np.array_equal(asset.nodes, nodes)
 
 
-def test_probe_sdfdag_runtime_reports_missing_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_probe_sdfdag_runtime_reports_missing_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fake_import_module(name: str) -> object:
         if name == "torch":
             raise ImportError("torch missing")
@@ -272,7 +276,9 @@ def test_probe_sdfdag_runtime_reports_missing_dependencies(monkeypatch: pytest.M
             raise ImportError("torch_sdf missing")
         raise AssertionError(f"unexpected import: {name}")
 
-    monkeypatch.setattr("navi_environment.integration.voxel_dag.importlib.import_module", fake_import_module)
+    monkeypatch.setattr(
+        "navi_environment.integration.voxel_dag.importlib.import_module", fake_import_module
+    )
     monkeypatch.setattr(
         "navi_environment.integration.voxel_dag._resolve_voxel_dag_executable",
         lambda: (_ for _ in ()).throw(RuntimeError("compiler missing")),
@@ -316,7 +322,9 @@ def test_probe_sdfdag_runtime_loads_asset_metadata(
             return object()
         raise AssertionError(f"unexpected import: {name}")
 
-    monkeypatch.setattr("navi_environment.integration.voxel_dag.importlib.import_module", fake_import_module)
+    monkeypatch.setattr(
+        "navi_environment.integration.voxel_dag.importlib.import_module", fake_import_module
+    )
     monkeypatch.setattr(
         "navi_environment.integration.voxel_dag._resolve_voxel_dag_executable",
         lambda: tmp_path / "voxel-dag.exe",
@@ -616,12 +624,16 @@ def test_build_backend_sdfdag_exits_on_preflight_issues(monkeypatch: pytest.Monk
     assert exc_info.value.exit_code == 1
 
 
-def test_build_backend_only_uses_dependency_preflight_before_runtime_load(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_backend_only_uses_dependency_preflight_before_runtime_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from navi_environment.integration.voxel_dag import GmDagRuntimeStatus
 
     captured: dict[str, object] = {}
 
-    def _fake_probe(path: Path | None = None, *, validate_asset_layout: bool = True) -> GmDagRuntimeStatus:
+    def _fake_probe(
+        path: Path | None = None, *, validate_asset_layout: bool = True
+    ) -> GmDagRuntimeStatus:
         captured["probe_path"] = path
         captured["validate_asset_layout"] = validate_asset_layout
         return GmDagRuntimeStatus(
@@ -665,7 +677,9 @@ def test_bench_sdfdag_cli_reports_metrics(monkeypatch: pytest.MonkeyPatch) -> No
             self.reset_calls.append((episode_id, actor_id))
             return object()
 
-        def batch_step(self, actions: tuple[object, ...], step_id: int) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        def batch_step(
+            self, actions: tuple[object, ...], step_id: int
+        ) -> tuple[tuple[object, ...], tuple[object, ...]]:
             self.batch_calls += 1
             return tuple(object() for _ in actions), tuple(object() for _ in actions)
 
@@ -685,13 +699,16 @@ def test_bench_sdfdag_cli_reports_metrics(monkeypatch: pytest.MonkeyPatch) -> No
 
     backend = FakeBackend()
     monkeypatch.setattr("navi_environment.cli.setup_logging", lambda *_args: None)
+
     def _build_backend_with_capture(config: EnvironmentConfig) -> FakeBackend:
         captured["config"] = config
         return backend
 
     monkeypatch.setattr("navi_environment.cli._build_backend", _build_backend_with_capture)
     perf_counter_values = iter([100.0, 100.5])
-    monkeypatch.setattr("navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values))
+    monkeypatch.setattr(
+        "navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values)
+    )
 
     result = _RUNNER.invoke(
         app,
@@ -723,7 +740,9 @@ def test_bench_sdfdag_cli_can_disable_torch_compile(monkeypatch: pytest.MonkeyPa
         def reset(self, episode_id: int, *, actor_id: int = 0) -> object:
             return object()
 
-        def batch_step(self, actions: tuple[object, ...], step_id: int) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        def batch_step(
+            self, actions: tuple[object, ...], step_id: int
+        ) -> tuple[tuple[object, ...], tuple[object, ...]]:
             return tuple(object() for _ in actions), tuple(object() for _ in actions)
 
         def perf_snapshot(self) -> object:
@@ -749,7 +768,9 @@ def test_bench_sdfdag_cli_can_disable_torch_compile(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr("navi_environment.cli._build_backend", _build_backend_with_capture)
     perf_counter_values = iter([100.0, 100.5])
-    monkeypatch.setattr("navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values))
+    monkeypatch.setattr(
+        "navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values)
+    )
 
     result = _RUNNER.invoke(
         app,
@@ -776,7 +797,9 @@ def test_bench_sdfdag_cli_can_emit_json_summary(monkeypatch: pytest.MonkeyPatch)
         def reset(self, episode_id: int, *, actor_id: int = 0) -> object:
             return object()
 
-        def batch_step(self, actions: tuple[object, ...], step_id: int) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        def batch_step(
+            self, actions: tuple[object, ...], step_id: int
+        ) -> tuple[tuple[object, ...], tuple[object, ...]]:
             return tuple(object() for _ in actions), tuple(object() for _ in actions)
 
         def perf_snapshot(self) -> object:
@@ -796,7 +819,9 @@ def test_bench_sdfdag_cli_can_emit_json_summary(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("navi_environment.cli.setup_logging", lambda *_args: None)
     monkeypatch.setattr("navi_environment.cli._build_backend", lambda _config: FakeBackend())
     perf_counter_values = iter([100.0, 100.5])
-    monkeypatch.setattr("navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values))
+    monkeypatch.setattr(
+        "navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values)
+    )
 
     result = _RUNNER.invoke(
         app,
@@ -823,9 +848,13 @@ def test_bench_sdfdag_cli_can_emit_json_summary(monkeypatch: pytest.MonkeyPatch)
     assert payload["torch_compile_active"] == 0
 
 
-def test_bench_sdfdag_cli_can_emit_median_summary_for_repeated_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bench_sdfdag_cli_can_emit_median_summary_for_repeated_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeBackend:
-        def __init__(self, avg_batch_ms: float, sps: float, total_batches: int, total_actor_steps: int) -> None:
+        def __init__(
+            self, avg_batch_ms: float, sps: float, total_batches: int, total_actor_steps: int
+        ) -> None:
             self._avg_batch_ms = avg_batch_ms
             self._sps = sps
             self._total_batches = total_batches
@@ -834,7 +863,9 @@ def test_bench_sdfdag_cli_can_emit_median_summary_for_repeated_runs(monkeypatch:
         def reset(self, episode_id: int, *, actor_id: int = 0) -> object:
             return object()
 
-        def batch_step(self, actions: tuple[object, ...], step_id: int) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        def batch_step(
+            self, actions: tuple[object, ...], step_id: int
+        ) -> tuple[tuple[object, ...], tuple[object, ...]]:
             return tuple(object() for _ in actions), tuple(object() for _ in actions)
 
         def perf_snapshot(self) -> object:
@@ -861,7 +892,9 @@ def test_bench_sdfdag_cli_can_emit_median_summary_for_repeated_runs(monkeypatch:
     )
     monkeypatch.setattr("navi_environment.cli._build_backend", lambda _config: next(backends))
     perf_counter_values = iter([100.0, 100.5, 200.0, 200.4, 300.0, 300.45])
-    monkeypatch.setattr("navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values))
+    monkeypatch.setattr(
+        "navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values)
+    )
 
     result = _RUNNER.invoke(
         app,
@@ -895,12 +928,16 @@ def test_bench_sdfdag_cli_can_emit_median_summary_for_repeated_runs(monkeypatch:
     assert len(payload["per_run"]) == 3
 
 
-def test_bench_sdfdag_cli_exits_on_inconsistent_perf_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bench_sdfdag_cli_exits_on_inconsistent_perf_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeBackend:
         def reset(self, episode_id: int, *, actor_id: int = 0) -> object:
             return object()
 
-        def batch_step(self, actions: tuple[object, ...], step_id: int) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        def batch_step(
+            self, actions: tuple[object, ...], step_id: int
+        ) -> tuple[tuple[object, ...], tuple[object, ...]]:
             return tuple(object() for _ in actions), tuple(object() for _ in actions)
 
         def perf_snapshot(self) -> object:
@@ -920,7 +957,9 @@ def test_bench_sdfdag_cli_exits_on_inconsistent_perf_snapshot(monkeypatch: pytes
     monkeypatch.setattr("navi_environment.cli.setup_logging", lambda *_args: None)
     monkeypatch.setattr("navi_environment.cli._build_backend", lambda _config: FakeBackend())
     perf_counter_values = iter([100.0, 100.5])
-    monkeypatch.setattr("navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values))
+    monkeypatch.setattr(
+        "navi_environment.cli.time.perf_counter", lambda: next(perf_counter_values)
+    )
 
     result = _RUNNER.invoke(
         app,

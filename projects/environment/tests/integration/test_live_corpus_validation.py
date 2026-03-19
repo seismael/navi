@@ -41,7 +41,14 @@ def test_live_corpus_uses_downloaded_datasets_only() -> None:
     assert set(manifest.get("compiled_resolutions", [])) == {512}
 
     allowed_datasets = {"habitat_test_scenes", "hssd", "replicacad"}
-    forbidden_tokens = ("sample", "generated", "synthetic", "procedural", "corpus-refresh", "downloads")
+    forbidden_tokens = (
+        "sample",
+        "generated",
+        "synthetic",
+        "procedural",
+        "corpus-refresh",
+        "downloads",
+    )
 
     for scene in scenes:
         dataset = str(scene.get("dataset", ""))
@@ -78,7 +85,9 @@ def test_live_compiled_corpus_validator_accepts_promoted_manifest() -> None:
     if not manifest_path.exists():
         pytest.skip("Live compiled corpus is not present in this workspace")
 
-    validation = validate_compiled_scene_corpus(live_root, manifest_path=manifest_path, expected_resolution=512)
+    validation = validate_compiled_scene_corpus(
+        live_root, manifest_path=manifest_path, expected_resolution=512
+    )
 
     assert validation.manifest_present is True
     assert validation.scene_count > 0
@@ -86,7 +95,9 @@ def test_live_compiled_corpus_validator_accepts_promoted_manifest() -> None:
     assert validation.issues == ()
 
 
-def test_live_check_sdfdag_cli_emits_parseable_json_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_check_sdfdag_cli_emits_parseable_json_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo_root = _repo_root()
     live_root = repo_root / "artifacts" / "gmdag" / "corpus"
     manifest_path = live_root / "gmdag_manifest.json"
@@ -112,7 +123,9 @@ def test_live_check_sdfdag_cli_emits_parseable_json_summary(monkeypatch: pytest.
     assert payload["issues"] == []
 
 
-def test_live_bench_sdfdag_cli_emits_parseable_json_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_bench_sdfdag_cli_emits_parseable_json_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo_root = _repo_root()
     live_root = repo_root / "artifacts" / "gmdag" / "corpus"
     manifest_path = live_root / "gmdag_manifest.json"
@@ -221,7 +234,9 @@ def test_live_sdfdag_step_uses_fixed_horizon_saturation_contract() -> None:
         assert result.env_id == 0
         assert observation.matrix_shape == observation.depth[0].shape
         assert observation.valid_mask[0].shape == observation.depth[0].shape
-        assert invalid_mask.any(), "Expected at least one ray to saturate beyond the fixed configured horizon"
+        assert invalid_mask.any(), (
+            "Expected at least one ray to saturate beyond the fixed configured horizon"
+        )
         assert np.allclose(observation.depth[0][invalid_mask], 1.0)
         assert np.all(observation.depth[0] >= 0.0)
         assert np.all(observation.depth[0] <= 1.0)

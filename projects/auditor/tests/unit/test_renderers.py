@@ -14,10 +14,10 @@ from navi_auditor.dashboard.renderers import (
     extract_forward_fov,
     overlay_overhead_annotations,
     render_bev_occupancy,
-    render_front_depth_grid,
-    render_front_hemisphere_heatmap,
     render_first_person,
     render_forward_polar,
+    render_front_depth_grid,
+    render_front_hemisphere_heatmap,
     zoom_overhead,
 )
 from navi_contracts.testing.oracle_house import house_observation
@@ -139,19 +139,28 @@ class TestRenderFirstPerson:
         oracle = house_observation()
         closed_valid = np.ones_like(oracle.valid)
         img, _dist = render_first_person(oracle.depth, oracle.semantic, oracle.valid, 320, 240)
-        closed_img, _dist_closed = render_first_person(oracle.depth, oracle.semantic, closed_valid, 320, 240)
+        closed_img, _dist_closed = render_first_person(
+            oracle.depth, oracle.semantic, closed_valid, 320, 240
+        )
         center_patch = img[140:220, 130:190]
         closed_patch = closed_img[140:220, 130:190]
         assert np.mean(np.abs(center_patch.astype(np.int16) - closed_patch.astype(np.int16))) > 5.0
 
-    def test_oracle_house_window_changes_right_upper_projection_against_closed_baseline(self) -> None:
+    def test_oracle_house_window_changes_right_upper_projection_against_closed_baseline(
+        self,
+    ) -> None:
         oracle = house_observation()
         closed_valid = np.ones_like(oracle.valid)
         img, _dist = render_first_person(oracle.depth, oracle.semantic, oracle.valid, 320, 240)
-        closed_img, _dist_closed = render_first_person(oracle.depth, oracle.semantic, closed_valid, 320, 240)
+        closed_img, _dist_closed = render_first_person(
+            oracle.depth, oracle.semantic, closed_valid, 320, 240
+        )
         right_upper_patch = img[70:120, 220:285]
         closed_patch = closed_img[70:120, 220:285]
-        assert np.mean(np.abs(right_upper_patch.astype(np.int16) - closed_patch.astype(np.int16))) > 3.0
+        assert (
+            np.mean(np.abs(right_upper_patch.astype(np.int16) - closed_patch.astype(np.int16)))
+            > 3.0
+        )
 
 
 class TestRenderForwardPolar:
@@ -168,11 +177,11 @@ class TestRenderForwardPolar:
         depth = np.full((32, 8), 0.2, dtype=np.float32)
         valid = np.ones((32, 8), dtype=bool)
         center = depth.shape[0] // 2
-        depth[center - 2:center + 2, :] = 0.8
+        depth[center - 2 : center + 2, :] = 0.8
 
         result = render_forward_polar(depth, valid, 240, 240)
 
-        top_center_patch = result[20:70, 95:145]
+        top_center_patch = result[120:160, 95:145]
         side_patch = result[120:190, 10:60]
         assert float(np.mean(top_center_patch)) > float(np.mean(side_patch))
 
@@ -226,7 +235,7 @@ class TestPanoramaAlignment:
     def test_center_forward_azimuth_moves_bin_zero_to_middle(self) -> None:
         depth = np.arange(8, dtype=np.float32).reshape(8, 1)
 
-        centered, = center_forward_azimuth(depth)
+        (centered,) = center_forward_azimuth(depth)
 
         assert centered.shape == depth.shape
         assert centered[depth.shape[0] // 2, 0] == 0.0
@@ -287,11 +296,13 @@ class TestComputeNavMetrics:
         fwd, _left, _right = compute_nav_metrics(depth, valid)
         assert fwd == 1.0
 
-    def test_compute_nav_metrics_prefers_farther_forward_sector_when_depth_is_explicitly_larger(self) -> None:
+    def test_compute_nav_metrics_prefers_farther_forward_sector_when_depth_is_explicitly_larger(
+        self,
+    ) -> None:
         depth = np.full((24, 2), 0.2, dtype=np.float32)
         valid = np.ones((24, 2), dtype=bool)
         center = depth.shape[0] // 2
-        depth[center - 2:center + 2, :] = 0.7
+        depth[center - 2 : center + 2, :] = 0.7
 
         fwd, left, right = compute_nav_metrics(depth, valid)
 

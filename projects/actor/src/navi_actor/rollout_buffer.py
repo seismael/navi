@@ -39,7 +39,9 @@ class MultiTrajectoryBuffer:
         capacity: int | None = None,
     ) -> None:
         if capacity is None:
-            raise ValueError("MultiTrajectoryBuffer requires capacity on the canonical batched path")
+            raise ValueError(
+                "MultiTrajectoryBuffer requires capacity on the canonical batched path"
+            )
         self._capacity = capacity
         self._n_actors = n_actors
         self._gamma = gamma
@@ -148,7 +150,9 @@ class MultiTrajectoryBuffer:
                 device=device,
             )
 
-    def _coerce_actor_indices(self, actor_indices: Tensor | None, batch_size: int, *, device: torch.device) -> Tensor:
+    def _coerce_actor_indices(
+        self, actor_indices: Tensor | None, batch_size: int, *, device: torch.device
+    ) -> Tensor:
         if actor_indices is None:
             if batch_size != self._n_actors:
                 raise RuntimeError(
@@ -182,7 +186,7 @@ class MultiTrajectoryBuffer:
         aux_tensors: Tensor | None,
     ) -> None:
         device = observations.device
-        tensor_fields = (
+        tensor_fields: tuple[tuple[str, Tensor], ...] = (
             ("actions", actions),
             ("log_probs", log_probs),
             ("values", values),
@@ -262,7 +266,9 @@ class MultiTrajectoryBuffer:
         assert self._batch_truncateds is not None
         assert self._batched_actor_step_counts is not None
 
-        actor_indices_t = self._coerce_actor_indices(actor_indices, observations.shape[0], device=observations.device)
+        actor_indices_t = self._coerce_actor_indices(
+            actor_indices, observations.shape[0], device=observations.device
+        )
         step_indices = self._batched_actor_step_counts.index_select(0, actor_indices_t)
         if bool((step_indices >= self._capacity).any()):
             raise RuntimeError("MultiTrajectoryBuffer capacity exceeded")
@@ -302,7 +308,9 @@ class MultiTrajectoryBuffer:
         truncated_flags = self._batch_truncateds[:, :rollout_len].to(device=device)
         advantages = torch.zeros_like(rewards)
         last_gae = torch.zeros((self._n_actors,), dtype=torch.float32, device=device)
-        prev_value = last_values.detach().to(device=device, dtype=torch.float32).reshape(self._n_actors)
+        prev_value = (
+            last_values.detach().to(device=device, dtype=torch.float32).reshape(self._n_actors)
+        )
         continue_mask = (~done_flags & ~truncated_flags).to(dtype=torch.float32)
         truncation_mask = (truncated_flags & ~done_flags).to(dtype=torch.float32)
         done_mask = done_flags.to(dtype=torch.float32)
@@ -378,7 +386,11 @@ class MultiTrajectoryBuffer:
         self._all_returns = self._batch_returns[:, :rollout_len]
         self._all_advantages_normalized = _normalize_advantages_once(self._all_advantages)
         self._all_dones = self._batch_dones[:, :rollout_len]
-        self._all_aux = self._batch_aux[:, :rollout_len] if self._has_aux_for_rollout and self._batch_aux is not None else None
+        self._all_aux = (
+            self._batch_aux[:, :rollout_len]
+            if self._has_aux_for_rollout and self._batch_aux is not None
+            else None
+        )
         self._cache_valid = True
 
     def _get_sequence_views(self, seq_len: int) -> dict[str, Tensor]:
@@ -405,7 +417,9 @@ class MultiTrajectoryBuffer:
             return self._sequence_views
 
         sequence_views: dict[str, Tensor] = {
-            "obs": self._all_obs[:, :usable_steps].reshape(total_seqs, seq_len, *self._all_obs.shape[2:]),
+            "obs": self._all_obs[:, :usable_steps].reshape(
+                total_seqs, seq_len, *self._all_obs.shape[2:]
+            ),
             "acts": self._all_actions[:, :usable_steps].reshape(total_seqs, seq_len, -1),
             "lps": self._all_log_probs[:, :usable_steps].reshape(total_seqs, seq_len),
             "vals": self._all_values[:, :usable_steps].reshape(total_seqs, seq_len),
@@ -414,7 +428,9 @@ class MultiTrajectoryBuffer:
         }
 
         if self._all_aux is not None:
-            sequence_views["aux"] = self._all_aux[:, :usable_steps].reshape(total_seqs, seq_len, -1)
+            sequence_views["aux"] = self._all_aux[:, :usable_steps].reshape(
+                total_seqs, seq_len, -1
+            )
 
         self._sequence_view_seq_len = seq_len
         self._sequence_views = sequence_views
@@ -600,15 +616,31 @@ class TrajectoryBuffer:
         if self._capacity is None:
             return
         if self._t_obs is None:
-            self._t_obs = torch.empty((self._capacity, *observation.shape), dtype=observation.dtype, device=observation.device)
-            self._t_actions = torch.empty((self._capacity, *action.shape), dtype=action.dtype, device=action.device)
-            self._t_log_probs = torch.empty((self._capacity,), dtype=log_prob.dtype, device=log_prob.device)
+            self._t_obs = torch.empty(
+                (self._capacity, *observation.shape),
+                dtype=observation.dtype,
+                device=observation.device,
+            )
+            self._t_actions = torch.empty(
+                (self._capacity, *action.shape), dtype=action.dtype, device=action.device
+            )
+            self._t_log_probs = torch.empty(
+                (self._capacity,), dtype=log_prob.dtype, device=log_prob.device
+            )
             self._t_values = torch.empty((self._capacity,), dtype=value.dtype, device=value.device)
-            self._t_rewards = torch.empty((self._capacity,), dtype=reward.dtype, device=reward.device)
+            self._t_rewards = torch.empty(
+                (self._capacity,), dtype=reward.dtype, device=reward.device
+            )
             self._t_dones = torch.empty((self._capacity,), dtype=done.dtype, device=done.device)
-            self._t_truncated = torch.empty((self._capacity,), dtype=truncated.dtype, device=truncated.device)
+            self._t_truncated = torch.empty(
+                (self._capacity,), dtype=truncated.dtype, device=truncated.device
+            )
             if aux_tensor is not None:
-                self._t_aux = torch.empty((self._capacity, *aux_tensor.shape), dtype=aux_tensor.dtype, device=aux_tensor.device)
+                self._t_aux = torch.empty(
+                    (self._capacity, *aux_tensor.shape),
+                    dtype=aux_tensor.dtype,
+                    device=aux_tensor.device,
+                )
 
     def append_fields(
         self,
@@ -672,7 +704,11 @@ class TrajectoryBuffer:
         self._t_truncated[idx].copy_(truncated.reshape(()))
         if aux_tensor is not None:
             if self._t_aux is None:
-                self._t_aux = torch.empty((self._capacity, *aux_tensor.shape), dtype=aux_tensor.dtype, device=aux_tensor.device)
+                self._t_aux = torch.empty(
+                    (self._capacity, *aux_tensor.shape),
+                    dtype=aux_tensor.dtype,
+                    device=aux_tensor.device,
+                )
             self._t_aux[idx].copy_(aux_tensor)
         self._hidden_states.append(hidden_state)
         self._size += 1
@@ -688,11 +724,21 @@ class TrajectoryBuffer:
             self.append_fields(
                 observation=transition.observation,
                 action=transition.action,
-                log_prob=torch.tensor(transition.log_prob, dtype=torch.float32, device=transition.action.device),
-                value=torch.tensor(transition.value, dtype=torch.float32, device=transition.action.device),
-                reward=torch.tensor(transition.reward, dtype=torch.float32, device=transition.action.device),
-                done=torch.tensor(transition.done, dtype=torch.bool, device=transition.action.device),
-                truncated=torch.tensor(transition.truncated, dtype=torch.bool, device=transition.action.device),
+                log_prob=torch.tensor(
+                    transition.log_prob, dtype=torch.float32, device=transition.action.device
+                ),
+                value=torch.tensor(
+                    transition.value, dtype=torch.float32, device=transition.action.device
+                ),
+                reward=torch.tensor(
+                    transition.reward, dtype=torch.float32, device=transition.action.device
+                ),
+                done=torch.tensor(
+                    transition.done, dtype=torch.bool, device=transition.action.device
+                ),
+                truncated=torch.tensor(
+                    transition.truncated, dtype=torch.bool, device=transition.action.device
+                ),
                 hidden_state=transition.hidden_state,
                 aux_tensor=transition.aux_tensor,
             )
@@ -867,18 +913,19 @@ class TrajectoryBuffer:
             [tr.action for tr in self._transitions],
         )
         self._t_log_probs = torch.tensor(
-            [tr.log_prob for tr in self._transitions], dtype=torch.float32,
+            [tr.log_prob for tr in self._transitions],
+            dtype=torch.float32,
         )
         self._t_values = torch.tensor(
-            [tr.value for tr in self._transitions], dtype=torch.float32,
+            [tr.value for tr in self._transitions],
+            dtype=torch.float32,
         )
         self._t_dones = torch.tensor(
-            [tr.done for tr in self._transitions], dtype=torch.bool,
+            [tr.done for tr in self._transitions],
+            dtype=torch.bool,
         )
         self._t_aux = (
-            torch.stack([
-                cast("Tensor", tr.aux_tensor) for tr in self._transitions
-            ])
+            torch.stack([cast("Tensor", tr.aux_tensor) for tr in self._transitions])
             if self._transitions[0].aux_tensor is not None
             else None
         )
@@ -901,7 +948,9 @@ class TrajectoryBuffer:
             return
 
         value_device = self.value_at(0).device
-        bootstrap = torch.as_tensor(last_value, dtype=torch.float32, device=value_device).reshape(())
+        bootstrap = torch.as_tensor(last_value, dtype=torch.float32, device=value_device).reshape(
+            ()
+        )
         advantages = torch.zeros(n, dtype=torch.float32, device=value_device)
         last_gae = torch.zeros((), dtype=torch.float32, device=value_device)
         if self._uses_tensor_storage():
@@ -1021,7 +1070,9 @@ class TrajectoryBuffer:
             # Sequential chunks for BPTT
             starts = list(range(0, n - seq_len + 1, seq_len))
             perm = torch.randperm(len(starts), device=obs.device)
-            start_tensor = torch.arange(0, n - seq_len + 1, seq_len, device=obs.device, dtype=torch.long)
+            start_tensor = torch.arange(
+                0, n - seq_len + 1, seq_len, device=obs.device, dtype=torch.long
+            )
             offsets = torch.arange(seq_len, device=obs.device, dtype=torch.long)
             for i in range(0, len(perm), max(1, batch_size // seq_len)):
                 seq_indices = perm[i : i + max(1, batch_size // seq_len)]

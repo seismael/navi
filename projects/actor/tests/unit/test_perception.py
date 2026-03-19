@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as functional
 
 from navi_actor.perception import RayViTEncoder
 
@@ -54,14 +54,14 @@ def test_patch_projection_matches_linearized_patch_projection() -> None:
     pad_az = (p - x.shape[2] % p) % p
     pad_el = (p - x.shape[3] % p) % p
     if pad_az > 0 or pad_el > 0:
-        padded = F.pad(x, (0, pad_el, 0, pad_az))
+        padded = functional.pad(x, (0, pad_el, 0, pad_az))
     n_az = padded.shape[2] // p
     n_el = padded.shape[3] // p
     legacy_patches = padded.view(x.shape[0], 3, n_az, p, n_el, p)
     legacy_patches = legacy_patches.permute(0, 2, 4, 1, 3, 5).reshape(x.shape[0], n_az * n_el, -1)
 
     conv_tokens = enc.patch_proj(padded).flatten(2).transpose(1, 2)
-    linear_tokens = F.linear(
+    linear_tokens = functional.linear(
         legacy_patches,
         enc.patch_proj.weight.reshape(enc.hidden_dim, -1),
         enc.patch_proj.bias,

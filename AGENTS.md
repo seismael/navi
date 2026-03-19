@@ -57,15 +57,35 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 ### 2.4 Logging Architecture Standard
 - **Unified Logging:** All projects MUST use the standardized `setup_logging` utility provided by `navi-contracts`.
 - **Cyclic Logs:** File logging MUST be cyclic (RotatingFileHandler) with a strict cap to prevent disk explosion (e.g., max 1MB per file, max 10 backups).
-- **Format:** Logs must use a professional, high-quality structure: `[%(asctime)s] [%(levelname)-8s] [%(name)s:%(lineno)d] - %(message)s`.
+- **Run Identity:** Every canonical process and wrapper MUST stamp one shared `run_id` into logs, metrics, manifests, summaries, captures, and default checkpoint roots so whole-run review is correlation-safe.
+- **Format:** Logs must use a professional, high-quality structure: `[%(asctime)s] [%(levelname)-8s] [run=%(run_id)s] [%(name)s:%(lineno)d] - %(message)s`.
+- **Stable Plus Run-Scoped Logs:** Canonical services MUST keep the stable top-level `logs/` surface for operator tailing while also mirroring process logs into the active run root under `artifacts/runs/<run_id>/logs/` or another explicitly selected canonical run root.
+- **Manifest Rule:** Every CLI or wrapper entrypoint MUST write one machine-readable manifest under the run root describing the process, command surface, key parameters, and output roots.
+- **Metrics Rule:** Canonical training, qualification, nightly, and benchmark surfaces MUST emit append-only machine-readable metrics or summary artifacts under the run root `metrics/` or `reports/` directories in addition to human-readable logs.
 - **Enforcement:** Each project's CLI entry point (`cli.py`) MUST invoke this setup immediately upon startup.
+
+### 2.4.4 Artifact Governance Standard
+- **Canonical Run Root:** Default generated operational outputs MUST live under one run root, normally `artifacts/runs/<run_id>/`, unless a workflow intentionally uses a more specific governed root such as `artifacts/nightly/<run_id>/`.
+- **Structured Layout:** Canonical run roots MUST separate `logs/`, `metrics/`, `manifests/`, `reports/`, `captures/`, and `checkpoints/` so operators do not need to infer file meaning from ad hoc names.
+- **Wrapper Ownership:** PowerShell orchestration surfaces in `scripts/` MUST create the run context before launching child processes and MUST pass the shared run environment through to descendants.
+- **Retention Rule:** Wrapper-owned cleanup MAY aggressively remove stale generated captures, detached validation leftovers, benchmark scratch outputs, and other transient artifacts using explicit retention windows, but MUST NOT delete the active run root.
+- **Review Rule:** Major operational flows MUST leave enough machine-readable evidence to reconstruct what ran, with which parameters, on which surfaces, and where the primary logs, metrics, and checkpoints were written.
+- **Git Hygiene Rule:** Generated logs, run roots, checkpoints, captures, benchmark outputs, and other local operational artifacts MUST be ignored in `.gitignore` with explicit path coverage rather than relying only on loose wildcard patterns.
+
+### 2.4.5 Training Measurement Standard
+- **Coarse Phase Metrics Required:** Canonical training entrypoints and wrappers MUST emit append-only machine-readable phase metrics for corpus preparation, trainer construction, trainer start/stop, rollout heartbeat, PPO update, checkpoint load/save, and final summary boundaries.
+- **Resource Snapshot Rule:** Canonical training metrics MUST capture low-overhead process resource snapshots at those coarse boundaries, including CPU-process memory and thread state plus CUDA allocator/free-memory state when the trainer is running on GPU.
+- **Wrapper Measurement Rule:** Canonical wrapper surfaces in `scripts/` MUST record orchestration costs such as cleanup, child-process launch, readiness wait, and observed exit completion under the active run root metrics directory.
+- **Control Surface Rule:** Measurement enablement and verbosity MUST be controlled from the canonical training config, environment variables, or the existing training CLI surface. Standalone monitor-only launcher scripts are not canonical control surfaces.
+- **No Hot-Path Polling Rule:** High-frequency per-step resource polling, shelling out for GPU stats inside the rollout hot path, or any measurement pattern that materially perturbs throughput is forbidden on the canonical training surface.
+- **Log Hygiene Rule:** Detailed measurement belongs in run-scoped metrics artifacts, not repetitive human log lines. Human-readable logs MAY summarize coarse measurements at the existing logging cadence but MUST NOT expand into per-step stat spam.
 
 ### 2.4.1 Nightly Validation Standard
 - **Single Canonical Nightly Surface:** End-to-end overnight validation MUST run from one orchestration entrypoint in `scripts/` rather than a loose manual checklist.
 - **Hard Gates First:** CUDA/runtime preflight, focused regression suites, and bounded canonical qualification MUST complete successfully before the overnight soak begins.
 - **Shared-Model Proof:** The nightly flow MUST prove that canonical multi-actor training can checkpoint, resume, and continue emitting fresh checkpoints from one shared model state.
 - **Soft Warning Policy:** Throughput drift, attach instability, and other non-fatal regressions MAY emit warnings, but hard failures must stop the nightly and produce machine-readable artifacts.
-- **Artifact Rule:** Every nightly run MUST emit one timestamped artifact root containing raw phase outputs plus a top-level summary JSON for morning review.
+- **Artifact Rule:** Every nightly run MUST emit one governed run root under `artifacts/nightly/<run_id>/` containing raw phase outputs plus a top-level machine-readable summary for morning review.
 
 ### 2.4.3 Observation-Resolution Benchmark Standard
 - **Split Benchmark Rule:** Observation-resolution changes MUST be benchmarked on both the environment-only `bench-sdfdag` surface and the end-to-end canonical trainer surface. One measurement does not stand in for the other.
@@ -135,7 +155,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - The SDF/DAG backend MUST expose one canonical rolling perf snapshot surface consumed by both runtime telemetry and direct benchmarking; duplicate timing paths are forbidden.
 - `uv run navi-environment bench-sdfdag --gmdag-file ...` is the canonical environment-layer throughput command for the compiled path.
 - Any TSDF-derived runtime changes MUST be benchmark-gated. The first accepted canonical step is aligning the CUDA sphere-tracing horizon with the configured environment horizon before any `.gmdag` format or storage-layout redesign work.
-- **Benchmark Gate:** The SDF/DAG path is accepted only if it meets or exceeds current fleet rollout throughput and materially advances the repository toward the `>= 60 SPS` 4-actor floor.
+- **Benchmark Gate:** The SDF/DAG path is accepted only if it meets or exceeds current fleet rollout throughput and materially advances the repository toward the `1K SPS` theoretical limit on current hardware, pacing toward the ultimate `10K SPS` distributed advanced-hardware target.
 
 ### 3.1.1 Low-Level Tensor Contract Standard
 - Python-to-CUDA boundaries MUST validate device, dtype, rank, shape, and contiguity before launching raw kernels.
@@ -151,11 +171,11 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Observation-resolution documentation and performance conclusions MUST account for the real RayViT token path: with the canonical `patch_size=8`, token count scales as `(Az / 8) * (El / 8)` and full self-attention cost grows roughly with the square of that count.
 
 ### 3.3 Zero-Stall Telemetry
-- High-frequency per-actor per-step telemetry is forbidden during training as it bottlenecks the CPU rollout loop.
-- Use coarse-grained metrics (every 100 steps) for performance tracking.
-- Default mode detection/reporting should rely on low-volume `actor.training.*` update/perf/episode telemetry.
-- Environment-side compiled-path perf telemetry MUST remain coarse (`environment.sdfdag.perf`) and must not emit more frequently than the existing 100-step cadence.
-- Passive dashboard observation publication for selector-visible actors MUST remain low-volume and droppable, but the default live cadence must stay visibly responsive at roughly `5-10 Hz` rather than a stale multi-second feel.
+- **Decoupled Two-Tier Telemetry Structure:** Performance and observability must be strictly separated.
+  - **Tier 1 (Heavy Math):** Episode summaries, collision counts, max/min reward shapes, and complex stats MUST be deferred to the PPO Update block (Epoch Boundary). Aggregations MUST happen via bulk device-side tensor mapping to avoid step-by-step CPU disruption.
+  - **Tier 2 (Visual Heartbeat):** Live dashboard frame delivery MUST remain independent of step math, pushing solitary `(1, 256, 48)` distance tensors to an async stream exactly 5-10 times a second using a clock, avoiding synchronization with the specific mathematical rollouts.
+- High-frequency per-actor per-step tensor-to-scalar extraction logic in the hot loop is functionally forbidden as it triggers mandatory CUDA/CPU blocking queues.
+- Environment-side compiled-path perf telemetry MUST remain coarse (`environment.sdfdag.perf`) and must not emit more frequently than the existing cadence.
 
 ### 3.3.1 Actor Hot-Path Discipline
 - Once SDF/DAG acceleration makes the environment subdominant, actor-side rollout code becomes the critical path and must be treated like systems code.
@@ -237,7 +257,8 @@ Every instruction MUST follow this exact sequence. Implementation without alignm
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| **Rollout Throughput (4 Actors)** | ≥ 60 SPS | ACHIEVED (via batched SDF/DAG execution) |
+| **Rollout Throughput Limit (Current Hardware)** | ~1,000 SPS | IN PROGRESS (Bottleneck resolution ongoing) |
+| **Rollout Throughput Target (Advanced Hardware)** | 10,000 SPS | PLANNED (Architectural target) |
 | **Inference Latency (CPU)** | ≤ 15ms/actor | ACHIEVED (via ViT Caching) |
 | **Environment Latency (4 Actors)** | ≤ 25ms | ACHIEVED (via compiled SDF/DAG batching) |
 

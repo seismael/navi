@@ -26,6 +26,7 @@ def _shape_batch_impl(
     loop_penalty_coeff: float,
     loop_threshold: float,
 ) -> Tensor:
+    dones = dones.to(dtype=torch.bool)
     col_penalties = torch.where(
         dones,
         torch.full_like(raw_rewards, collision_penalty),
@@ -112,9 +113,7 @@ class RewardShaper:
                 try:
                     capability = torch.cuda.get_device_capability()
                     if tuple(int(part) for part in capability) < (7, 0):
-                        _compile_reason = (
-                            f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
-                        )
+                        _compile_reason = f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
                     else:
                         from torch._inductor.cpp_builder import get_cpp_compiler
 
@@ -136,9 +135,14 @@ class RewardShaper:
                             )
                             compiled = True
                             self._torch_compile_enabled = True
-                            _LOGGER.info("RewardShaper: torch.compile enabled for tensor-only batch shaping path")
+                            _LOGGER.info(
+                                "RewardShaper: torch.compile enabled for tensor-only batch shaping path"
+                            )
                         except Exception as exc:
-                            _LOGGER.info("RewardShaper: torch.compile unavailable (%s), trying torch.jit.script", exc)
+                            _LOGGER.info(
+                                "RewardShaper: torch.compile unavailable (%s), trying torch.jit.script",
+                                exc,
+                            )
                 else:
                     _LOGGER.info("RewardShaper: skipping torch.compile (%s)", _compile_reason)
                 # 2. Try torch.jit.script (works on all CUDA SMs)
@@ -146,9 +150,13 @@ class RewardShaper:
                     try:
                         self._shape_batch_fn = torch.jit.script(_shape_batch_impl)
                         self._torch_compile_enabled = True
-                        _LOGGER.info("RewardShaper: torch.jit.script enabled for tensor-only batch shaping path")
+                        _LOGGER.info(
+                            "RewardShaper: torch.jit.script enabled for tensor-only batch shaping path"
+                        )
                     except Exception as exc:
-                        _LOGGER.warning("RewardShaper: torch.jit.script failed (%s); using eager path", exc)
+                        _LOGGER.warning(
+                            "RewardShaper: torch.jit.script failed (%s); using eager path", exc
+                        )
 
     @property
     def torch_compile_requested(self) -> bool:
@@ -250,6 +258,7 @@ class RewardShaper:
 
         """
         del angular_velocities
+        dones = dones.to(dtype=torch.bool)
         total: Tensor = self._shape_batch_fn(
             raw_rewards,
             dones,

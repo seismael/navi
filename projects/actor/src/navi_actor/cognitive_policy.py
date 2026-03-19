@@ -135,9 +135,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         try:
             capability = torch.cuda.get_device_capability()
             if tuple(int(part) for part in capability) < (7, 0):
-                _compile_reason = (
-                    f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
-                )
+                _compile_reason = f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
             else:
                 # Validate that inductor can find a C/C++ compiler before wrapping.
                 from torch._inductor.cpp_builder import get_cpp_compiler
@@ -162,7 +160,9 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             except Exception:
                 _log.info("RayViTEncoder: torch.compile wrapping failed, using eager mode")
         else:
-            _log.info("RayViTEncoder: skipping torch.compile (%s), using eager mode", _compile_reason)
+            _log.info(
+                "RayViTEncoder: skipping torch.compile (%s), using eager mode", _compile_reason
+            )
 
         self.temporal_core = _build_temporal_core(
             temporal_core=temporal_core,
@@ -207,11 +207,13 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
             semantic = semantic[0]
             valid = valid[0]
 
-        stacked = np.stack([
-            depth.astype(np.float32),
-            semantic.astype(np.float32),
-            valid.astype(np.float32),
-        ])
+        stacked = np.stack(
+            [
+                depth.astype(np.float32),
+                semantic.astype(np.float32),
+                valid.astype(np.float32),
+            ]
+        )
         return torch.from_numpy(stacked).unsqueeze(0).to(self.device)
 
     def forward(
@@ -300,11 +302,17 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         use_cuda_events: bool,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor, PolicyEvalStageMetrics]:
         """Evaluate actions and return per-stage timings for diagnostic attribution."""
-        with _policy_stage_timer(device=obs_tensor.device, use_cuda_events=use_cuda_events) as encode_timing:
+        with _policy_stage_timer(
+            device=obs_tensor.device, use_cuda_events=use_cuda_events
+        ) as encode_timing:
             z_t = self.encoder(obs_tensor)
-        with _policy_stage_timer(device=obs_tensor.device, use_cuda_events=use_cuda_events) as temporal_timing:
+        with _policy_stage_timer(
+            device=obs_tensor.device, use_cuda_events=use_cuda_events
+        ) as temporal_timing:
             features, new_hidden = self.temporal_core.forward_step(z_t, hidden, aux_tensor)
-        with _policy_stage_timer(device=obs_tensor.device, use_cuda_events=use_cuda_events) as heads_timing:
+        with _policy_stage_timer(
+            device=obs_tensor.device, use_cuda_events=use_cuda_events
+        ) as heads_timing:
             log_probs = self.heads.log_prob(features, actions)
             # Stop-gradient: critic sees detached features so value-loss
             # gradients never flow back through the shared backbone.
@@ -370,15 +378,23 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         """Evaluate a full PPO sequence minibatch and return per-stage timings."""
         batch, seq_len = obs_seq.shape[:2]
         flat_obs = obs_seq.reshape(batch * seq_len, *obs_seq.shape[2:])
-        with _policy_stage_timer(device=obs_seq.device, use_cuda_events=use_cuda_events) as encode_timing:
+        with _policy_stage_timer(
+            device=obs_seq.device, use_cuda_events=use_cuda_events
+        ) as encode_timing:
             z_flat = self.encoder(flat_obs)
             z_seq = z_flat.reshape(batch, seq_len, -1)
-        with _policy_stage_timer(device=obs_seq.device, use_cuda_events=use_cuda_events) as temporal_timing:
+        with _policy_stage_timer(
+            device=obs_seq.device, use_cuda_events=use_cuda_events
+        ) as temporal_timing:
             features_seq, new_hidden = self.temporal_core.forward(
-                z_seq, hidden, aux_tensor=aux_seq,
+                z_seq,
+                hidden,
+                aux_tensor=aux_seq,
             )
             flat_features = features_seq.reshape(batch * seq_len, -1)
-        with _policy_stage_timer(device=obs_seq.device, use_cuda_events=use_cuda_events) as heads_timing:
+        with _policy_stage_timer(
+            device=obs_seq.device, use_cuda_events=use_cuda_events
+        ) as heads_timing:
             flat_actions = actions_seq.reshape(batch * seq_len, -1)
             log_probs = self.heads.log_prob(flat_features, flat_actions)
             # Stop-gradient: critic sees detached features so value-loss

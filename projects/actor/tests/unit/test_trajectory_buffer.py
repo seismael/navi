@@ -14,7 +14,8 @@ def _assert_same_device(actual: torch.device, expected: torch.device) -> None:
     """Treat CUDA default-device aliases as equivalent during device placement checks."""
     assert actual.type == expected.type
     if actual.type == "cuda":
-        assert (actual.index in (None, 0)) and (expected.index in (None, 0))
+        assert actual.index in (None, 0)
+        assert expected.index in (None, 0)
     else:
         assert actual.index == expected.index
 
@@ -267,9 +268,7 @@ def test_truncation_still_cuts_gae_trace() -> None:
     # the continuous case, confirming the trace was cut
     adv_cont_0 = buf_cont._advantages[0].item()
     adv_trunc_0 = buf_trunc._advantages[0].item()
-    assert adv_cont_0 != adv_trunc_0, (
-        "GAE trace should be cut at truncation boundary"
-    )
+    assert adv_cont_0 != adv_trunc_0, "GAE trace should be cut at truncation boundary"
 
 
 def test_preallocated_tensor_storage_matches_standard_path() -> None:
@@ -378,7 +377,9 @@ def test_multi_trajectory_append_batch_keeps_batched_storage_on_input_device() -
     _assert_same_device(buffer._batch_aux.device, device)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA to exercise mixed-device guard")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires CUDA to exercise mixed-device guard"
+)
 def test_multi_trajectory_append_batch_rejects_mixed_device_rollout_tensors() -> None:
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 

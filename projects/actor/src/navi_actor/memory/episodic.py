@@ -56,7 +56,10 @@ class EpisodicMemory:
         """Query one embedding via the non-hot-path NumPy wrapper."""
         tensor = torch.from_numpy(np.asarray(embedding, dtype=np.float32)).reshape(1, -1)
         similarities, indices = self._query_batch_indices(tensor)
-        return self._format_query_result(float(similarities[0].detach().to(device="cpu")), int(indices[0].detach().to(device="cpu")))
+        return self._format_query_result(
+            float(similarities[0].detach().to(device="cpu")),
+            int(indices[0].detach().to(device="cpu")),
+        )
 
     def add_batch(self, embeddings: np.ndarray[Any, Any]) -> None:
         """Add a batch of embeddings via the non-hot-path NumPy wrapper."""
@@ -120,7 +123,9 @@ class EpisodicMemory:
         loops = valid & (similarities >= self.similarity_threshold)
         return similarities, loops
 
-    def query_normalized_batch_tensor(self, normalized_embeddings: Tensor) -> tuple[Tensor, Tensor]:
+    def query_normalized_batch_tensor(
+        self, normalized_embeddings: Tensor
+    ) -> tuple[Tensor, Tensor]:
         """Query a pre-normalized embedding batch without recomputing norms."""
         similarities, indices = self._query_prepared_batch_indices(normalized_embeddings)
         valid = indices >= 0
@@ -135,7 +140,9 @@ class EpisodicMemory:
         vecs = self.normalize_batch_tensor(embeddings)
         return self._query_prepared_batch_indices(vecs)
 
-    def _query_prepared_batch_indices(self, normalized_embeddings: Tensor) -> tuple[Tensor, Tensor]:
+    def _query_prepared_batch_indices(
+        self, normalized_embeddings: Tensor
+    ) -> tuple[Tensor, Tensor]:
         vecs = self._coerce_prepared_tensor(normalized_embeddings)
         if vecs.numel() == 0:
             empty = torch.zeros((0,), dtype=torch.float32, device=vecs.device)
@@ -150,7 +157,9 @@ class EpisodicMemory:
         storage = self._ensure_storage(vecs.device)
         queries = vecs.to(device=storage.device, dtype=torch.float32)
         searchable_size = self._size - self.exclusion_window
-        best_sims = torch.full((queries.shape[0],), -1.0, dtype=torch.float32, device=storage.device)
+        best_sims = torch.full(
+            (queries.shape[0],), -1.0, dtype=torch.float32, device=storage.device
+        )
         best_indices = torch.full((queries.shape[0],), -1, dtype=torch.long, device=storage.device)
 
         for start, end in self._searchable_segments(searchable_size):
@@ -172,9 +181,7 @@ class EpisodicMemory:
         if vecs.ndim == 1:
             vecs = vecs.unsqueeze(0)
         if vecs.shape[-1] != self.embedding_dim:
-            raise ValueError(
-                f"Expected embedding dim {self.embedding_dim}, got {vecs.shape[-1]}"
-            )
+            raise ValueError(f"Expected embedding dim {self.embedding_dim}, got {vecs.shape[-1]}")
         norms = torch.linalg.norm(vecs, dim=1, keepdim=True)
         return vecs / torch.clamp(norms, min=1e-8)
 
@@ -183,9 +190,7 @@ class EpisodicMemory:
         if vecs.ndim == 1:
             vecs = vecs.unsqueeze(0)
         if vecs.shape[-1] != self.embedding_dim:
-            raise ValueError(
-                f"Expected embedding dim {self.embedding_dim}, got {vecs.shape[-1]}"
-            )
+            raise ValueError(f"Expected embedding dim {self.embedding_dim}, got {vecs.shape[-1]}")
         return vecs
 
     def _ensure_storage(self, device: torch.device) -> Tensor:

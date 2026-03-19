@@ -66,7 +66,9 @@ def extract_spherical_features(obs: DistanceMatrix) -> np.ndarray:
 
     # Near-object detection: fraction of bins with depth < 0.15
     near_threshold = 0.15
-    near_fraction = float(np.sum(safe_depth[valid] < near_threshold)) / max(1.0, float(np.sum(valid)))
+    near_fraction = float(np.sum(safe_depth[valid] < near_threshold)) / max(
+        1.0, float(np.sum(valid))
+    )
 
     feats = np.concatenate(
         [

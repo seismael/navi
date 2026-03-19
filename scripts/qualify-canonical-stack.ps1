@@ -644,22 +644,30 @@ function Resolve-RepresentativeCompiledAsset {
 }
 
 $repoRoot = Get-RepoRoot
+$observabilityModule = Join-Path $repoRoot "tools\Navi.Observability.psm1"
+Import-Module $observabilityModule -Force
+$cleanupSummary = Invoke-NaviGeneratedCleanup -RepoRoot $repoRoot
 $powerShellExe = Get-PowerShellExecutable
 $script:StructuredSurfaceRunnerPythonByModule = @{
     default = Join-Path $repoRoot "projects\environment\.venv\Scripts\python.exe"
     "navi_auditor.cli" = Join-Path $repoRoot "projects\auditor\.venv\Scripts\python.exe"
 }
 $script:StructuredSurfaceRunnerScript = Join-Path $repoRoot "scripts\run-structured-surface.py"
-$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$runDir = Join-Path $repoRoot (Join-Path $RunRoot $timestamp)
+$runContext = New-NaviRunContext -RepoRoot $repoRoot -Profile "canonical-stack-qualification" -BaseRelativeRoot $RunRoot
+Write-NaviRunManifest -RunContext $runContext -Metadata ([ordered]@{
+    total_steps = $TotalSteps
+    checkpoint_every = $CheckpointEvery
+    cleanup_removed = @($cleanupSummary.removed)
+}) -FileName "qualification-wrapper.json"
+$runDir = $runContext.RunRoot
 $logsDir = Join-Path $runDir "logs"
 $checkpointDir = Join-Path $runDir "checkpoints"
 $refreshSandboxRoot = Join-Path $runDir "refresh"
 $refreshScratchRoot = Join-Path $refreshSandboxRoot "scratch"
 $refreshCompiledRoot = Join-Path $refreshSandboxRoot "gmdag_corpus"
 $validationDir = Join-Path $runDir "validation"
-$sharedTrainOutLog = Join-Path $repoRoot "scripts\logs\train.out.log"
-$sharedTrainErrLog = Join-Path $repoRoot "scripts\logs\train.err.log"
+$sharedTrainOutLog = Join-Path $logsDir "train.out.log"
+$sharedTrainErrLog = Join-Path $logsDir "train.err.log"
 $recordingPath = Join-Path $runDir "training_session.zarr"
 $summaryPath = Join-Path $runDir "qualification.json"
 $refreshTrainingScene = ""
@@ -670,6 +678,7 @@ New-Item -ItemType Directory -Path $validationDir -Force | Out-Null
 
 $summary = [ordered]@{
     profile = "canonical-stack-qualification"
+    run_id = $runContext.RunId
     ok = $false
     run_dir = $runDir
     total_steps = $TotalSteps
@@ -749,7 +758,7 @@ try {
         }
 
         $beforeRefreshTranscripts = @()
-        $refreshLogsRoot = Join-Path $repoRoot "scripts\logs\corpus-refresh"
+        $refreshLogsRoot = Join-Path $repoRoot "artifacts\tmp\corpus-refresh\logs"
         if (Test-Path $refreshLogsRoot) {
             $beforeRefreshTranscripts = @(Get-ChildItem -Path $refreshLogsRoot -File -Filter "refresh_*.log" | Select-Object -ExpandProperty FullName)
         }

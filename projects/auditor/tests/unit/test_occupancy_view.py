@@ -30,6 +30,6 @@ def test_update_keeps_empty_front_sector_clearer_than_right_wall_sector() -> Non
     occupancy.update(depth, valid, x=0.0, z=0.0, yaw=0.0, episode_id=3)
 
     center = occupancy._n // 2
-    front_band = occupancy._occ[center - 3:center, center - 1:center + 2]
-    right_band = occupancy._occ[center - 1:center + 2, center + 2:center + 5]
+    front_band = occupancy._occ[center - 3 : center, center - 1 : center + 2]
+    right_band = occupancy._occ[center - 1 : center + 2, center + 2 : center + 5]
     assert np.count_nonzero(front_band == 2) < np.count_nonzero(right_band == 2)

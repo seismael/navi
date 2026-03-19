@@ -53,7 +53,7 @@ param(
     [string]$CheckpointDir = "checkpoints",
     [string]$Checkpoint = "",
     [int]$LogEvery = 100,
-    [int]$RolloutLength = 512,
+    [int]$RolloutLength = 256,
     [int]$ActorTelemetryPort = 5557,
     [ValidateSet("gru", "mambapy")]
     [string]$TemporalCore = "gru",
@@ -332,7 +332,27 @@ function Wait-ForTrainingReady {
 }
 
 $repoRoot = Get-RepoRoot
-$logsDir = Join-Path $repoRoot "scripts\logs"
+$observabilityModule = Join-Path $repoRoot "tools\Navi.Observability.psm1"
+Import-Module $observabilityModule -Force
+$cleanupStartedAt = Get-Date
+$cleanupSummary = Invoke-NaviGeneratedCleanup -RepoRoot $repoRoot
+$runProfile = if ($Train) { "ghost-stack-train" } else { "ghost-stack-inference" }
+$runContext = New-NaviRunContext -RepoRoot $repoRoot -Profile $runProfile -BaseRelativeRoot "artifacts\runs"
+Write-NaviRunManifest -RunContext $runContext -Metadata ([ordered]@{
+    train = [bool]$Train
+    actors = $Actors
+    temporal_core = $TemporalCore
+    actor_telemetry_port = $ActorTelemetryPort
+    cleanup_removed = @($cleanupSummary.removed)
+}) -FileName "run-ghost-stack.json"
+Write-NaviPhaseMetric -RunContext $runContext -Operation "wrapper_cleanup" -StartedAt $cleanupStartedAt -Metadata ([ordered]@{
+    removed_count = @($cleanupSummary.removed).Count
+}) | Out-Null
+$logsDir = $runContext.LogRoot
+
+if ($CheckpointDir -eq "checkpoints") {
+    $CheckpointDir = $runContext.CheckpointRoot
+}
 
 $resolvedGmDagFile = ""
 if ($Train) {
@@ -456,6 +476,8 @@ if ($Train) {
         Write-Host "========================================================"
         Write-Host "  Navi Ghost-Matrix Training"
         Write-Host "  Backend    : sdfdag"
+        Write-Host "  Run ID     : $($runContext.RunId)"
+        Write-Host "  Run Root   : $($runContext.RunRoot)"
         Write-Host "  Corpus     : $(if ($resolvedGmDagFile) { $resolvedGmDagFile } elseif ($resolvedScene) { $resolvedScene } elseif ($resolvedManifest) { $resolvedManifest } elseif ($resolvedCorpusRoot) { $resolvedCorpusRoot } else { 'auto-discovered canonical corpus' })"
         Write-Host "  Actors     : $NumActors (Standard Fleet)"
         Write-Host "  Total Steps: $(if ($TotalSteps -le 0) { 'continuous until stopped' } else { $TotalSteps })"
@@ -464,17 +486,32 @@ if ($Train) {
         Write-Host "  Control    : tcp://localhost:$ActorControlPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
         Write-Host "  Dashboard  : $(if ($dashboardEnabled) { 'enabled (passive observer)' } else { 'disabled by default for canonical training; observation stream off' })"
+        Write-Host "  Metrics    : $($runContext.MetricsRoot)"
         Write-Host "========================================================"
 
         Write-Host "`nStarting canonical train (background)..."
+        $trainLaunchStartedAt = Get-Date
         $trainProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $trainArgs -StdOutFile $trainLogOut -StdErrFile $trainLogErr
+        Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_launch" -StartedAt $trainLaunchStartedAt -ProcessId $trainProc.Id -Metadata ([ordered]@{
+            dashboard_enabled = [bool]$dashboardEnabled
+            actors = $NumActors
+            temporal_core = $TemporalCore
+        }) | Out-Null
         Write-Host "  PID: $($trainProc.Id)"
         Write-Host "  Logs: $trainLogOut"
         Write-Host "        $trainLogErr"
         Write-Host "        $trainUnifiedLog"
+        Write-Host "  Metrics: $($runContext.MetricsRoot)"
 
         Write-Host "Verifying training telemetry readiness ($ActorTelemetryPort)..."
+        $trainingReadyStartedAt = Get-Date
         $trainingReady = Wait-ForTrainingReady -Process $trainProc -Port $ActorTelemetryPort -LogFiles @($trainLogErr, $trainUnifiedLog) -TimeoutSeconds 180
+        Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_ready" -StartedAt $trainingReadyStartedAt -ProcessId $(if ($null -ne $trainProc) { $trainProc.Id } else { 0 }) -Metadata ([ordered]@{
+            ready = [bool]$trainingReady.Ready
+            reason = [string]$trainingReady.Reason
+            exit_code = if ($trainingReady.ContainsKey('ExitCode')) { $trainingReady.ExitCode } else { $null }
+            telemetry_port = $ActorTelemetryPort
+        }) | Out-Null
         if (-not $trainingReady.Ready) {
             $reason = [string]$trainingReady.Reason
             if ($reason -eq "process-exited") {
@@ -526,9 +563,14 @@ if ($Train) {
             Write-Host "  Stop:      Stop-Process -Id $($trainProc.Id) -Force"
 
             # In no-dashboard mode, wait for canonical train to finish naturally.
+            $trainWaitStartedAt = Get-Date
             Wait-Process -Id $trainProc.Id
             $trainProc.Refresh()
             $exitCode = if ($null -eq $trainProc.ExitCode) { 0 } else { [int]$trainProc.ExitCode }
+            Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_exit" -StartedAt $trainWaitStartedAt -ProcessId $trainProc.Id -Metadata ([ordered]@{
+                exit_code = $exitCode
+                dashboard_enabled = $false
+            }) | Out-Null
             if ($exitCode -ne 0) {
                 Write-Host "ERROR: canonical train exited with code $exitCode."
                 exit $exitCode
@@ -539,7 +581,11 @@ if ($Train) {
     finally {
         if ($null -ne $trainProc -and -not $trainProc.HasExited) {
             Write-Host "`nStopping canonical train (PID $($trainProc.Id))..."
+            $trainStopStartedAt = Get-Date
             Stop-ProcessTreeById -ProcessId $trainProc.Id
+            Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_stop" -StartedAt $trainStopStartedAt -Metadata ([ordered]@{
+                process_id = $trainProc.Id
+            }) | Out-Null
         }
         Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, $ActorControlPort, 5559, 5560)
     }
@@ -592,6 +638,12 @@ $envProc = $null
 $actorProc = $null
 
 try {
+    Write-Host "========================================================"
+    Write-Host "  Navi Ghost-Matrix Inference"
+    Write-Host "  Run ID     : $($runContext.RunId)"
+    Write-Host "  Run Root   : $($runContext.RunRoot)"
+    Write-Host "  Environment: sdfdag ($resolvedGmDagFile)"
+    Write-Host "========================================================"
     Write-Host "Starting Environment..."
     $envProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $envArgs -StdOutFile $envLogOut -StdErrFile $envLogErr
     Write-Host "  PID: $($envProc.Id)"

@@ -47,17 +47,17 @@ _FP_FLOOR_BOT: tuple[int, int, int] = (25, 35, 45)
 
 # Semantic class colours (BGR)
 SEMANTIC_COLORS: dict[int, tuple[int, int, int]] = {
-    0: (50, 50, 50),        # AIR
-    1: (140, 140, 140),     # WALL
-    2: (110, 160, 100),     # FLOOR
-    3: (140, 120, 100),     # CEILING
-    4: (80, 200, 240),      # PILLAR — bright cyan
-    5: (60, 150, 240),      # RAMP — orange
-    6: (100, 100, 240),     # OBSTACLE — red
-    7: (180, 180, 180),     # ROAD — silver
-    8: (140, 100, 70),      # BUILDING
-    9: (240, 230, 140),     # WINDOW — light cyan
-    10: (255, 0, 255),      # TARGET — bright magenta
+    0: (50, 50, 50),  # AIR
+    1: (140, 140, 140),  # WALL
+    2: (110, 160, 100),  # FLOOR
+    3: (140, 120, 100),  # CEILING
+    4: (80, 200, 240),  # PILLAR — bright cyan
+    5: (60, 150, 240),  # RAMP — orange
+    6: (100, 100, 240),  # OBSTACLE — red
+    7: (180, 180, 180),  # ROAD — silver
+    8: (140, 100, 70),  # BUILDING
+    9: (240, 230, 140),  # WINDOW — light cyan
+    10: (255, 0, 255),  # TARGET — bright magenta
 }
 
 _HUD_FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -82,20 +82,23 @@ def _turbo_lut() -> np.ndarray:
         return _TURBO_LUT
 
     # 12-point Turbo control curve (RGB 0-1)
-    control_rgb = np.array([
-        [0.190, 0.072, 0.232],  # 0 — dark indigo (far)
-        [0.120, 0.240, 0.640],  # 1 — deep blue
-        [0.140, 0.460, 0.860],  # 2 — vivid blue
-        [0.130, 0.660, 0.900],  # 3 — cyan
-        [0.180, 0.820, 0.720],  # 4 — teal-green
-        [0.360, 0.910, 0.440],  # 5 — lime-green
-        [0.580, 0.950, 0.240],  # 6 — yellow-green
-        [0.790, 0.930, 0.150],  # 7 — yellow
-        [0.950, 0.820, 0.120],  # 8 — amber
-        [0.990, 0.620, 0.100],  # 9 — orange
-        [0.950, 0.370, 0.080],  # 10 — red-orange
-        [0.840, 0.160, 0.080],  # 11 — deep red (near)
-    ], dtype=np.float32)
+    control_rgb = np.array(
+        [
+            [0.190, 0.072, 0.232],  # 0 — dark indigo (far)
+            [0.120, 0.240, 0.640],  # 1 — deep blue
+            [0.140, 0.460, 0.860],  # 2 — vivid blue
+            [0.130, 0.660, 0.900],  # 3 — cyan
+            [0.180, 0.820, 0.720],  # 4 — teal-green
+            [0.360, 0.910, 0.440],  # 5 — lime-green
+            [0.580, 0.950, 0.240],  # 6 — yellow-green
+            [0.790, 0.930, 0.150],  # 7 — yellow
+            [0.950, 0.820, 0.120],  # 8 — amber
+            [0.990, 0.620, 0.100],  # 9 — orange
+            [0.950, 0.370, 0.080],  # 10 — red-orange
+            [0.840, 0.160, 0.080],  # 11 — deep red (near)
+        ],
+        dtype=np.float32,
+    )
     x_ctrl = np.linspace(0.0, 255.0, len(control_rgb))
     x_full = np.arange(256, dtype=np.float32)
     r = np.interp(x_full, x_ctrl, control_rgb[:, 0])
@@ -128,18 +131,21 @@ def _viridis_lut() -> np.ndarray:
     if _VIRIDIS_LUT is not None:
         return _VIRIDIS_LUT
 
-    control_rgb = np.array([
-        [0.267, 0.004, 0.329],
-        [0.282, 0.140, 0.458],
-        [0.254, 0.265, 0.530],
-        [0.207, 0.372, 0.553],
-        [0.164, 0.471, 0.558],
-        [0.128, 0.567, 0.551],
-        [0.134, 0.658, 0.517],
-        [0.478, 0.821, 0.318],
-        [0.741, 0.873, 0.150],
-        [0.993, 0.906, 0.144],
-    ], dtype=np.float32)
+    control_rgb = np.array(
+        [
+            [0.267, 0.004, 0.329],
+            [0.282, 0.140, 0.458],
+            [0.254, 0.265, 0.530],
+            [0.207, 0.372, 0.553],
+            [0.164, 0.471, 0.558],
+            [0.128, 0.567, 0.551],
+            [0.134, 0.658, 0.517],
+            [0.478, 0.821, 0.318],
+            [0.741, 0.873, 0.150],
+            [0.993, 0.906, 0.144],
+        ],
+        dtype=np.float32,
+    )
     x_ctrl = np.linspace(0.0, 255.0, len(control_rgb))
     x_full = np.arange(256, dtype=np.float32)
     r = np.interp(x_full, x_ctrl, control_rgb[:, 0])
@@ -158,8 +164,7 @@ def _apply_fog_of_war(img: np.ndarray, invalid_mask: np.ndarray) -> None:
     stripe = ((xs.astype(np.int32) + ys.astype(np.int32)) % 8) < 3
     fog_pixels = np.where(stripe)
     img[ys[fog_pixels], xs[fog_pixels]] = (
-        img[ys[fog_pixels], xs[fog_pixels]] * 0.3
-        + np.array([48, 45, 42], dtype=np.float32) * 0.7
+        img[ys[fog_pixels], xs[fog_pixels]] * 0.3 + np.array([48, 45, 42], dtype=np.float32) * 0.7
     ).astype(np.uint8)
 
 
@@ -221,13 +226,13 @@ def depth_to_observer_palette(
     control_x = np.array([0.0, 0.12, 0.28, 0.48, 0.68, 0.85, 1.0], dtype=np.float32)
     control_bgr = np.array(
         [
-            [55.0, 225.0, 195.0],   # warm yellow-green  (nearest walls)
-            [80.0, 210.0, 145.0],   # fresh lime-green   (close structure)
-            [148.0, 195.0, 90.0],   # teal-green         (transition)
-            [210.0, 168.0, 72.0],   # light sky blue     (mid-range)
-            [188.0, 118.0, 52.0],   # medium blue        (away structure)
-            [148.0, 78.0, 42.0],    # dark blue          (far structure)
-            [80.0, 72.0, 68.0],     # neutral dark gray  (void / horizon)
+            [55.0, 225.0, 195.0],  # warm yellow-green  (nearest walls)
+            [80.0, 210.0, 145.0],  # fresh lime-green   (close structure)
+            [148.0, 195.0, 90.0],  # teal-green         (transition)
+            [210.0, 168.0, 72.0],  # light sky blue     (mid-range)
+            [188.0, 118.0, 52.0],  # medium blue        (away structure)
+            [148.0, 78.0, 42.0],  # dark blue          (far structure)
+            [80.0, 72.0, 68.0],  # neutral dark gray  (void / horizon)
         ],
         dtype=np.float32,
     )
@@ -236,7 +241,7 @@ def depth_to_observer_palette(
     b = np.interp(flat, control_x, control_bgr[:, 0])
     g = np.interp(flat, control_x, control_bgr[:, 1])
     r = np.interp(flat, control_x, control_bgr[:, 2])
-    coloured = np.stack([b, g, r], axis=-1).reshape(depth.shape + (3,)).astype(np.uint8)
+    coloured = np.stack([b, g, r], axis=-1).reshape((*depth.shape, 3)).astype(np.uint8)
 
     if valid is not None:
         _apply_fog_of_war(coloured, ~valid)
@@ -285,19 +290,34 @@ def render_front_depth_grid(
     background = np.full((target_h, target_w, 3), (18, 14, 10), dtype=np.float32)
     alpha = np.clip(confidence[..., None] ** 0.85, 0.0, 1.0)
     blended = (heatmap * alpha) + (background * (1.0 - alpha))
-    panel[pad_top:pad_top + target_h, pad_x:pad_x + target_w] = blended.astype(np.uint8)
+    panel[pad_top : pad_top + target_h, pad_x : pad_x + target_w] = blended.astype(np.uint8)
 
     cx = pad_x + target_w // 2
     cy = pad_top + target_h // 2
     cv2.line(panel, (cx, pad_top), (cx, pad_top + target_h - 1), (58, 58, 58), 1, cv2.LINE_AA)
     cv2.line(panel, (pad_x, cy), (pad_x + target_w - 1, cy), (58, 58, 58), 1, cv2.LINE_AA)
-    cv2.rectangle(panel, (pad_x - 1, pad_top - 1), (pad_x + target_w, pad_top + target_h), (70, 70, 70), 1)
+    cv2.rectangle(
+        panel, (pad_x - 1, pad_top - 1), (pad_x + target_w, pad_top + target_h), (70, 70, 70), 1
+    )
 
     cv2.putText(panel, "UP", (cx - 10, 18), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(panel, "DOWN", (cx - 24, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(panel, "LEFT", (pad_x, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        panel, "DOWN", (cx - 24, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+    )
+    cv2.putText(
+        panel, "LEFT", (pad_x, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+    )
     right_size = cv2.getTextSize("RIGHT", _HUD_FONT, 0.45, 1)[0]
-    cv2.putText(panel, "RIGHT", (width - right_size[0] - pad_x, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        panel,
+        "RIGHT",
+        (width - right_size[0] - pad_x, height - 8),
+        _HUD_FONT,
+        0.45,
+        _TITLE_TEXT_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
     return panel
 
 
@@ -349,14 +369,17 @@ def render_front_hemisphere_heatmap(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0.0,
     )
-    valid_proj = cv2.remap(
-        valid_src,
-        map_x,
-        map_y,
-        cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0.0,
-    ) > 0.5
+    valid_proj = (
+        cv2.remap(
+            valid_src,
+            map_x,
+            map_y,
+            cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0.0,
+        )
+        > 0.5
+    )
 
     heatmap = depth_to_viridis(depth_proj, valid_proj & inside)
     panel[inside] = heatmap[inside]
@@ -366,19 +389,44 @@ def render_front_hemisphere_heatmap(
         xn = (x - cx) / rx
         if abs(xn) > 1.0:
             continue
-        y = int(round(cy - ry * np.sqrt(max(0.0, 1.0 - xn * xn))))
+        y = round(cy - ry * np.sqrt(max(0.0, 1.0 - xn * xn)))
         boundary_pts.append((x, y))
     if len(boundary_pts) >= 2:
         pts = np.array(boundary_pts, dtype=np.int32).reshape(-1, 1, 2)
         cv2.polylines(panel, [pts], False, (110, 110, 110), 1, cv2.LINE_AA)
 
-    base_y = int(round(cy))
-    cv2.line(panel, (int(cx), int(top_y[:, width // 2].min())), (int(cx), base_y), _GUIDE_COLOR, 1, cv2.LINE_AA)
+    base_y = round(cy)
+    cv2.line(
+        panel,
+        (int(cx), int(top_y[:, width // 2].min())),
+        (int(cx), base_y),
+        _GUIDE_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
     cv2.line(panel, (int(cx - rx), base_y), (int(cx + rx), base_y), (60, 60, 60), 1, cv2.LINE_AA)
 
-    cv2.putText(panel, "LEFT", (pad_x, max(20, height - 6)), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        panel,
+        "LEFT",
+        (pad_x, max(20, height - 6)),
+        _HUD_FONT,
+        0.45,
+        _TITLE_TEXT_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
     right_size = cv2.getTextSize("RIGHT", _HUD_FONT, 0.45, 1)[0]
-    cv2.putText(panel, "RIGHT", (max(pad_x, width - right_size[0] - pad_x), max(20, height - 6)), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        panel,
+        "RIGHT",
+        (max(pad_x, width - right_size[0] - pad_x), max(20, height - 6)),
+        _HUD_FONT,
+        0.45,
+        _TITLE_TEXT_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
     return panel
 
 
@@ -407,7 +455,9 @@ def center_forward_azimuth(*arrays: np.ndarray) -> tuple[np.ndarray, ...]:
     return tuple(centered)
 
 
-def extract_forward_fov(*arrays: np.ndarray, fov_degrees: float = FWD_FOV_DEG) -> tuple[np.ndarray, ...]:
+def extract_forward_fov(
+    *arrays: np.ndarray, fov_degrees: float = FWD_FOV_DEG
+) -> tuple[np.ndarray, ...]:
     """Return aligned forward-FOV slices from canonical `(azimuth, elevation)` arrays."""
     if not arrays:
         return ()
@@ -469,20 +519,28 @@ def render_first_person(
     _apply_fog_of_war(blended, ~valid_up)
 
     canvas = np.full((height, width, 3), (14, 10, 8), dtype=np.uint8)
-    canvas[pad_top:pad_top + target_h, pad_x:pad_x + target_w] = blended.astype(np.uint8)
+    canvas[pad_top : pad_top + target_h, pad_x : pad_x + target_w] = blended.astype(np.uint8)
 
     cx = pad_x + target_w // 2
     cy = pad_top + target_h // 2
     cv2.line(canvas, (cx, pad_top), (cx, pad_top + target_h - 1), (58, 58, 58), 1, cv2.LINE_AA)
     pitch_offset = int(np.clip(float(pitch), -1.0, 1.0) * (target_h * 0.35))
     horizon_y = int(np.clip(cy + pitch_offset, pad_top, pad_top + target_h - 1))
-    cv2.line(canvas, (pad_x, horizon_y), (pad_x + target_w - 1, horizon_y), (58, 58, 58), 1, cv2.LINE_AA)
-    cv2.rectangle(canvas, (pad_x - 1, pad_top - 1), (pad_x + target_w, pad_top + target_h), (70, 70, 70), 1)
+    cv2.line(
+        canvas, (pad_x, horizon_y), (pad_x + target_w - 1, horizon_y), (58, 58, 58), 1, cv2.LINE_AA
+    )
+    cv2.rectangle(
+        canvas, (pad_x - 1, pad_top - 1), (pad_x + target_w, pad_top + target_h), (70, 70, 70), 1
+    )
 
     cv2.putText(canvas, "UP", (cx - 10, 18), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(canvas, "DOWN", (cx - 24, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        canvas, "DOWN", (cx - 24, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+    )
     left_y = min(height - 10, max(20, cy + 5))
-    cv2.putText(canvas, "LEFT", (pad_x, left_y), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        canvas, "LEFT", (pad_x, left_y), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+    )
     right_size = cv2.getTextSize("RIGHT", _HUD_FONT, 0.45, 1)[0]
     cv2.putText(
         canvas,
@@ -540,13 +598,17 @@ def _draw_lidar_colorbar(
             img,
             (bar_x, bar_top + row),
             (bar_x + bar_w, bar_top + row),
-            color, 1,
+            color,
+            1,
         )
 
     # Border
     cv2.rectangle(
-        img, (bar_x, bar_top), (bar_x + bar_w, bar_bot),
-        (80, 80, 80), 1,
+        img,
+        (bar_x, bar_top),
+        (bar_x + bar_w, bar_bot),
+        (80, 80, 80),
+        1,
     )
 
     # Distance labels at key positions
@@ -557,16 +619,26 @@ def _draw_lidar_colorbar(
         cv2.line(img, (bar_x - 2, row_y), (bar_x, row_y), (140, 140, 140), 1)
         # Label text
         cv2.putText(
-            img, label,
+            img,
+            label,
             (bar_x - 2, row_y - 3) if frac == 0.0 else (bar_x - 2, row_y + 4),
-            _HUD_FONT, 0.30, (160, 160, 160), 1, cv2.LINE_AA,
+            _HUD_FONT,
+            0.30,
+            (160, 160, 160),
+            1,
+            cv2.LINE_AA,
         )
 
     # Title
     cv2.putText(
-        img, "DIST",
+        img,
+        "DIST",
         (bar_x, bar_top - 8),
-        _HUD_FONT, 0.35, (160, 160, 160), 1, cv2.LINE_AA,
+        _HUD_FONT,
+        0.35,
+        (160, 160, 160),
+        1,
+        cv2.LINE_AA,
     )
 
 
@@ -697,7 +769,9 @@ def render_forward_polar(
 
     # Subtle radial darkening for depth perception
     darken = np.clip(
-        1.0 - 0.25 * (pixel_dist / max(max_r, 1)), 0.4, 1.0,
+        1.0 - 0.25 * (pixel_dist / max(max_r, 1)),
+        0.4,
+        1.0,
     ).astype(np.float32)
     colored_dark = (colored.astype(np.float32) * darken[:, :, np.newaxis]).astype(
         np.uint8,
@@ -718,36 +792,60 @@ def render_forward_polar(
 
     # ── Range rings with metric labels ────────────────────────────
     ring_specs = [
-        (1.0, "1m"), (2.0, "2m"), (5.0, "5m"), (10.0, "10m"),
+        (1.0, "1m"),
+        (2.0, "2m"),
+        (5.0, "5m"),
+        (10.0, "10m"),
     ]
     for ring_m, ring_label in ring_specs:
         rr = int(max_r * min(1.0, ring_m / float(max_distance_m)))
         cv2.ellipse(
-            panel, (cx, cy), (rr, rr), 0, 180, 360,
-            (80, 80, 80), 1, cv2.LINE_AA,
+            panel,
+            (cx, cy),
+            (rr, rr),
+            0,
+            180,
+            360,
+            (80, 80, 80),
+            1,
+            cv2.LINE_AA,
         )
         # Label on right side of ring
         lx = cx + rr + 3
         ly = cy + 4
         if lx < w - 20:
             cv2.putText(
-                panel, ring_label, (lx, ly),
-                _HUD_FONT, 0.32, (140, 140, 140), 1, cv2.LINE_AA,
+                panel,
+                ring_label,
+                (lx, ly),
+                _HUD_FONT,
+                0.32,
+                (140, 140, 140),
+                1,
+                cv2.LINE_AA,
             )
 
     # ── Ego marker ───────────────────────────────────────────────
     cv2.circle(panel, (cx, cy), 5, (0, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
     cv2.arrowedLine(
-        panel, (cx, cy), (cx, cy - 22), (0, 255, 255), 2, tipLength=0.4,
+        panel,
+        (cx, cy),
+        (cx, cy - 22),
+        (0, 255, 255),
+        2,
+        tipLength=0.4,
     )
 
     # ── Angle labels ─────────────────────────────────────────────
-    cv2.putText(panel, "FWD", (cx - 12, cy - max_r - 6),
-                _HUD_FONT, 0.38, _HEADING_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(panel, "L", (cx - max_r - 12, cy + 4),
-                _HUD_FONT, 0.38, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
-    cv2.putText(panel, "R", (cx + max_r + 4, cy + 4),
-                _HUD_FONT, 0.38, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        panel, "FWD", (cx - 12, cy - max_r - 6), _HUD_FONT, 0.38, _HEADING_COLOR, 1, cv2.LINE_AA
+    )
+    cv2.putText(
+        panel, "L", (cx - max_r - 12, cy + 4), _HUD_FONT, 0.38, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+    )
+    cv2.putText(
+        panel, "R", (cx + max_r + 4, cy + 4), _HUD_FONT, 0.38, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+    )
 
     return panel
 
@@ -802,23 +900,46 @@ def render_bev_occupancy(
             cv2.line(panel, trail[i - 1], trail[i], _TRAIL_COLOR, 2)
 
     cv2.arrowedLine(
-        panel, (cx, cy), (cx, cy - 20), (0, 255, 255), 2, tipLength=0.4,
+        panel,
+        (cx, cy),
+        (cx, cy - 20),
+        (0, 255, 255),
+        2,
+        tipLength=0.4,
     )
     cv2.circle(panel, (cx, cy), 5, (0, 255, 255), thickness=-1)
 
     # Compass labels
     cv2.putText(panel, "N", (cx - 5, 16), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1)
     cv2.putText(
-        panel, "E", (w - 16, cy + 4), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1,
+        panel,
+        "E",
+        (w - 16, cy + 4),
+        _HUD_FONT,
+        0.45,
+        _TITLE_TEXT_COLOR,
+        1,
     )
     cv2.putText(
-        panel, "S", (cx - 5, h - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1,
+        panel,
+        "S",
+        (cx - 5, h - 8),
+        _HUD_FONT,
+        0.45,
+        _TITLE_TEXT_COLOR,
+        1,
     )
     cv2.putText(panel, "W", (6, cy + 4), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1)
 
     # Forward direction marker
     cv2.putText(
-        panel, "FWD", (cx - 12, 32), _HUD_FONT, 0.35, _HEADING_COLOR, 1,
+        panel,
+        "FWD",
+        (cx - 12, 32),
+        _HUD_FONT,
+        0.35,
+        _HEADING_COLOR,
+        1,
     )
     return panel
 
@@ -858,9 +979,14 @@ def overlay_overhead_annotations(
     for r, rlabel in ring_specs:
         cv2.circle(panel, (cx, cy), r, _GUIDE_COLOR, 1)
         cv2.putText(
-            panel, rlabel,
+            panel,
+            rlabel,
             (cx + r + 3, cy - 2),
-            _HUD_FONT, 0.32, (140, 140, 140), 1, cv2.LINE_AA,
+            _HUD_FONT,
+            0.32,
+            (140, 140, 140),
+            1,
+            cv2.LINE_AA,
         )
 
     if len(pose_history) < 2:
@@ -890,7 +1016,12 @@ def overlay_overhead_annotations(
     heading_len = 18
     hx_px = int(cx + heading_len)
     cv2.arrowedLine(
-        panel, (cx, cy), (hx_px, cy), _HEADING_COLOR, 2, tipLength=0.3,
+        panel,
+        (cx, cy),
+        (hx_px, cy),
+        _HEADING_COLOR,
+        2,
+        tipLength=0.3,
     )
 
 
@@ -906,7 +1037,13 @@ def add_orientation_guides(
     cv2.line(panel, (cx, 0), (cx, h - 1), _GUIDE_COLOR, 1)
     cv2.line(panel, (0, cy), (w - 1, cy), _GUIDE_COLOR, 1)
     cv2.putText(
-        panel, left_label, (8, h - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1,
+        panel,
+        left_label,
+        (8, h - 8),
+        _HUD_FONT,
+        0.45,
+        _TITLE_TEXT_COLOR,
+        1,
     )
     txt_size = cv2.getTextSize(right_label, _HUD_FONT, 0.45, 1)[0]
     cv2.putText(
@@ -967,15 +1104,27 @@ def draw_semantic_legend(
     box_w = 190
     box_h = 10 + row_h * len(legend_items)
     cv2.rectangle(
-        frame, (x, y), (x + box_w, y + box_h), (18, 18, 18), thickness=-1,
+        frame,
+        (x, y),
+        (x + box_w, y + box_h),
+        (18, 18, 18),
+        thickness=-1,
     )
     cv2.rectangle(
-        frame, (x, y), (x + box_w, y + box_h), (60, 60, 60), thickness=1,
+        frame,
+        (x, y),
+        (x + box_w, y + box_h),
+        (60, 60, 60),
+        thickness=1,
     )
     for legend_idx, (label, color) in enumerate(legend_items):
         yy = y + 6 + legend_idx * row_h
         cv2.rectangle(
-            frame, (x + 8, yy), (x + 20, yy + 12), color, thickness=-1,
+            frame,
+            (x + 8, yy),
+            (x + 20, yy + 12),
+            color,
+            thickness=-1,
         )
         cv2.putText(
             frame,

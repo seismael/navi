@@ -1,68 +1,100 @@
-# Python
+# ==============================================================================
+# Python & Environments
+# ==============================================================================
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 *.so
-
-# Virtual environments
 .venv/
 venv/
 ENV/
+.env
 
-# Distribution / packaging
+# ==============================================================================
+# Distribution & Packaging
+# ==============================================================================
 *.egg-info/
 *.egg
 dist/
 build/
 wheels/
+setup.pyc
 
-# mypy
+# ==============================================================================
+# Tooling, Testing & Caches
+# ==============================================================================
 .mypy_cache/
-
-# pytest
 .pytest_cache/
-projects/*/tests/.pytest_tmp/
-projects/*/tests/.pytest_cache_local/
-
-# ruff
+.pytest_tmp/
+**/.pytest_tmp/
+.tmp_local/
+**/.tmp_local/
 .ruff_cache/
-
-# Coverage
 htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+.tmp_test_outputs/
 
-# IDE
+# ==============================================================================
+# IDEs & Editor
+# ==============================================================================
 .idea/
 .vscode/
+.claudecode/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
+*.code-workspace
 
-# uv
-# Each project has its own uv.lock tracked in version control
-# but .venv directories are ignored
-
-# Runtime artifacts
-*logs/
-projects/*/artifacts/
-.tmp_test_outputs/
+# ==============================================================================
+# Builds & C++ Run-Times
+# ==============================================================================
 projects/voxel-dag/build-local/
 
-# Local data captures
-*.zarr/
-*checkpoints*
-*data*
-*artifacts*
-
-# Local Env
-.env
-
-# General
+# ==============================================================================
+# Artifacts, Operational Outputs & Logs
+# ==============================================================================
+# Stable log surfaces
+logs/
 *.log
+
+# Artifact Run Roots
+artifacts/runs/
+artifacts/nightly*/
+artifacts/dashboard-captures/
+artifacts/benchmarks/
+artifacts/analysis/
+artifacts/pytest-tmp/
+artifacts/tmp/
+artifacts/qualification/
+artifacts/validation/
+
+# Artifact scratch files
+artifacts/*.csv
+artifacts/*.py
+artifacts/*.err.log
+artifacts/*.out.log
+
+# Checkpoints
+checkpoints/
+*.pt
+*.pth
+
+# Service-local scratch
+projects/*/artifacts/
+**/.pytest_tmp/
+**/.tmp_local/
+
+# ==============================================================================
+# Local Data & Assets Caches
+# ==============================================================================
+*.zarr/
+data/
 *.gmdag
+artifacts/gmdag/
+
+# Specific Tool Folders
+tools/

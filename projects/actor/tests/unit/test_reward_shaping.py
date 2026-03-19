@@ -40,7 +40,10 @@ def test_velocity_heuristic() -> None:
 
     # Pure turning should be neutral so env-side inspection reward can dominate
     spin = shaper.shape(
-        raw_reward=0.0, done=False, forward_velocity=0.0, angular_velocity=2.0,
+        raw_reward=0.0,
+        done=False,
+        forward_velocity=0.0,
+        angular_velocity=2.0,
     )
     assert spin.velocity_bonus == 0.0
 
@@ -143,10 +146,12 @@ def test_shape_batch_matches_disabled_compile_path() -> None:
         intrinsic_rewards=torch.tensor([0.4, 0.2]),
         loop_similarities=torch.tensor([0.7, 0.95]),
     )
-    expected = torch.tensor([
-        1.0 - 0.02 + (0.25 * 2.0) + (0.5 * 0.4),
-        2.0 - 3.0 - 0.02 + 0.0 + (0.5 * 0.2) - (0.75 * (0.95 - 0.8)),
-    ])
+    expected = torch.tensor(
+        [
+            1.0 - 0.02 + (0.25 * 2.0) + (0.5 * 0.4),
+            2.0 - 3.0 - 0.02 + 0.0 + (0.5 * 0.2) - (0.75 * (0.95 - 0.8)),
+        ]
+    )
     assert torch.allclose(totals, expected)
 
 

@@ -83,7 +83,9 @@ class EnvironmentConfig(BaseSettings):
     )
 
     mode: str = "step"
-    max_steps_per_episode: int = Field(default=2_000, validation_alias="NAVI_MAX_STEPS_PER_EPISODE", gt=0)
+    max_steps_per_episode: int = Field(
+        default=2_000, validation_alias="NAVI_MAX_STEPS_PER_EPISODE", gt=0
+    )
     azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS", gt=0)
     elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS", gt=0)
     max_distance: float = Field(default=30.0, gt=0.0)
@@ -108,7 +110,9 @@ class EnvironmentConfig(BaseSettings):
         validation_alias="NAVI_GMDAG_RESOLUTION",
         gt=0,
     )
-    scene_episodes_per_scene: int = Field(default=16, validation_alias="NAVI_SCENE_EPISODES_PER_SCENE", gt=0)
+    scene_episodes_per_scene: int = Field(
+        default=16, validation_alias="NAVI_SCENE_EPISODES_PER_SCENE", gt=0
+    )
     obstacle_clearance_reward_scale: float = Field(
         default=0.6,
         validation_alias="NAVI_OBSTACLE_CLEARANCE_REWARD_SCALE",

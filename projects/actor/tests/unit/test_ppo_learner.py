@@ -17,14 +17,16 @@ def _fill_buffer(n: int = 64) -> TrajectoryBuffer:
     """Create a trajectory buffer with n dummy transitions."""
     buf = TrajectoryBuffer(gamma=0.99, gae_lambda=0.95)
     for _ in range(n):
-        buf.append(PPOTransition(
-            observation=torch.randn(3, 128, 24),
-            action=torch.randn(4),
-            log_prob=-0.5,
-            value=0.5,
-            reward=1.0,
-            done=False,
-        ))
+        buf.append(
+            PPOTransition(
+                observation=torch.randn(3, 128, 24),
+                action=torch.randn(4),
+                log_prob=-0.5,
+                value=0.5,
+                reward=1.0,
+                done=False,
+            )
+        )
     buf.compute_returns_and_advantages(last_value=0.0)
     return buf
 
@@ -36,7 +38,11 @@ def test_ppo_epoch_returns_metrics() -> None:
     buf = _fill_buffer(64)
 
     metrics = learner.train_ppo_epoch(
-        policy, buf, ppo_epochs=1, minibatch_size=32, seq_len=0,
+        policy,
+        buf,
+        ppo_epochs=1,
+        minibatch_size=32,
+        seq_len=0,
     )
     assert isinstance(metrics, PpoMetrics)
     assert metrics.policy_loss != 0.0 or metrics.value_loss != 0.0
@@ -107,7 +113,11 @@ def test_ppo_clip_fraction_bounded() -> None:
     learner = PpoLearner(clip_ratio=0.2)
     buf = _fill_buffer(64)
     metrics = learner.train_ppo_epoch(
-        policy, buf, ppo_epochs=2, minibatch_size=32, seq_len=0,
+        policy,
+        buf,
+        ppo_epochs=2,
+        minibatch_size=32,
+        seq_len=0,
     )
     assert 0.0 <= metrics.clip_fraction <= 1.0
 
@@ -214,7 +224,9 @@ def test_prime_update_runtime_eagerly_populates_optimizer_and_param_cache() -> N
     assert len(learner._policy_param_cache) > 0
 
 
-def test_create_adam_optimizer_falls_back_to_foreach_when_fused_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_adam_optimizer_falls_back_to_foreach_when_fused_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     learner = PpoLearner(learning_rate=1e-3)
     parameter = torch.nn.Parameter(torch.zeros(1))
     calls: list[dict[str, object]] = []
@@ -253,7 +265,11 @@ def test_gradient_isolation_policy_updates_actor() -> None:
 
     buf = _fill_buffer(64)
     learner.train_ppo_epoch(
-        policy, buf, ppo_epochs=2, minibatch_size=32, seq_len=0,
+        policy,
+        buf,
+        ppo_epochs=2,
+        minibatch_size=32,
+        seq_len=0,
     )
 
     actor_w_after = policy.heads.actor[0].weight.data

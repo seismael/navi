@@ -65,7 +65,9 @@ class TestRecordReplay:
         if result.exit_code != 0:
             issues = payload.get("issues", [])
             if isinstance(issues, list) and issues:
-                pytest.skip("Live dataset-audit unavailable: " + "; ".join(str(issue) for issue in issues))
+                pytest.skip(
+                    "Live dataset-audit unavailable: " + "; ".join(str(issue) for issue in issues)
+                )
             pytest.skip("Live dataset-audit failed without a parseable issue list")
 
         assert payload["profile"] == "dataset-audit"

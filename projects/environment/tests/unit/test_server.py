@@ -59,7 +59,17 @@ def test_publish_backend_perf_emits_sdfdag_event() -> None:
 
 
 def test_publish_backend_perf_skips_non_sdfdag_backend() -> None:
-    backend = _FakeBackend(SimpleNamespace(sps=1.0, last_batch_step_ms=1.0, ema_batch_step_ms=1.0, avg_batch_step_ms=1.0, avg_actor_step_ms=1.0, total_batches=1, total_actor_steps=1))
+    backend = _FakeBackend(
+        SimpleNamespace(
+            sps=1.0,
+            last_batch_step_ms=1.0,
+            ema_batch_step_ms=1.0,
+            avg_batch_step_ms=1.0,
+            avg_actor_step_ms=1.0,
+            total_batches=1,
+            total_actor_steps=1,
+        )
+    )
     server = EnvironmentServer(EnvironmentConfig(backend="legacy"), backend)
     published = False
 

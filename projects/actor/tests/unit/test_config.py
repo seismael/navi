@@ -33,6 +33,9 @@ def test_actor_config_allows_field_name_overrides_with_aliases() -> None:
     assert config.emit_training_telemetry is True
     assert config.emit_update_loss_telemetry is False
     assert config.emit_perf_telemetry is True
+    assert config.emit_internal_stats is True
+    assert config.attach_resource_snapshots is True
+    assert config.print_performance_summary is True
     assert config.enable_episodic_memory is True
     assert config.enable_reward_shaping is True
 

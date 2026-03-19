@@ -47,7 +47,11 @@ class SimulatorBackend(ABC):
 
     @abstractmethod
     def step(
-        self, action: Action, step_id: int, *, actor_id: int = 0,
+        self,
+        action: Action,
+        step_id: int,
+        *,
+        actor_id: int = 0,
     ) -> tuple[DistanceMatrix, StepResult]:
         """Apply *action* and advance the environment by one tick.
 
@@ -101,11 +105,7 @@ class SimulatorBackend(ABC):
         observations: list[DistanceMatrix] = []
         results: list[StepResult] = []
         for idx, action in enumerate(actions):
-            actor_id = (
-                int(action.env_ids[0])
-                if len(action.env_ids) > 0
-                else idx
-            )
+            actor_id = int(action.env_ids[0]) if len(action.env_ids) > 0 else idx
             obs, result = self.step(action, step_id, actor_id=actor_id)
             observations.append(obs)
             results.append(result)

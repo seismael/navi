@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from navi_actor.mamba_core import Mamba2TemporalCore
+
+pytest.importorskip(
+    "mamba_ssm", reason="fused mamba-ssm is required for canonical Mamba2 core tests"
+)
 
 
 def _make_core(d_model: int = 128) -> Mamba2TemporalCore:
@@ -55,7 +60,7 @@ def test_gradient_flow() -> None:
     core = _make_core()
     z_seq = torch.randn(2, 4, 128, requires_grad=True)
     out, _ = core.forward(z_seq)
-    (out ** 2).sum().backward()
+    (out**2).sum().backward()
     assert z_seq.grad is not None
     assert z_seq.grad.abs().sum() > 0
 

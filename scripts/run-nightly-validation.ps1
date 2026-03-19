@@ -606,15 +606,19 @@ function Test-NonFiniteLogText {
 }
 
 $repoRoot = Get-RepoRoot
+$observabilityModule = Join-Path $repoRoot "tools\Navi.Observability.psm1"
+Import-Module $observabilityModule -Force
+$cleanupSummary = Invoke-NaviGeneratedCleanup -RepoRoot $repoRoot
 $powerShellExe = Get-PowerShellExecutable
 $script:StructuredSurfaceRunnerPythonByModule = @{
     default = Join-Path $repoRoot "projects\environment\.venv\Scripts\python.exe"
     "navi_auditor.cli" = Join-Path $repoRoot "projects\auditor\.venv\Scripts\python.exe"
 }
 $script:StructuredSurfaceRunnerScript = Join-Path $repoRoot "scripts\run-structured-surface.py"
-$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$runRelativeRoot = Join-Path $RunRoot $timestamp
-$runDir = Join-Path $repoRoot $runRelativeRoot
+$runContext = New-NaviRunContext -RepoRoot $repoRoot -Profile "nightly-validation" -BaseRelativeRoot $RunRoot
+$runRelativeRoot = $runContext.RunRelativeRoot
+$runDir = $runContext.RunRoot
+$runManifestPath = Join-Path $runContext.ManifestRoot "run-nightly-validation.json"
 $preflightDir = Join-Path $runDir "preflight"
 $preflightTestDir = Join-Path $preflightDir "tests"
 $qualificationRoot = Join-Path $runRelativeRoot "qualification"
@@ -638,6 +642,7 @@ foreach ($dir in @($runDir, $preflightDir, $preflightTestDir, $qualificationDir,
 
 $summary = [ordered]@{
     profile = "nightly-validation"
+    run_id = $runContext.RunId
     ok = $false
     status = "running"
     started_at = (Get-Date).ToString("o")
@@ -658,7 +663,7 @@ $summary = [ordered]@{
     phases = @()
     current_activity = "initializing"
     artifacts = [ordered]@{
-        run_manifest = Join-Path $runDir "run_manifest.json"
+        run_manifest = $runManifestPath
         preflight = $preflightDir
         qualification = $qualificationDir
         validation = $validationEvidenceDir
@@ -672,12 +677,14 @@ $summary = [ordered]@{
 }
 
 $runManifest = [ordered]@{
+    run_id = $runContext.RunId
     started_at = $summary.started_at
     repo_root = $repoRoot
     python_version = $PythonVersion
     soak_hours = $SoakHours
     checkpoint_every = $CheckpointEvery
     monitor_interval_seconds = $MonitorIntervalSeconds
+    cleanup_removed = @($cleanupSummary.removed)
 }
 $runManifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 $summary.artifacts.run_manifest
 Save-Summary -Summary $summary -SummaryPath $summaryPath

@@ -45,7 +45,9 @@ Microkernel speedups are not enough.
 - benchmark claims must be made against the real trainer when the change affects the hot path
 - service-mode ZMQ measurements do not replace in-process rollout measurements
 - unverified headline numbers are not carried into canonical docs
-- bounded canonical benchmark summaries must treat the unified actor log at `logs/navi_actor_train.log` as the authoritative source for final optimizer and checkpoint timing when redirected stdout artifacts omit tail completion lines
+- bounded canonical benchmark summaries must treat the stable actor log at `logs/navi_actor_train.log` and the matching run-scoped log under the active run root as the authoritative source for final optimizer and checkpoint timing when redirected stdout artifacts omit tail completion lines
+- canonical trainer investigations should prefer the machine-readable run metrics under `metrics/` for correlation across rollout, update, checkpoint, and wrapper lifecycle events before falling back to raw log scraping
+- canonical training attribution should combine phase wall time with coarse process and CUDA resource snapshots so bottleneck review can distinguish rollout cadence, optimizer cost, checkpoint cost, corpus preparation cost, and orchestration overhead on the same run timeline
 
 ### 3.2 Prefer Tensor-Native Seams
 
@@ -147,6 +149,8 @@ Human-facing tooling may consume data, but it must not shape the runtime.
 - frame dropping is allowed; training stall is not
 - observation publication is optional and passive; canonical training and inference must remain correct and throughput-safe when the auditor is absent
 - viewer requirements must be implemented by observer-side transforms over the published spherical contract, not by changing core math or environment semantics
+- run-aware manifests, logs, and metrics are required for reviewability, but they must remain append-only side effects around the hot path rather than new gating work inside per-step rollout math
+- coarse resource measurement follows the same rule: capture CPU-process and CUDA allocator state at major phase boundaries and the existing logging cadence, but never add per-step polling or repeated external GPU queries inside the rollout loop
 
 ## 4. Current Bottleneck Interpretation
 
