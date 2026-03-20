@@ -59,8 +59,7 @@ def main():
 
     process.wait()
     
-    print("
---- Benchmark Results ---")
+    print("\n--- Benchmark Results ---")
     print(f"Peak Throughput: {max_sps:.1f} SPS")
     
     if max_sps >= 100.0:

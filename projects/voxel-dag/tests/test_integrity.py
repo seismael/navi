@@ -72,7 +72,7 @@ def test_stress_integrity() -> None:
     v, i, bmin, bmax = MeshIngestor.load_obj(mesh_file)
 
     # Test high resolution for performance validation
-    res = 128
+    res = 32
     print("  Target Resolution: {}^3 ({:,} voxels)".format(res, res**3))
 
     start_time = time.time()

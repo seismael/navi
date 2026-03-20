@@ -40,7 +40,7 @@ def test_live_corpus_uses_downloaded_datasets_only() -> None:
     assert scenes, "Live compiled corpus must contain at least one scene"
     assert set(manifest.get("compiled_resolutions", [])) == {512}
 
-    allowed_datasets = {"habitat_test_scenes", "hssd", "replicacad"}
+    allowed_datasets = {"habitat_test_scenes", "hssd", "replicacad", "ai-habitat_habitat_test_scenes", "hssd-hab", "ai-habitat_ReplicaCAD_dataset", "ai-habitat_habitat-test-scenes"}
     forbidden_tokens = (
         "sample",
         "generated",

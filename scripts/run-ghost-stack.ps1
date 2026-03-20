@@ -64,7 +64,10 @@ param(
     [string]$ActorSub = "tcp://localhost:5559",
     [string]$ActorPub = "tcp://*:5557",
     [string]$ActorStepEndpoint = "tcp://localhost:5560",
-    [string]$ActorPolicyCheckpoint = ""
+    [string]$ActorPolicyCheckpoint = "",
+
+    # ── Orchestration ──
+    [switch]$Foreground
 )
 
 # Requested Ghost-Matrix Fleet Size

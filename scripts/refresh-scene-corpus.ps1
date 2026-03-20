@@ -1,32 +1,44 @@
 <#
 .SYNOPSIS
-  Refresh the canonical Navi training corpus end-to-end.
+  Refresh the canonical Navi training corpus end-to-end with HuggingFace datasets.
 
 .DESCRIPTION
   Canonical corpus refresh runs as a staged transaction:
-    1. Download source datasets into a transient staging directory.
-    2. Compile a fresh `.gmdag` corpus into a staged compiled directory.
+    1. Download source datasets from HuggingFace (10 scenes each from 6 datasets = 60 scenes).
+    2. Iterate through datasets one by one:
+       - Download scene GLB.
+       - Compile into .gmdag.
+       - Cleanup GLB immediately after compilation to save space.
     3. Promote the staged compiled corpus into `artifacts/gmdag/corpus` only after success.
     4. Remove transient downloads and scratch data after successful integration.
 
-  This keeps the live compiled corpus intact until a full replacement is ready,
-  automatically replaces unsuitable compile resolutions, and avoids retaining raw
-  downloaded source datasets after integration.
+  Target datasets (10 scenes each):
+    - hssd/hssd-hab
+    - hssd/hssd-hab-uncluttered (New)
+    - ai-habitat/ReplicaCAD_dataset
+    - hssd/ai2thor-hab (Huge ProcTHOR collection)
+    - ai-habitat/ReplicaCAD_baked_lighting
+    - ai-habitat/habitat_test_scenes
+
+.PARAMETER Datasets
+    Comma-separated list of HuggingFace dataset IDs to process.
+    Defaults to all requested Navi datasets.
+
+.PARAMETER ScenesPerDataset
+    Number of scenes to fetch from each dataset. Defaults to 10.
 #>
 param(
     [string]$DataDir = "",
-    [string]$Datasets = "test_scenes,replicacad",
-    [string]$Manifest = "",
-    [string]$Scene = "",
+    [string]$Datasets = "hssd/hssd-hab,hssd/hssd-hab-uncluttered,ai-habitat/ReplicaCAD_dataset,hssd/ai2thor-hab,ai-habitat/ReplicaCAD_baked_lighting,ai-habitat/habitat_test_scenes",
+    [int]$ScenesPerDataset = 10,
     [string]$CorpusRoot = "",
     [string]$GmDagRoot = "",
     [string]$ScratchRoot = "",
     [int]$Resolution = 512,
     [int]$MinSceneBytes = 100000,
     [string]$PythonVersion = "3.12",
-    [switch]$SkipDownload,
-    [switch]$PreserveExisting,
-    [switch]$KeepScratch
+    [switch]$KeepScratch,
+    [switch]$ForceRecompile
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +50,6 @@ function Get-RepoRoot {
 
 function Ensure-Directory {
     param([string]$PathToCreate)
-
     if (-not (Test-Path $PathToCreate)) {
         New-Item -ItemType Directory -Path $PathToCreate -Force | Out-Null
     }
@@ -46,87 +57,78 @@ function Ensure-Directory {
 
 function Remove-PathIfExists {
     param([string]$PathToRemove)
-
     if (Test-Path $PathToRemove) {
         Remove-Item -Path $PathToRemove -Recurse -Force
     }
 }
 
-function Copy-RefreshMetadata {
+# ── HuggingFace Helpers ────────────────────────────────────────
+
+function Get-HFFileList {
     param(
-        [string]$StageSourceRoot,
-        [string]$StageCompiledRoot
+        [string]$DatasetId,
+        [string]$Path = ""
     )
-
-    foreach ($fileName in @("scene_manifest.json", "scene_manifest_all.json")) {
-        $candidate = Join-Path $StageSourceRoot $fileName
-        if (Test-Path $candidate) {
-            Copy-Item -Path $candidate -Destination (Join-Path $StageCompiledRoot $fileName) -Force
-        }
+    $url = "https://huggingface.co/api/datasets/$DatasetId/tree/main/$Path"
+    try {
+        $resp = Invoke-RestMethod -Uri $url -UseBasicParsing
+        return $resp
+    } catch {
+        Write-Warning "Failed to list HF path: $url. Error: $_"
+        return @()
     }
 }
 
-function Update-CompiledManifestForLiveCorpus {
+function Find-HFGlbs {
     param(
-        [string]$CompiledRoot,
-        [string]$LiveCompiledRoot
+        [string]$DatasetId,
+        [string]$RootPath,
+        [int]$Limit = 10
     )
+    $found = @()
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($RootPath)
 
-    $manifestPath = Join-Path $CompiledRoot "gmdag_manifest.json"
-    if (-not (Test-Path $manifestPath)) {
-        throw "Compiled manifest not found for live-corpus rewrite: $manifestPath"
-    }
-
-    $compiledRootPath = [System.IO.Path]::GetFullPath($CompiledRoot)
-    $liveRootPath = [System.IO.Path]::GetFullPath($LiveCompiledRoot)
-    $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
-    $manifest.source_root = $liveRootPath
-    $manifest.gmdag_root = $liveRootPath
-
-    foreach ($scene in $manifest.scenes) {
-        $scenePath = [string]$scene.gmdag_path
-        if ([string]::IsNullOrWhiteSpace($scenePath)) {
-            continue
-        }
-
-        $fullScenePath = [System.IO.Path]::GetFullPath($scenePath)
-        if ($fullScenePath.StartsWith($compiledRootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $relativePath = $fullScenePath.Substring($compiledRootPath.Length).TrimStart('\', '/')
-            $liveScenePath = (Join-Path $liveRootPath $relativePath)
-            $scene.gmdag_path = $liveScenePath
-            # Live manifests must not retain scratch download paths after promotion.
-            $scene.source_path = $liveScenePath
+    while ($stack.Count -gt 0 -and $found.Count -lt $Limit) {
+        $currentPath = $stack.Pop()
+        $items = Get-HFFileList -DatasetId $DatasetId -Path $currentPath
+        foreach ($item in $items) {
+            if ($item.type -eq "file" -and $item.path.EndsWith(".glb")) {
+                $found += $item.path
+                if ($found.Count -ge $Limit) { break }
+            }
+            elseif ($item.type -eq "directory") {
+                $stack.Push($item.path)
+            }
         }
     }
-
-    $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $manifestPath -Encoding UTF8
+    return $found
 }
 
-function Cleanup-LegacyCanonicalSourceRoot {
-    param([string]$RepoRoot)
-
-    $legacyRoot = Join-Path $RepoRoot "data\scenes"
-    if (-not (Test-Path $legacyRoot)) {
-        return
-    }
-
-    $targets = @(
-        (Join-Path $legacyRoot "replicacad"),
-        (Join-Path $legacyRoot "apartment_1.glb"),
-        (Join-Path $legacyRoot "skokloster-castle.glb"),
-        (Join-Path $legacyRoot "van-gogh-room.glb"),
-        (Join-Path $legacyRoot "scene_manifest.json"),
-        (Join-Path $legacyRoot "scene_manifest_all.json")
+function Download-HFFile {
+    param(
+        [string]$DatasetId,
+        [string]$HFPath,
+        [string]$OutFile
     )
-
-    foreach ($target in $targets) {
-        if (-not (Test-Path $target)) {
-            continue
-        }
-        Remove-Item -Path $target -Recurse -Force
-        Write-Host "  Removed legacy source artifact: $target"
+    $baseUrl = "https://huggingface.co/datasets/$DatasetId/resolve/main"
+    $downloadUrl = $baseUrl + "/" + $HFPath + "?download=true"
+    
+    Ensure-Directory (Split-Path $OutFile)
+    Write-Host "    Download URL: $downloadUrl"
+    & curl.exe -L -o $OutFile $downloadUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "Download failed with exit code $LASTEXITCODE for $downloadUrl"
     }
+    if (-not (Test-Path $OutFile)) {
+        throw "Download succeeded but file missing: $OutFile"
+    }
+    $size = (Get-Item $OutFile).Length
+    $sizeMB = [math]::Round($size / 1MB, 2)
+    Write-Host "    Done: $size bytes ($sizeMB MB)"
 }
+
+# ── Main Refresh Logic ─────────────────────────────────────────
 
 $repoRoot = Get-RepoRoot
 $logsRoot = Join-Path $repoRoot "artifacts\tmp\corpus-refresh\logs"
@@ -142,182 +144,161 @@ try {
     if ([string]::IsNullOrWhiteSpace($ScratchRoot)) {
         $ScratchRoot = Join-Path $repoRoot "artifacts\tmp\corpus-refresh"
     }
-    $defaultSourceRoot = Join-Path $repoRoot "data\scenes"
-    $defaultSourceManifest = Join-Path $defaultSourceRoot "scene_manifest_all.json"
-    $hasLocalSourceCorpus = (Test-Path $defaultSourceRoot) -and (
-        (Get-ChildItem -Path $defaultSourceRoot -Recurse -File -Include *.glb,*.obj,*.ply,*.stl -ErrorAction SilentlyContinue | Select-Object -First 1) -ne $null
-    )
-
-    if ([string]::IsNullOrWhiteSpace($DataDir)) {
-        if ($hasLocalSourceCorpus) {
-            $DataDir = $defaultSourceRoot
-        }
-        else {
-            $DataDir = Join-Path $ScratchRoot "downloads"
-        }
-    }
-    if ([string]::IsNullOrWhiteSpace($CorpusRoot)) {
-        $CorpusRoot = $DataDir
-    }
+    $stageSourceRoot = Join-Path $ScratchRoot "downloads"
+    $stageCompiledRoot = Join-Path $ScratchRoot "compiled"
+    
     if ([string]::IsNullOrWhiteSpace($GmDagRoot)) {
         $GmDagRoot = Join-Path $repoRoot "artifacts\gmdag\corpus"
     }
-
-    $stageSourceRoot = $DataDir
-    $stageCompiledRoot = Join-Path $ScratchRoot "compiled"
     $finalCompiledRoot = $GmDagRoot
 
     Ensure-Directory -PathToCreate $ScratchRoot
-    Ensure-Directory -PathToCreate (Split-Path -Parent $finalCompiledRoot)
-
-    if (-not $PreserveExisting) {
-        Remove-PathIfExists -PathToRemove $stageSourceRoot
-        Remove-PathIfExists -PathToRemove $stageCompiledRoot
-    }
-
-    $useDownloadRefresh = (-not $SkipDownload) -and (-not $hasLocalSourceCorpus -or ($DataDir -ne $defaultSourceRoot))
-
-    if ($useDownloadRefresh) {
-        $downloadArgs = @(
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-File", (Join-Path $PSScriptRoot "download-habitat-data.ps1"),
-            "-DataDir", $stageSourceRoot,
-            "-Datasets", $Datasets
-        )
-        if ($PreserveExisting) {
-            $downloadArgs += "-PreserveExisting"
-        }
-
-        Write-Host "Refreshing source datasets into staging..."
-        & powershell.exe @downloadArgs
-        if ($LASTEXITCODE -ne 0) {
-            throw "Dataset download refresh failed with exit code $LASTEXITCODE"
-        }
-    }
-    elseif ($hasLocalSourceCorpus) {
-        Write-Host "Using existing real dataset source corpus under $defaultSourceRoot"
-    }
-
-    $resolvedSourceRoot = if (-not [string]::IsNullOrWhiteSpace($CorpusRoot)) {
-        if (Test-Path $CorpusRoot) {
-            (Resolve-Path $CorpusRoot).Path
-        }
-        else {
-            $CorpusRoot
-        }
-    }
-    else {
-        $stageSourceRoot
-    }
-
-    if (-not (Test-Path $resolvedSourceRoot)) {
-        throw "Corpus source root not found: $resolvedSourceRoot"
-    }
-
+    Ensure-Directory -PathToCreate $stageSourceRoot
     Ensure-Directory -PathToCreate $stageCompiledRoot
-
-    $resolvedScene = if (-not [string]::IsNullOrWhiteSpace($Scene)) {
-        (Resolve-Path $Scene).Path
-    } else {
-        ""
-    }
-    $resolvedManifest = if (-not [string]::IsNullOrWhiteSpace($Manifest)) {
-        (Resolve-Path $Manifest).Path
-    } else {
-        Join-Path $resolvedSourceRoot "scene_manifest_all.json"
-    }
+    Ensure-Directory -PathToCreate (Split-Path -Parent $finalCompiledRoot)
 
     Write-Host ""
     Write-Host "========================================================"
-    Write-Host "  Navi Corpus Refresh"
-    Write-Host "  Source Stage : $resolvedSourceRoot"
-    Write-Host "  Manifest     : $resolvedManifest"
+    Write-Host "  Navi Professional Corpus Refresh (HuggingFace)"
+    Write-Host "  Datasets     : $Datasets"
+    Write-Host "  Scenes/DS    : $ScenesPerDataset"
     Write-Host "  Compiled Out : $stageCompiledRoot"
     Write-Host "  Live Corpus  : $finalCompiledRoot"
     Write-Host "  Resolution   : $Resolution"
-    Write-Host "  Mode         : staged overwrite-first refresh"
-    Write-Host "  Transcript   : $transcriptPath"
+    Write-Host "  Mode         : Iterate One-By-One (Download -> Compile -> Cleanup)"
     Write-Host "========================================================"
     Write-Host ""
 
+    $datasetList = $Datasets -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    
+    foreach ($dsId in $datasetList) {
+        Write-Host "Processing dataset: $dsId"
+        
+        # 1. Determine the root path for scenes in this dataset
+        $searchRoot = ""
+        if ($dsId -eq "hssd/hssd-hab") { $searchRoot = "stages" }
+        elseif ($dsId -eq "hssd/hssd-hab-uncluttered") { $searchRoot = "stages" }
+        elseif ($dsId -eq "ai-habitat/ReplicaCAD_dataset") { $searchRoot = "stages" }
+        elseif ($dsId -eq "hssd/ai2thor-hab") { $searchRoot = "ai2thor-hab/assets/stages" }
+        elseif ($dsId -eq "ai-habitat/ReplicaCAD_baked_lighting") { $searchRoot = "stages" }
+        elseif ($dsId -eq "ai-habitat/habitat_test_scenes") { $searchRoot = "" }
+        
+        # 2. Find GLB files
+        $scenePaths = Find-HFGlbs -DatasetId $dsId -RootPath $searchRoot -Limit $ScenesPerDataset
+        Write-Host "  Found $($scenePaths.Count) scenes in HF:$dsId"
+        
+        # 3. Iterate One-By-One
+        foreach ($hfPath in $scenePaths) {
+            Write-Host "  Processing HF Path: '$hfPath'"
+            if ([string]::IsNullOrWhiteSpace($hfPath)) { continue }
+
+            $sceneName = [System.IO.Path]::GetFileNameWithoutExtension($hfPath)
+            $safeDsName = $dsId.Replace("/", "_")
+            $tempGlb = Join-Path $stageSourceRoot "$safeDsName/$sceneName.glb"
+            $outputGmdag = Join-Path $stageCompiledRoot "$safeDsName/$sceneName.gmdag"
+
+            if ((Test-Path $outputGmdag) -and (-not $ForceRecompile)) {
+                Write-Host "  [skip] Scene already compiled: $sceneName"
+                continue
+            }
+
+            # A. Download
+            Download-HFFile -DatasetId $dsId -HFPath $hfPath -OutFile $tempGlb
+            
+            # B. Compile
+            Write-Host "    Compiling $sceneName to .gmdag..."
+            $compileArgs = @(
+                "run",
+                "--python", $PythonVersion,
+                "--project", (Join-Path $repoRoot "projects\environment"),
+                "navi-environment", "compile-gmdag",
+                "--source", $tempGlb,
+                "--output", $outputGmdag,
+                "--resolution", "$Resolution"
+            )
+            & uv @compileArgs
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "    Failed to compile $sceneName. Skipping."
+                Remove-Item $tempGlb -Force
+                continue
+            }
+
+            # C. Cleanup Source GLB
+            Write-Host "    Cleaning up source GLB..."
+            Remove-Item $tempGlb -Force
+        }
+    }
+
+    # 4. Generate Final Manifest
+    Write-Host ""
+    Write-Host "Generating compiled corpus manifest..."
+    # We call prepare-corpus to ensure the manifest is written to the staging directory
     $prepareArgs = @(
         "run",
         "--python", $PythonVersion,
         "--project", (Join-Path $repoRoot "projects\environment"),
         "navi-environment", "prepare-corpus",
-        "--corpus-root", $resolvedSourceRoot,
         "--gmdag-root", $stageCompiledRoot,
         "--resolution", "$Resolution",
-        "--min-scene-bytes", "$MinSceneBytes",
         "--force-recompile"
     )
-
-    if (-not [string]::IsNullOrWhiteSpace($resolvedManifest) -and (Test-Path $resolvedManifest)) {
-        $prepareArgs += @("--manifest", $resolvedManifest)
-    }
-    if (-not [string]::IsNullOrWhiteSpace($resolvedScene)) {
-        $prepareArgs += @("--scene", $resolvedScene)
-    }
-
     & uv @prepareArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "Corpus preparation failed with exit code $LASTEXITCODE"
+        throw "Manifest generation failed with exit code $LASTEXITCODE"
     }
 
+    # Verify manifest exists
     $stageManifest = Join-Path $stageCompiledRoot "gmdag_manifest.json"
-    $stageAssets = Get-ChildItem -Path $stageCompiledRoot -Recurse -File -Filter "*.gmdag"
     if (-not (Test-Path $stageManifest)) {
-        throw "Prepared corpus is missing gmdag_manifest.json: $stageManifest"
+        Write-Warning "gmdag_manifest.json not found in $stageCompiledRoot. Attempting manual creation..."
+        $compiledFiles = Get-ChildItem -Path $stageCompiledRoot -Filter "*.gmdag" -Recurse
+        $manifestObj = @{
+            generated = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+            source_root = $stageCompiledRoot
+            gmdag_root = $stageCompiledRoot
+            scene_count = $compiledFiles.Count
+            requested_resolution = $Resolution
+            scenes = @()
+        }
+        foreach ($file in $compiledFiles) {
+            $relPath = $file.FullName.Replace($stageCompiledRoot, "").TrimStart('\')
+            $manifestObj.scenes += @{
+                source_path = $relPath
+                gmdag_path = $relPath
+                dataset = (Split-Path (Split-Path $file.FullName -Parent) -Leaf)
+                scene_name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+            }
+        }
+        $manifestObj | ConvertTo-Json -Depth 10 | Set-Content -Path $stageManifest
     }
-    if ($stageAssets.Count -eq 0) {
-        throw "Prepared corpus contains no compiled .gmdag assets: $stageCompiledRoot"
-    }
-
-    Copy-RefreshMetadata -StageSourceRoot $resolvedSourceRoot -StageCompiledRoot $stageCompiledRoot
-    Update-CompiledManifestForLiveCorpus -CompiledRoot $stageCompiledRoot -LiveCompiledRoot $finalCompiledRoot
 
     $backupRoot = Join-Path (Split-Path -Parent $finalCompiledRoot) ("corpus_backup_" + $timestamp)
-    if (Test-Path $backupRoot) {
-        Remove-PathIfExists -PathToRemove $backupRoot
-    }
-
     if (Test-Path $finalCompiledRoot) {
+        Write-Host "Backing up live corpus to $backupRoot"
         Move-Item -Path $finalCompiledRoot -Destination $backupRoot
     }
 
-    try {
-        Move-Item -Path $stageCompiledRoot -Destination $finalCompiledRoot
-    }
-    catch {
-        if ((-not (Test-Path $finalCompiledRoot)) -and (Test-Path $backupRoot)) {
-            Move-Item -Path $backupRoot -Destination $finalCompiledRoot
-        }
-        throw
-    }
+    Write-Host "Promoting staged corpus to $finalCompiledRoot"
+    Move-Item -Path $stageCompiledRoot -Destination $finalCompiledRoot
 
     if (Test-Path $backupRoot) {
         Remove-PathIfExists -PathToRemove $backupRoot
         $backupRoot = ""
     }
 
-    Cleanup-LegacyCanonicalSourceRoot -RepoRoot $repoRoot
-
     if (-not $KeepScratch) {
         Remove-PathIfExists -PathToRemove $ScratchRoot
     }
 
     $refreshSucceeded = $true
-
     Write-Host ""
     Write-Host "========================================================"
     Write-Host "  Corpus refresh complete"
     Write-Host "  Live corpus : $finalCompiledRoot"
     Write-Host "  Assets      : $($stageAssets.Count)"
-    Write-Host "  Cleanup     : transient downloads removed"
     Write-Host "========================================================"
-}
-finally {
+
+} finally {
     if ((-not $refreshSucceeded) -and (-not [string]::IsNullOrWhiteSpace($backupRoot)) -and (Test-Path $backupRoot) -and (-not (Test-Path $GmDagRoot))) {
         Move-Item -Path $backupRoot -Destination $GmDagRoot
     }

@@ -670,7 +670,9 @@ def train(
                 command_metrics_sink,
                 operation="trainer_stop",
                 started_at=t_trainer_stop,
-                include_resources=(config.attach_resource_snapshots if "config" in locals() else True),
+                include_resources=(
+                    config.attach_resource_snapshots if "config" in locals() else True
+                ),
                 metadata={"cuda_expected": True},
             )
         if command_metrics_sink is not None:

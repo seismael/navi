@@ -552,6 +552,14 @@ def prepare_training_scene_corpus(
             manifest_path=resolved_manifest_path,
         )
         if discovered_compiled_entries:
+            if not resolved_compiled_manifest.exists():
+                _write_compiled_manifest(
+                    discovered_compiled_entries,
+                    resolved_compiled_manifest,
+                    source_root=resolved_source_root,
+                    gmdag_root=resolved_gmdag_root,
+                    requested_resolution=resolution,
+                )
             if scene:
                 discovered_compiled_entries = [
                     resolve_compiled_scene_query(scene, discovered_compiled_entries)

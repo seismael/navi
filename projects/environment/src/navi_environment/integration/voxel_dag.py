@@ -139,7 +139,7 @@ def probe_sdfdag_runtime(
     except ImportError as exc:
         torch_ready = False
         cuda_ready = False
-        issues.append(f"torch import failed: {exc}")
+        issues.append(f"torch import failed: {exc}"); import traceback; traceback.print_exc(file=open('torch_exc.log', 'w')); import traceback; traceback.print_exc(file=open('torch_exc.log', 'w'))
     else:
         cuda_ready = bool(torch_module.cuda.is_available())
         if not cuda_ready:

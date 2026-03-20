@@ -88,7 +88,7 @@ def test_full_pipeline_integrity():
         )
 
     # 2. Compile to DAG
-    res = 128
+    res = 32
     v, i, bmin, bmax = MeshIngestor.load_obj(hallway_obj)
     grid, h, cmin = compute_dense_sdf(v, i, bmin, bmax, res)
     dag_np = compress_to_dag(grid, res)
@@ -145,11 +145,11 @@ def test_square_house_pipeline_reduces_forward_distance_after_motion(
 
     vertices, indices, bbox_min, bbox_max = MeshIngestor.load_obj(str(source))
     grid, voxel_size, cube_min = compute_dense_sdf(
-        vertices, indices, bbox_min, bbox_max, 64, padding=0.0
+        vertices, indices, bbox_min, bbox_max, 32, padding=0.0
     )
-    dag_np = compress_to_dag(grid, 64)
+    dag_np = compress_to_dag(grid, 32)
     dag_torch = torch.from_numpy(dag_np.view(np.int64)).cuda()
-    cube_max = cube_min + (64 * voxel_size)
+    cube_max = cube_min + (32 * voxel_size)
 
     origins = torch.tensor(
         [

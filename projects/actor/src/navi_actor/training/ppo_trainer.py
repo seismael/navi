@@ -1226,7 +1226,6 @@ class PpoTrainer:
         step_actor_indices = pending.step_batch.env_id_tensor.to(
             device=self._device, dtype=torch.int64
         )
-        reward_component_tensor = pending.step_batch.reward_component_tensor
         t_buffer_start = time.perf_counter()
         self._multi_buffers.append_batch(
             observations=pending.observations,
@@ -1281,9 +1280,7 @@ class PpoTrainer:
                     episode_lengths=episode_lengths,
                 )
                 done_actor_ids_all = (
-                    done_actor_indices.detach()
-                    .to(device="cpu", dtype=torch.int64)
-                    .tolist()
+                    done_actor_indices.detach().to(device="cpu", dtype=torch.int64).tolist()
                 )
                 done_episode_ids_all = (
                     pending.step_batch.episode_id_tensor.index_select(0, done_local_indices)
@@ -1314,7 +1311,7 @@ class PpoTrainer:
         # Zero out accumulated episodic stats inline via masked multiplication (no host sync)
         not_done_mask_f32 = (~done_or_truncated).to(dtype=torch.float32)
         not_done_mask_i32 = (~done_or_truncated).to(dtype=torch.int32)
-        
+
         episode_returns[step_actor_indices] *= not_done_mask_f32
         episode_lengths[step_actor_indices] *= not_done_mask_i32
         aux_states[step_actor_indices] *= not_done_mask_f32.unsqueeze(1)

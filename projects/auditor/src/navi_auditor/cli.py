@@ -90,6 +90,16 @@ def _environment_project_root() -> Path:
 
 
 def _environment_cli_command() -> list[str]:
+    import sys
+    import os
+    if sys.platform == "win32":
+        python_exe = _environment_project_root() / ".venv" / "Scripts" / "python.exe"
+    else:
+        python_exe = _environment_project_root() / ".venv" / "bin" / "python"
+    
+    if python_exe.exists():
+        return [str(python_exe), "-m", "navi_environment.cli"]
+        
     return ["uv", "run", "--project", str(_environment_project_root()), "navi-environment"]
 
 
@@ -124,12 +134,25 @@ def _parse_json_stdout(command_name: str, stdout: str) -> dict[str, Any]:
 def _run_environment_json_command(
     command_name: str, arguments: list[str]
 ) -> tuple[int, dict[str, Any]]:
+    import os
+    env = {}
+    for k, v in os.environ.items():
+        if k.startswith("UV_"): continue
+        if k.startswith("PYTHON"): continue
+        if k == "VIRTUAL_ENV": continue
+        env[k] = v
+    if "PATH" in env:
+        env["PATH"] = os.pathsep.join(
+            p for p in env["PATH"].split(os.pathsep) if ".venv" not in p and "projects\\auditor" not in p
+        )
+
     completed = subprocess.run(  # noqa: S603 - command is fixed to the repo-local environment CLI surface
         [*_environment_cli_command(), *arguments, "--json"],
         capture_output=True,
         text=True,
         check=False,
         cwd=_repo_root(),
+        env=env,
     )
     stdout = completed.stdout.strip()
     if not stdout:

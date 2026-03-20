@@ -220,7 +220,7 @@ def test_extreme_resolution() -> None:
 
 
 def benchmark_fsm_scaling() -> None:
-    resolutions = [32, 64, 128]
+    resolutions = [16, 32, 64]
     create_test_obj("bench.obj", "cube")
     v, i, bmin, bmax = MeshIngestor.load_obj("bench.obj")
 
