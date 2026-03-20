@@ -257,67 +257,32 @@ function Invoke-NativeProcessCapture {
         [int]$TimeoutSeconds = 300
     )
 
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $FilePath
-    $startInfo.Arguments = Join-ProcessArguments -ArgumentList $ArgumentList
-    $startInfo.WorkingDirectory = $WorkingDirectory
-    $startInfo.UseShellExecute = $false
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.CreateNoWindow = $true
+    $outTemp = [System.IO.Path]::GetTempFileName()
+    $errTemp = [System.IO.Path]::GetTempFileName()
 
-    $stdoutBuilder = New-Object System.Text.StringBuilder
-    $stderrBuilder = New-Object System.Text.StringBuilder
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
-
-    $stdoutHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $eventArgs)
-        if ($null -ne $eventArgs.Data) {
-            [void]$stdoutBuilder.AppendLine($eventArgs.Data)
-        }
-    }
-    $stderrHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $eventArgs)
-        if ($null -ne $eventArgs.Data) {
-            [void]$stderrBuilder.AppendLine($eventArgs.Data)
-        }
-    }
-
-    $process.add_OutputDataReceived($stdoutHandler)
-    $process.add_ErrorDataReceived($stderrHandler)
     try {
-        if (-not $process.Start()) {
-            throw "Failed to start command: $FilePath $($ArgumentList -join ' ')"
-        }
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
-
+        $proc = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $outTemp -RedirectStandardError $errTemp -PassThru -WindowStyle Hidden
         if ($TimeoutSeconds -gt 0) {
-            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-                Stop-ProcessTreeById -ProcessId $process.Id
+            $proc | Wait-Process -Timeout $TimeoutSeconds -ErrorAction SilentlyContinue
+            if (-not $proc.HasExited) {
+                Stop-ProcessTreeById -ProcessId $proc.Id
                 throw "Command timed out after ${TimeoutSeconds}s: $FilePath $($ArgumentList -join ' ')"
             }
+        } else {
+            $proc | Wait-Process
         }
-        else {
-            $process.WaitForExit()
-        }
-        $process.WaitForExit()
+        
+        $stdout = Get-Content $outTemp -Raw
+        $stderr = Get-Content $errTemp -Raw
 
         return [pscustomobject]@{
-            exit_code = [int]$process.ExitCode
-            stdout = $stdoutBuilder.ToString().TrimEnd("`r", "`n")
-            stderr = $stderrBuilder.ToString().TrimEnd("`r", "`n")
+            exit_code = $proc.ExitCode
+            stdout = if ($stdout) { $stdout.TrimEnd("`r", "`n") } else { "" }
+            stderr = if ($stderr) { $stderr.TrimEnd("`r", "`n") } else { "" }
         }
-    }
-    finally {
-        try {
-            $process.remove_OutputDataReceived($stdoutHandler)
-            $process.remove_ErrorDataReceived($stderrHandler)
-        }
-        catch {
-        }
-        $process.Dispose()
+    } finally {
+        Remove-Item -LiteralPath $outTemp -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errTemp -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -330,6 +295,13 @@ function Invoke-JsonCommand {
         [string]$ErrorPath,
         [int]$TimeoutSeconds = 300
     )
+
+    if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+        $OutputPath = [IO.Path]::GetTempFileName()
+    }
+    if ([string]::IsNullOrWhiteSpace($ErrorPath)) {
+        $ErrorPath = [IO.Path]::GetTempFileName()
+    }
 
     if (Test-Path -LiteralPath $OutputPath) {
         Remove-Item -LiteralPath $OutputPath -Force
@@ -345,6 +317,7 @@ function Invoke-JsonCommand {
     $structuredRunnerUsed = $false
     $captureFilePath = $resolvedFilePath
     $captureArgumentList = $resolvedArgumentList
+    <#
     if ($resolvedArgumentList.Count -ge 3 -and $resolvedArgumentList[0] -eq "-m") {
         $structuredRunnerUsed = $true
         $moduleName = [string]$resolvedArgumentList[1]
@@ -357,6 +330,7 @@ function Invoke-JsonCommand {
             "--"
         ) + $resolvedArgumentList[2..($resolvedArgumentList.Count - 1)]
     }
+    #>
 
     if ($structuredRunnerUsed) {
         $tempScriptPath = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".ps1")
@@ -1042,12 +1016,26 @@ try {
             throw "Resume training wrapper exited with code $resumeExitCode"
         }
 
+        $resumeWrapperOut = Read-TextFile -Path $resumeTrainOut
+        $resumeLogMatch = [regex]::Match($resumeWrapperOut, "Logs:\s*([^\r\n]+\.out\.log)")
+        $resumeActualOutText = ""
+        if ($resumeLogMatch.Success) {
+            $parsedPath = $resumeLogMatch.Groups[1].Value.Trim()
+            if (Test-Path -LiteralPath $parsedPath) {
+                $resumeActualOutText = Read-TextFile -Path $parsedPath
+            }
+        }
+
         $resumeStdOutText = (
-            (Read-TextFile -Path $resumeTrainOut) +
+            $resumeWrapperOut +
+            [Environment]::NewLine +
+            $resumeActualOutText +
             [Environment]::NewLine +
             (Read-TextFile -Path $sharedTrainOutLog) +
             [Environment]::NewLine +
-            (Read-TextFile -Path $sharedTrainErrLog)
+            (Read-TextFile -Path $sharedTrainErrLog) +
+            [Environment]::NewLine +
+            (Read-TextFile -Path (Join-Path $repoRoot "logs\navi_actor_train.log"))
         )
         $expectedResumeLine = "Loaded checkpoint: $resumeSourceCheckpoint"
         if (-not $resumeStdOutText.Contains($expectedResumeLine)) {
