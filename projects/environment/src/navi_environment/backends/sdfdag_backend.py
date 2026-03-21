@@ -414,13 +414,13 @@ def _postprocess_cast_outputs_tensor(
     actor_count = int(out_distances.shape[0])
     metric_distances = out_distances.reshape(actor_count, az_bins, el_bins)
     semantic_batch = out_semantics.reshape(actor_count, az_bins, el_bins).to(dtype=torch.int32)
-    # A ray is valid only when the sphere tracer actually found surface
-    # geometry (semantic != 0).  Rays that exhaust max_steps without
-    # converging write finite current_t with semantic=0 — those must be
-    # treated as misses to avoid garbage depth contamination.
-    hit_mask = semantic_batch != 0
+    # Valid = finite distance within range.  Non-converged rays (semantic=0,
+    # exhausted max_steps) still carry useful approximate depth from the
+    # SDF-guided march and must remain valid — excluding them via a
+    # semantic!=0 gate creates excessive fog-of-war, especially at large
+    # max_distance where more rays exhaust their step budget.
     if max_distance > 0.0:
-        valid_batch = hit_mask & torch.isfinite(metric_distances) & (metric_distances <= max_distance)
+        valid_batch = torch.isfinite(metric_distances) & (metric_distances <= max_distance)
         clamped_metric = torch.where(
             valid_batch,
             metric_distances,
@@ -432,7 +432,7 @@ def _postprocess_cast_outputs_tensor(
         _log_denom = math.log1p(max_distance)
         depth_batch = (torch.log1p(clamped_metric) / _log_denom).clamp(min=0.0, max=1.0)
     else:
-        valid_batch = hit_mask & torch.isfinite(metric_distances)
+        valid_batch = torch.isfinite(metric_distances)
         clamped_metric = torch.where(
             valid_batch, metric_distances, torch.zeros_like(metric_distances)
         )

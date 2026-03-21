@@ -180,6 +180,12 @@ def depth_to_viridis(
     Uses percentile-based contrast stretch so close-range indoor scenes
     still show clear depth variation instead of a single-colour heatmap.
     """
+    # Linearize log-normalized depth for visualization (see observer palette).
+    vis_log_denom = np.float32(np.log1p(100.0))
+    depth = np.expm1(np.clip(depth, 0.0, 1.0).astype(np.float32) * vis_log_denom) / np.float32(
+        100.0
+    )
+
     if valid is not None and np.any(valid):
         valid_vals = depth[valid]
         lo = float(np.percentile(valid_vals, 1))
@@ -214,6 +220,14 @@ def depth_to_observer_palette(
     structure detail.  Contrast is stretched dynamically from the valid
     depth distribution so indoor scenes keep clear separation.
     """
+    # The observation depth channel is log-normalized: log1p(d)/log1p(100).
+    # Invert to recover metric-proportional depth for visualization so
+    # the perceptual near=warm / far=cool gradient stays familiar.
+    vis_log_denom = np.float32(np.log1p(100.0))
+    depth = np.expm1(np.clip(depth, 0.0, 1.0).astype(np.float32) * vis_log_denom) / np.float32(
+        100.0
+    )
+
     if valid is not None and np.any(valid):
         valid_vals = depth[valid]
         lo = float(np.percentile(valid_vals, 2))

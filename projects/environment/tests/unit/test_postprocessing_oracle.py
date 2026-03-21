@@ -28,8 +28,7 @@ def _postprocess(
     actor_count = int(out_distances.shape[0])
     metric = out_distances.reshape(actor_count, az_bins, el_bins)
     semantic = out_semantics.reshape(actor_count, az_bins, el_bins).to(torch.int32)
-    hit_mask = semantic != 0
-    valid = hit_mask & torch.isfinite(metric) & (metric <= max_distance)
+    valid = torch.isfinite(metric) & (metric <= max_distance)
     clamped = torch.where(valid, metric, torch.full_like(metric, max_distance))
     log_denom = math.log1p(max_distance)
     depth = (torch.log1p(clamped) / log_denom).clamp(0.0, 1.0)
@@ -94,12 +93,15 @@ class TestValidMask:
         _, valid, _ = _postprocess(raw, sem, 1, 1, 100.0)
         assert bool(valid[0, 0, 0])
 
-    def test_finite_distance_with_no_hit_is_invalid(self) -> None:
-        """Ray exhausted max_steps: finite distance within range but semantic=0."""
+    def test_finite_distance_with_no_hit_is_still_valid(self) -> None:
+        """Non-converged ray (semantic=0) with finite distance in range is valid.
+
+        The SDF-guided march accumulates a useful approximate depth even
+        when the tracer does not fully converge."""
         raw = torch.tensor([[15.0]])
         sem = torch.tensor([[0]], dtype=torch.int32)
         _, valid, _ = _postprocess(raw, sem, 1, 1, 100.0)
-        assert not bool(valid[0, 0, 0])
+        assert bool(valid[0, 0, 0])
 
 
 class TestReshapeFlatToGrid:

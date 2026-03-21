@@ -69,14 +69,13 @@ def test_obstacle_clearance_reward_is_zero_when_both_clearances_are_far() -> Non
 
 
 def test_observation_profile_tracks_starvation_and_near_geometry() -> None:
-    depth = np.array([[1.0, 0.02], [0.10, 0.50]], dtype=np.float32)
+    metric_depth = np.array([[30.0, 0.6], [3.0, 15.0]], dtype=np.float32)
     valid = np.array([[False, True], [True, True]], dtype=np.bool_)
 
     starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = (
         _observation_profile(
-            depth,
+            metric_depth,
             valid,
-            max_distance=30.0,
             proximity_distance_threshold=1.0,
             structure_band_min_distance=1.5,
             structure_band_max_distance=10.0,
@@ -90,27 +89,25 @@ def test_observation_profile_tracks_starvation_and_near_geometry() -> None:
 
 
 def test_select_spawn_yaw_rotates_structure_into_forward_sector() -> None:
-    depth = np.ones((12, 4), dtype=np.float32)
+    metric_depth = np.ones((12, 4), dtype=np.float32) * 10.0
     valid = np.zeros((12, 4), dtype=np.bool_)
-    depth[4:7, :] = 0.3
+    metric_depth[4:7, :] = 3.0
     valid[4:7, :] = True
 
     yaw = _select_spawn_yaw_from_observation(
-        depth,
+        metric_depth,
         valid,
-        max_distance=10.0,
         structure_band_min_distance=1.5,
         structure_band_max_distance=10.0,
     )
 
-    azimuth_bins = depth.shape[0]
+    azimuth_bins = metric_depth.shape[0]
     shift = round((yaw / (2.0 * math.pi)) * azimuth_bins) % azimuth_bins
-    rotated_depth = np.roll(depth, -shift, axis=0)
+    rotated_depth = np.roll(metric_depth, -shift, axis=0)
     rotated_valid = np.roll(valid, -shift, axis=0)
     before_forward = _observation_profile(
-        depth,
+        metric_depth,
         valid,
-        max_distance=10.0,
         proximity_distance_threshold=1.0,
         structure_band_min_distance=1.5,
         structure_band_max_distance=10.0,
@@ -118,7 +115,6 @@ def test_select_spawn_yaw_rotates_structure_into_forward_sector() -> None:
     after_forward = _observation_profile(
         rotated_depth,
         rotated_valid,
-        max_distance=10.0,
         proximity_distance_threshold=1.0,
         structure_band_min_distance=1.5,
         structure_band_max_distance=10.0,
@@ -129,17 +125,16 @@ def test_select_spawn_yaw_rotates_structure_into_forward_sector() -> None:
 
 
 def test_spawn_candidate_score_prefers_structure_over_empty_space() -> None:
-    structured_depth = np.ones((12, 4), dtype=np.float32)
+    structured_depth = np.full((12, 4), 10.0, dtype=np.float32)
     structured_valid = np.zeros((12, 4), dtype=np.bool_)
-    structured_depth[3:9, :] = 0.4
+    structured_depth[3:9, :] = 4.0
     structured_valid[3:9, :] = True
-    empty_depth = np.ones((12, 4), dtype=np.float32)
+    empty_depth = np.full((12, 4), 10.0, dtype=np.float32)
     empty_valid = np.zeros((12, 4), dtype=np.bool_)
 
     structured_score = _spawn_candidate_score(
         structured_depth,
         structured_valid,
-        max_distance=10.0,
         proximity_distance_threshold=1.0,
         structure_band_min_distance=1.5,
         structure_band_max_distance=10.0,
@@ -147,7 +142,6 @@ def test_spawn_candidate_score_prefers_structure_over_empty_space() -> None:
     empty_score = _spawn_candidate_score(
         empty_depth,
         empty_valid,
-        max_distance=10.0,
         proximity_distance_threshold=1.0,
         structure_band_min_distance=1.5,
         structure_band_max_distance=10.0,
@@ -171,7 +165,8 @@ def test_reset_uses_precomputed_spawn_yaw() -> None:
     backend._prev_structure_band_ratios = torch.zeros((1,), dtype=torch.float32)
     backend._prev_forward_structure_ratios = torch.zeros((1,), dtype=torch.float32)
     backend._episode_returns = torch.zeros((1,), dtype=torch.float32)
-    backend._visit_grid = torch.zeros((1, 1, 1), dtype=torch.uint8)
+    backend._visit_grid = torch.zeros((1, 1, 1, 1), dtype=torch.int16)
+    backend._heading_visited = torch.zeros((1, 16), dtype=torch.bool)
     backend._prev_linear_vels = torch.zeros((1, 3), dtype=torch.float32)
     backend._prev_angular_vels = torch.zeros((1, 3), dtype=torch.float32)
     backend._needs_reset_mask = torch.zeros((1,), dtype=torch.bool)
@@ -183,6 +178,7 @@ def test_reset_uses_precomputed_spawn_yaw() -> None:
         torch.zeros((1, 2, 2), dtype=torch.float32),
         torch.zeros((1, 2, 2), dtype=torch.int32),
         torch.zeros((1, 2, 2), dtype=torch.bool),
+        torch.zeros((1, 2, 2), dtype=torch.float32),
     )
     backend._consume_actor_observation = lambda **kwargs: (  # type: ignore[method-assign]
         None,
@@ -215,7 +211,8 @@ def test_reset_tensor_uses_tensor_ratios_when_materialization_disabled(
     backend._prev_structure_band_ratios = torch.zeros((1,), dtype=torch.float32)
     backend._prev_forward_structure_ratios = torch.zeros((1,), dtype=torch.float32)
     backend._episode_returns = torch.zeros((1,), dtype=torch.float32)
-    backend._visit_grid = torch.zeros((1, 1, 1), dtype=torch.uint8)
+    backend._visit_grid = torch.zeros((1, 1, 1, 1), dtype=torch.int16)
+    backend._heading_visited = torch.zeros((1, 16), dtype=torch.bool)
     backend._prev_linear_vels = torch.zeros((1, 3), dtype=torch.float32)
     backend._prev_angular_vels = torch.zeros((1, 3), dtype=torch.float32)
     backend._needs_reset_mask = torch.zeros((1,), dtype=torch.bool)
@@ -227,13 +224,14 @@ def test_reset_tensor_uses_tensor_ratios_when_materialization_disabled(
         torch.tensor([[[0.2, 0.3], [0.4, 0.5]]], dtype=torch.float32),
         torch.zeros((1, 2, 2), dtype=torch.int32),
         torch.ones((1, 2, 2), dtype=torch.bool),
+        torch.tensor([[[0.2, 0.3], [0.4, 0.5]]], dtype=torch.float32),
     )
     backend._consume_actor_observation = lambda **kwargs: (  # type: ignore[method-assign]
         torch.ones((3, 2, 2), dtype=torch.float32),
         None,
         torch.zeros((2, 2), dtype=torch.float32),
     )
-    backend._compute_observation_ratios = lambda *, depth_batch, valid_batch: (  # type: ignore[method-assign]
+    backend._compute_observation_ratios = lambda *, clamped_metric, valid_batch: (  # type: ignore[method-assign]
         torch.tensor([0.1], dtype=torch.float32),
         torch.tensor([0.2], dtype=torch.float32),
         torch.tensor([0.3], dtype=torch.float32),
@@ -569,12 +567,15 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
-    depth_2d, semantic_2d, valid_2d = backend._cast_actor_batch_tensors((0,))
+    depth_2d, semantic_2d, valid_2d, _metric = backend._cast_actor_batch_tensors((0,))
 
     assert depth_2d.shape == (1, 2, 1)
     assert semantic_2d.shape == (1, 2, 1)
     assert valid_2d.shape == (1, 2, 1)
-    assert torch.allclose(depth_2d[0, :, 0], torch.tensor([0.5, 1.0], dtype=torch.float32))
+    expected_depth = torch.tensor(
+        [math.log1p(5.0) / math.log1p(10.0), 1.0], dtype=torch.float32
+    )
+    assert torch.allclose(depth_2d[0, :, 0], expected_depth)
     assert torch.equal(valid_2d[0, :, 0], torch.tensor([True, False]))
 
 
@@ -611,7 +612,7 @@ def test_cast_actor_batch_tensors_treats_exact_horizon_as_valid() -> None:
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
-    depth_2d, semantic_2d, valid_2d = backend._cast_actor_batch_tensors((0,))
+    depth_2d, semantic_2d, valid_2d, _metric = backend._cast_actor_batch_tensors((0,))
 
     assert torch.allclose(depth_2d[0, :, 0], torch.tensor([1.0], dtype=torch.float32))
     assert torch.equal(semantic_2d[0, :, 0], torch.tensor([3], dtype=torch.int32))
@@ -651,7 +652,7 @@ def test_cast_actor_batch_tensors_clamps_negative_inside_solid_distances_to_zero
     backend._require_dag_tensor = lambda: torch.zeros((1,), dtype=torch.int64)  # type: ignore[method-assign]
     backend._require_asset = lambda: type("Asset", (), {"resolution": 512})()  # type: ignore[method-assign]
 
-    depth_2d, semantic_2d, valid_2d = backend._cast_actor_batch_tensors((0,))
+    depth_2d, semantic_2d, valid_2d, _metric = backend._cast_actor_batch_tensors((0,))
 
     assert torch.allclose(depth_2d[0, :, 0], torch.tensor([0.0], dtype=torch.float32))
     assert torch.equal(semantic_2d[0, :, 0], torch.tensor([9], dtype=torch.int32))
@@ -715,7 +716,12 @@ def test_postprocess_cast_outputs_preserves_oracle_house_profile() -> None:
         )
     )
 
-    np.testing.assert_allclose(depth_batch[0].numpy(), oracle.depth)
+    expected_depth = np.where(
+        oracle.valid,
+        np.log1p(oracle.depth * 10.0) / np.log1p(10.0),
+        1.0,
+    ).astype(np.float32)
+    np.testing.assert_allclose(depth_batch[0].numpy(), expected_depth, atol=1e-6)
     np.testing.assert_array_equal(semantic_batch[0].numpy(), oracle.semantic)
     np.testing.assert_array_equal(valid_batch[0].numpy(), oracle.valid)
     assert min_distances.shape == (1,)
