@@ -9,6 +9,8 @@ No CUDA needed — all tensors are CPU for these unit tests.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 
@@ -29,7 +31,8 @@ def _postprocess(
     hit_mask = semantic != 0
     valid = hit_mask & torch.isfinite(metric) & (metric <= max_distance)
     clamped = torch.where(valid, metric, torch.full_like(metric, max_distance))
-    depth = (clamped / max_distance).clamp(0.0, 1.0)
+    log_denom = math.log1p(max_distance)
+    depth = (torch.log1p(clamped) / log_denom).clamp(0.0, 1.0)
     return depth, valid, semantic
 
 
@@ -38,15 +41,23 @@ def _postprocess(
 class TestNormalization:
     """Synthetic distances → expected normalized depth values."""
 
-    MAX_DIST = 30.0
+    MAX_DIST = 100.0
 
     def test_known_values(self) -> None:
-        raw_distances = torch.tensor([[0.5, 1.0, 5.0, 30.0, float("inf"), float("nan")]])
+        raw_distances = torch.tensor([[0.5, 1.0, 5.0, 100.0, float("inf"), float("nan")]])
         raw_semantics = torch.tensor([[1, 1, 1, 1, 0, 0]], dtype=torch.int32)
 
         depth, _valid, _sem = _postprocess(raw_distances, raw_semantics, 6, 1, self.MAX_DIST)
 
-        expected_depth = [0.5 / 30, 1.0 / 30, 5.0 / 30, 1.0, 1.0, 1.0]
+        log_denom = math.log1p(100.0)
+        expected_depth = [
+            math.log1p(0.5) / log_denom,
+            math.log1p(1.0) / log_denom,
+            math.log1p(5.0) / log_denom,
+            1.0,  # log1p(100) / log1p(100)
+            1.0,  # invalid → clamped to max_distance
+            1.0,  # invalid → clamped to max_distance
+        ]
         for i, exp in enumerate(expected_depth):
             assert abs(float(depth[0, i, 0]) - exp) < 1e-6, (
                 f"depth[{i}]: expected {exp:.6f}, got {float(depth[0, i, 0]):.6f}"
@@ -55,7 +66,7 @@ class TestNormalization:
     def test_zero_distance(self) -> None:
         raw = torch.tensor([[0.0]])
         sem = torch.tensor([[1]], dtype=torch.int32)
-        depth, _valid, _ = _postprocess(raw, sem, 1, 1, 30.0)
+        depth, _valid, _ = _postprocess(raw, sem, 1, 1, 100.0)
         assert float(depth[0, 0, 0]) == 0.0
 
 
@@ -72,22 +83,22 @@ class TestValidMask:
             assert bool(valid[0, i, 0]) == exp, f"valid[{i}]: expected {exp}"
 
     def test_just_over_max_is_invalid(self) -> None:
-        raw = torch.tensor([[30.001]])
+        raw = torch.tensor([[100.001]])
         sem = torch.tensor([[1]], dtype=torch.int32)
-        _, valid, _ = _postprocess(raw, sem, 1, 1, 30.0)
+        _, valid, _ = _postprocess(raw, sem, 1, 1, 100.0)
         assert not bool(valid[0, 0, 0])
 
     def test_exactly_max_is_valid(self) -> None:
-        raw = torch.tensor([[30.0]])
+        raw = torch.tensor([[100.0]])
         sem = torch.tensor([[1]], dtype=torch.int32)
-        _, valid, _ = _postprocess(raw, sem, 1, 1, 30.0)
+        _, valid, _ = _postprocess(raw, sem, 1, 1, 100.0)
         assert bool(valid[0, 0, 0])
 
     def test_finite_distance_with_no_hit_is_invalid(self) -> None:
         """Ray exhausted max_steps: finite distance within range but semantic=0."""
         raw = torch.tensor([[15.0]])
         sem = torch.tensor([[0]], dtype=torch.int32)
-        _, valid, _ = _postprocess(raw, sem, 1, 1, 30.0)
+        _, valid, _ = _postprocess(raw, sem, 1, 1, 100.0)
         assert not bool(valid[0, 0, 0])
 
 
@@ -99,15 +110,17 @@ class TestReshapeFlatToGrid:
 
     def test_unique_values_roundtrip(self) -> None:
         n = self.AZ * self.EL
+        max_dist = float(n + 1)
         raw = torch.arange(n, dtype=torch.float32).unsqueeze(0)  # [1, 32]
         sem = torch.ones((1, n), dtype=torch.int32)
-        depth, _, _ = _postprocess(raw, sem, self.AZ, self.EL, float(n + 1))
+        depth, _, _ = _postprocess(raw, sem, self.AZ, self.EL, max_dist)
 
+        log_denom = math.log1p(max_dist)
         grid = depth[0]  # [AZ, EL]
         for az in range(self.AZ):
             for el in range(self.EL):
                 flat_idx = az * self.EL + el
-                expected = flat_idx / float(n + 1)
+                expected = math.log1p(flat_idx) / log_denom
                 actual = float(grid[az, el])
                 assert abs(actual - expected) < 1e-6, (
                     f"grid[{az},{el}] = {actual:.6f}, expected {expected:.6f} (flat_idx={flat_idx})"

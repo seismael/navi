@@ -360,6 +360,7 @@ class PpoLearner:
             iterator_setup_start = time.perf_counter()
             minibatch_iter = iter(buffer.sample_minibatches(minibatch_size, seq_len))
             iterator_setup_ms_acc += (time.perf_counter() - iterator_setup_start) * 1000
+            _kl_early_stop = False
             while True:
                 update_total_start = time.perf_counter()
                 t_fetch_start = time.perf_counter()
@@ -470,6 +471,34 @@ class PpoLearner:
                     eval_temporal_device_ms_acc += eval_stage_metrics.temporal_device_ms
                     eval_heads_device_ms_acc += eval_stage_metrics.heads_device_ms
 
+                # --- Divergence guards ---
+                if not torch.isfinite(total_loss):
+                    _LOGGER.critical(
+                        "Non-finite loss detected, skipping optimizer step"
+                    )
+                    n_updates += 1
+                    if progress_callback is not None:
+                        progress_callback()
+                    continue
+
+                with torch.no_grad():
+                    _approx_kl = (ratio - 1.0 - log_ratio).mean().item()
+                if _approx_kl > 0.03:
+                    _LOGGER.warning(
+                        "KL divergence %.4f exceeds threshold 0.03, stopping epoch early",
+                        _approx_kl,
+                    )
+                    _kl_early_stop = True
+                    break
+
+                with torch.no_grad():
+                    _max_val = new_vals.abs().max().item()
+                if _max_val > 1000.0:
+                    _LOGGER.warning(
+                        "Value function prediction |V|=%.1f exceeds 1000, possible explosion",
+                        _max_val,
+                    )
+
                 # Optimization step
                 with _stage_timer(
                     device=device, use_cuda_events=self._profile_cuda_events
@@ -564,6 +593,8 @@ class PpoLearner:
                 timed_update_ms += stats_wall_ms + callback_ms
                 update_total_ms = (time.perf_counter() - update_total_start) * 1000
                 update_loop_overhead_ms_acc += max(0.0, update_total_ms - timed_update_ms)
+            if _kl_early_stop:
+                break
 
         if n_updates == 0:
             return PpoMetrics(

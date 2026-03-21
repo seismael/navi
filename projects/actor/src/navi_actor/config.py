@@ -67,6 +67,8 @@ class ActorConfig(BaseSettings):
     embedding_dim: int = 128
     learning_rate: float = 3e-4
     learning_rate_final: float = 3e-5
+    lr_schedule_steps: int = 0
+    normalize_returns: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_ratio: float = 0.2

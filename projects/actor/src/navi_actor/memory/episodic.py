@@ -125,12 +125,26 @@ class EpisodicMemory:
 
     def query_normalized_batch_tensor(
         self, normalized_embeddings: Tensor
-    ) -> tuple[Tensor, Tensor]:
-        """Query a pre-normalized embedding batch without recomputing norms."""
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Query a pre-normalized embedding batch without recomputing norms.
+
+        Returns:
+            similarities: best cosine similarity per query.
+            is_loops: thresholded loop-detection flags.
+            temporal_distances: how many insertions ago the best match was stored
+                (useful for scaling loop penalties by recency).
+        """
         similarities, indices = self._query_prepared_batch_indices(normalized_embeddings)
         valid = indices >= 0
         loops = valid & (similarities >= self.similarity_threshold)
-        return similarities, loops
+        # Temporal distance: how many insertions ago the match was stored.
+        # Uses circular buffer arithmetic: (write_ptr - match_idx) % capacity.
+        temporal_distances = torch.where(
+            valid,
+            ((self._next_index - indices) % max(self._size, 1)).float(),
+            torch.zeros_like(similarities),
+        )
+        return similarities, loops, temporal_distances
 
     def normalize_batch_tensor(self, embeddings: Tensor) -> Tensor:
         """Normalize one embedding batch for reuse across query and add."""

@@ -23,6 +23,34 @@ def _normalize_advantages_once(advantages: Tensor) -> Tensor:
     return (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
 
+class RunningMeanStd:
+    """Welford running mean/std tracker for return normalization."""
+
+    def __init__(self, device: torch.device | None = None) -> None:
+        self._mean: float = 0.0
+        self._var: float = 1.0
+        self._count: float = 1e-4  # small epsilon to avoid div-by-zero initially
+
+    def update(self, values: Tensor) -> None:
+        """Update running statistics with a batch of values."""
+        batch_mean = values.mean().item()
+        batch_var = values.var().item()
+        batch_count = float(values.numel())
+        delta = batch_mean - self._mean
+        total = self._count + batch_count
+        self._mean = self._mean + delta * batch_count / total
+        m_a = self._var * self._count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta**2 * self._count * batch_count / total
+        self._var = m2 / total
+        self._count = total
+
+    def normalize(self, values: Tensor) -> Tensor:
+        """Normalize values using running mean/std."""
+        std = max(self._var, 1e-8) ** 0.5
+        return (values - self._mean) / std
+
+
 # ---------------------------------------------------------------------------
 # PPO trajectory types
 # ---------------------------------------------------------------------------
@@ -37,6 +65,7 @@ class MultiTrajectoryBuffer:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         capacity: int | None = None,
+        normalize_returns: bool = False,
     ) -> None:
         if capacity is None:
             raise ValueError(
@@ -46,6 +75,8 @@ class MultiTrajectoryBuffer:
         self._n_actors = n_actors
         self._gamma = gamma
         self._gae_lambda = gae_lambda
+        self._normalize_returns = normalize_returns
+        self._return_normalizer = RunningMeanStd() if normalize_returns else None
         self._cache_valid = False
         self._all_obs: Tensor | None = None
         self._all_actions: Tensor | None = None
@@ -332,8 +363,12 @@ class MultiTrajectoryBuffer:
         self._ensure_batched_advantage_storage(device)
         assert self._batch_advantages is not None
         assert self._batch_returns is not None
+        raw_returns = advantages + values
+        if self._return_normalizer is not None:
+            self._return_normalizer.update(raw_returns)
+            raw_returns = self._return_normalizer.normalize(raw_returns)
         self._batch_advantages[:, :rollout_len].copy_(advantages)
-        self._batch_returns[:, :rollout_len].copy_(advantages + values)
+        self._batch_returns[:, :rollout_len].copy_(raw_returns)
         self._invalidate_views()
 
     def clear(self) -> None:

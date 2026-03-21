@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import queue
 import threading
 import time
@@ -482,6 +483,7 @@ class PpoTrainer:
             gamma=config.gamma,
             gae_lambda=config.gae_lambda,
             capacity=config.rollout_length,
+            normalize_returns=config.normalize_returns,
         )
 
         self._sim_steps_during_opt: int = 0
@@ -1185,12 +1187,17 @@ class PpoTrainer:
             normalized_memory_batch = self._memory.normalize_batch_tensor(
                 host_batch.embedding_tensor
             )
-            loop_similarities, _ = self._memory.query_normalized_batch_tensor(
+            loop_similarities, _, loop_temporal_distances = self._memory.query_normalized_batch_tensor(
                 normalized_memory_batch
             )
         else:
             normalized_memory_batch = None
             loop_similarities = torch.zeros(
+                (group_size,),
+                dtype=torch.float32,
+                device=host_batch.embedding_tensor.device,
+            )
+            loop_temporal_distances = torch.zeros(
                 (group_size,),
                 dtype=torch.float32,
                 device=host_batch.embedding_tensor.device,
@@ -1214,6 +1221,7 @@ class PpoTrainer:
                 angular_velocities=host_batch.action_tensor[:, 3],
                 intrinsic_rewards=intrinsic_rewards,
                 loop_similarities=loop_similarities,
+                loop_temporal_distances=loop_temporal_distances,
             )
             self._reward_shaper.step_batch(group_size)
         else:
@@ -2238,6 +2246,16 @@ class PpoTrainer:
                 break
 
             # --- Rollout Loop Finished ---
+            # Cosine LR annealing: decay learning rate over training.
+            if self._config.lr_schedule_steps > 0:
+                frac = min(1.0, step_id / self._config.lr_schedule_steps)
+                lr_init = self._config.learning_rate
+                lr_final = self._config.learning_rate_final
+                cosine_lr = lr_final + 0.5 * (lr_init - lr_final) * (1.0 + math.cos(math.pi * frac))
+                rnd_lr_init = self._config.rnd_learning_rate
+                rnd_lr_final = self._config.rnd_learning_rate_final
+                cosine_rnd_lr = rnd_lr_final + 0.5 * (rnd_lr_init - rnd_lr_final) * (1.0 + math.cos(math.pi * frac))
+                self._learner.set_learning_rate(cosine_lr, rnd_lr=cosine_rnd_lr)
             self._run_ppo_update(
                 multi_buffer=self._multi_buffers,
                 obs_batch=current_obs_batch.detach().clone(),

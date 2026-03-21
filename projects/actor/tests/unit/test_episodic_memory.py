@@ -145,7 +145,7 @@ def test_prepared_tensor_query_and_add_matches_regular_batch_path() -> None:
     regular.add_batch_tensor(query_batch)
 
     prepared_batch = prepared.normalize_batch_tensor(query_batch)
-    prepared_similarities, prepared_loops = prepared.query_normalized_batch_tensor(prepared_batch)
+    prepared_similarities, prepared_loops, _prepared_temporal = prepared.query_normalized_batch_tensor(prepared_batch)
     prepared.add_normalized_batch_tensor(prepared_batch)
 
     assert torch.allclose(prepared_similarities, regular_similarities)

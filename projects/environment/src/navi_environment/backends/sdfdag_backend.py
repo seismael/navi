@@ -48,11 +48,15 @@ _STARVATION_PENALTY_SCALE: float = 1.5
 _PROXIMITY_DISTANCE_THRESHOLD: float = 1.0
 _PROXIMITY_PENALTY_SCALE: float = 0.8
 _STRUCTURE_BAND_MIN_DISTANCE: float = 1.5
-_STRUCTURE_BAND_MAX_DISTANCE: float = 10.0
+_STRUCTURE_BAND_MAX_DISTANCE: float = 30.0
 _STRUCTURE_BAND_REWARD_SCALE: float = 0.35
 _FORWARD_STRUCTURE_REWARD_SCALE: float = 0.2
 _INSPECTION_REWARD_SCALE: float = 0.25
 _INSPECTION_ACTIVATION_THRESHOLD: float = 0.05
+_HEADING_NOVELTY_SCALE: float = 0.05
+_HEADING_SECTORS: int = 16
+_FRONTIER_BONUS_SCALE: float = 0.1
+_STARVATION_DEAD_ZONE: float = 0.2
 _SPAWN_CANDIDATES_PER_AXIS: int = 3
 _SPAWN_HEIGHT_SAMPLES: int = 5
 _SPAWN_PROBE_AZIMUTH_BINS: int = 48
@@ -87,8 +91,10 @@ def _starvation_penalty(
     if penalty_scale <= 0.0:
         return 0.0
     starvation_ratio = max(0.0, min(1.0, starvation_ratio))
-    baseline = 0.35 * starvation_ratio
-    overflow = max(0.0, starvation_ratio - max(0.0, ratio_threshold))
+    # Dead zone: starvation below _STARVATION_DEAD_ZONE is free (normal viewing).
+    effective = max(0.0, starvation_ratio - _STARVATION_DEAD_ZONE)
+    baseline = 0.35 * effective
+    overflow = max(0.0, effective - max(0.0, ratio_threshold))
     return -penalty_scale * float(min(baseline + overflow, 1.0))
 
 
@@ -150,20 +156,19 @@ def _inspection_reward(
 
 
 def _observation_profile(
-    depth_2d: np.ndarray,
+    metric_depth: np.ndarray,
     valid_2d: np.ndarray,
     *,
-    max_distance: float,
     proximity_distance_threshold: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
 ) -> tuple[float, float, float, float]:
+    """Compute observation ratios from metric distances (in meters)."""
     valid_ratio = float(np.mean(valid_2d, dtype=np.float32))
     starvation_ratio = max(0.0, min(1.0, 1.0 - valid_ratio))
     structure_band_ratio = 0.0
     forward_structure_ratio = 0.0
-    if structure_band_max_distance > structure_band_min_distance and max_distance > 0.0:
-        metric_depth = depth_2d * max_distance
+    if structure_band_max_distance > structure_band_min_distance:
         structure_mask = np.logical_and(
             valid_2d,
             np.logical_and(
@@ -172,15 +177,15 @@ def _observation_profile(
             ),
         )
         structure_band_ratio = float(np.mean(structure_mask, dtype=np.float32))
-        forward_half_bins = max(1, depth_2d.shape[0] // 6)
+        forward_half_bins = max(1, metric_depth.shape[0] // 6)
         forward_sector = np.concatenate(
             (structure_mask[:forward_half_bins, :], structure_mask[-forward_half_bins:, :]),
             axis=0,
         )
         forward_structure_ratio = float(np.mean(forward_sector, dtype=np.float32))
-    if proximity_distance_threshold <= 0.0 or max_distance <= 0.0:
+    if proximity_distance_threshold <= 0.0:
         return starvation_ratio, 0.0, structure_band_ratio, forward_structure_ratio
-    near_mask = np.logical_and(valid_2d, depth_2d * max_distance <= proximity_distance_threshold)
+    near_mask = np.logical_and(valid_2d, metric_depth <= proximity_distance_threshold)
     proximity_ratio = float(np.mean(near_mask, dtype=np.float32))
     return (
         starvation_ratio,
@@ -210,17 +215,16 @@ def build_spherical_ray_directions(azimuth_bins: int, elevation_bins: int) -> np
 
 
 def _select_spawn_yaw_from_observation(
-    depth_2d: np.ndarray,
+    metric_depth: np.ndarray,
     valid_2d: np.ndarray,
     *,
-    max_distance: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
 ) -> float:
-    azimuth_bins = int(depth_2d.shape[0])
+    """Select best spawn yaw from metric distances (in meters)."""
+    azimuth_bins = int(metric_depth.shape[0])
     if azimuth_bins <= 0:
         return 0.0
-    metric_depth = depth_2d * max_distance
     structure_mask = np.logical_and(
         valid_2d,
         np.logical_and(
@@ -252,19 +256,17 @@ def _select_spawn_yaw_from_observation(
 
 
 def _spawn_candidate_score(
-    depth_2d: np.ndarray,
+    metric_depth: np.ndarray,
     valid_2d: np.ndarray,
     *,
-    max_distance: float,
     proximity_distance_threshold: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
 ) -> float:
     starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = (
         _observation_profile(
-            depth_2d,
+            metric_depth,
             valid_2d,
-            max_distance=max_distance,
             proximity_distance_threshold=proximity_distance_threshold,
             structure_band_min_distance=structure_band_min_distance,
             structure_band_max_distance=structure_band_max_distance,
@@ -351,10 +353,9 @@ def _maybe_compile_callable(
 
 
 def _compute_observation_ratios_tensor(
-    depth_batch: torch.Tensor,
+    clamped_metric: torch.Tensor,
     valid_batch: torch.Tensor,
     *,
-    max_distance: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
     proximity_distance_threshold: float,
@@ -363,25 +364,23 @@ def _compute_observation_ratios_tensor(
     starvation_ratios = 1.0 - valid_f.mean(dim=(1, 2))
     structure_band_ratios = torch.zeros_like(starvation_ratios)
     forward_structure_ratios = torch.zeros_like(starvation_ratios)
-    if structure_band_max_distance > structure_band_min_distance and max_distance > 0.0:
-        metric_depth = depth_batch * max_distance
+    if structure_band_max_distance > structure_band_min_distance:
         structure_mask = (
             valid_batch
-            & (metric_depth >= structure_band_min_distance)
-            & (metric_depth <= structure_band_max_distance)
+            & (clamped_metric >= structure_band_min_distance)
+            & (clamped_metric <= structure_band_max_distance)
         )
         structure_band_ratios = structure_mask.to(dtype=torch.float32).mean(dim=(1, 2))
-        forward_half_bins = max(1, int(depth_batch.shape[1]) // 6)
+        forward_half_bins = max(1, int(clamped_metric.shape[1]) // 6)
         forward_sector = torch.cat(
             (structure_mask[:, :forward_half_bins, :], structure_mask[:, -forward_half_bins:, :]),
             dim=1,
         )
         forward_structure_ratios = forward_sector.to(dtype=torch.float32).mean(dim=(1, 2))
-    if proximity_distance_threshold <= 0.0 or max_distance <= 0.0:
+    if proximity_distance_threshold <= 0.0:
         proximity_ratios = torch.zeros_like(starvation_ratios)
     else:
-        metric_depth = depth_batch * max_distance
-        proximity_mask = valid_batch & (metric_depth <= proximity_distance_threshold)
+        proximity_mask = valid_batch & (clamped_metric <= proximity_distance_threshold)
         proximity_ratios = proximity_mask.to(dtype=torch.float32).mean(dim=(1, 2))
     return (
         starvation_ratios.clamp(min=0.0, max=1.0),
@@ -410,6 +409,7 @@ def _postprocess_cast_outputs_tensor(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
 ]:
     actor_count = int(out_distances.shape[0])
     metric_distances = out_distances.reshape(actor_count, az_bins, el_bins)
@@ -426,7 +426,11 @@ def _postprocess_cast_outputs_tensor(
             metric_distances,
             torch.full_like(metric_distances, max_distance),
         )
-        depth_batch = (clamped_metric / max_distance).clamp(min=0.0, max=1.0)
+        # Logarithmic normalization: preserves near-field detail while
+        # compressing far-field distances into a usable gradient range.
+        # log1p is numerically stable and maps [0, max_distance] → [0, 1].
+        _log_denom = math.log1p(max_distance)
+        depth_batch = (torch.log1p(clamped_metric) / _log_denom).clamp(min=0.0, max=1.0)
     else:
         valid_batch = hit_mask & torch.isfinite(metric_distances)
         clamped_metric = torch.where(
@@ -436,9 +440,8 @@ def _postprocess_cast_outputs_tensor(
     min_distances = clamped_metric.amin(dim=(1, 2))
     starvation_ratios, proximity_ratios, structure_band_ratios, forward_structure_ratios = (
         _compute_observation_ratios_tensor(
-            depth_batch,
+            clamped_metric,
             valid_batch,
-            max_distance=max_distance,
             structure_band_min_distance=structure_band_min_distance,
             structure_band_max_distance=structure_band_max_distance,
             proximity_distance_threshold=proximity_distance_threshold,
@@ -453,6 +456,7 @@ def _postprocess_cast_outputs_tensor(
         proximity_ratios,
         structure_band_ratios,
         forward_structure_ratios,
+        clamped_metric,
     )
 
 
@@ -495,8 +499,10 @@ def _reward_components_tensor(
             * norm_deltas.clamp(min=-1.0, max=1.0)
             * obstacle_clearance_reward_scale
         )
-    starvation_baselines = 0.35 * starvation_ratios
-    starvation_overflows = (starvation_ratios - starvation_ratio_threshold).clamp(min=0.0)
+    # Dead zone: starvation below _STARVATION_DEAD_ZONE is free (normal viewing).
+    effective_starvation = (starvation_ratios - _STARVATION_DEAD_ZONE).clamp(min=0.0)
+    starvation_baselines = 0.35 * effective_starvation
+    starvation_overflows = (effective_starvation - starvation_ratio_threshold).clamp(min=0.0)
     starvation_penalties = -(starvation_baselines + starvation_overflows).clamp(max=1.0)
     starvation_penalties = starvation_penalties * starvation_penalty_scale
     proximity_penalties = -proximity_ratios.clamp(max=1.0) * proximity_penalty_scale
@@ -554,7 +560,11 @@ def _step_kinematics_tensor(
     front_left = previous_depths[:, :span, :].reshape(actor_count, -1).amin(dim=1)
     front_right = previous_depths[:, -span:, :].reshape(actor_count, -1).amin(dim=1)
     min_front = torch.minimum(front_left, front_right)
-    speed_factors = (min_front * max_distance / 1.5).clamp(min=0.05, max=1.0).unsqueeze(1)
+    # previous_depths are log-normalized: norm = log1p(metric) / log1p(max_distance).
+    # Invert to recover metric distance for the speed limiter.
+    _log_denom = math.log1p(max_distance)
+    min_front_metric = torch.expm1(min_front * _log_denom)
+    speed_factors = (min_front_metric / 1.5).clamp(min=0.05, max=1.0).unsqueeze(1)
 
     linear_cmd = actions_linear.clone()
     linear_cmd[:, 0] *= speed_fwd
@@ -778,6 +788,10 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_linear_vels = self._torch.zeros(
             (self._n_actors, 3), device=self._device, dtype=self._torch.float32
         )
+        # Heading novelty: track visited heading sectors per actor per episode
+        self._heading_visited = self._torch.zeros(
+            (self._n_actors, _HEADING_SECTORS), device=self._device, dtype=self._torch.bool
+        )
         self._prev_angular_vels = self._torch.zeros(
             (self._n_actors, 3), device=self._device, dtype=self._torch.float32
         )
@@ -789,8 +803,9 @@ class SdfDagBackend(SimulatorBackend):
         self._speed_yaw = config.drone_yaw_rate
 
         self._grid_res = 2.0
+        self._grid_res_y = 2.0
         self._visit_grid = self._torch.zeros(
-            (self._n_actors, 1, 1), device=self._device, dtype=self._torch.uint8
+            (self._n_actors, 1, 1, 1), device=self._device, dtype=self._torch.int16
         )
         self._grid_min = self._torch.zeros((3,), device=self._device, dtype=self._torch.float32)
 
@@ -860,26 +875,30 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_forward_structure_ratios[actor_id] = 0.0
         self._episode_returns[actor_id] = 0.0
         self._visit_grid[actor_id].zero_()
+        self._heading_visited[actor_id].zero_()
         self._prev_linear_vels[actor_id].zero_()
         self._prev_angular_vels[actor_id].zero_()
         self._needs_reset_mask[actor_id] = False
 
-        depth_batch, semantic_batch, valid_batch = self._cast_actor_batch_tensors((actor_id,))
+        depth_batch, semantic_batch, valid_batch, cm = self._cast_actor_batch_tensors((actor_id,))
         _obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
             actor_id=actor_id,
             step_id=0,
-            current_clearance=float(depth_batch[0].amin().detach().cpu()) * self._max_distance,
+            current_clearance=float(cm[0].amin().detach().cpu()),
             depth_2d=depth_batch[0],
             semantic_2d=semantic_batch[0],
             valid_2d=valid_batch[0],
             materialize_depth_cpu=True,
         )
         assert depth_cpu is not None
+        # Convert log-normalized depth_cpu back to metric for observation profile.
+        metric_cpu = np.expm1(depth_cpu * math.log1p(self._max_distance)).astype(
+            np.float32, copy=False
+        )
         _starvation_ratio, _proximity_ratio, structure_band_ratio, forward_structure_ratio = (
             _observation_profile(
-                depth_cpu,
+                metric_cpu,
                 valid_batch[0].detach().cpu().numpy().astype(np.bool_, copy=False),
-                max_distance=self._max_distance,
                 proximity_distance_threshold=self._proximity_distance_threshold,
                 structure_band_min_distance=self._structure_band_min_distance,
                 structure_band_max_distance=self._structure_band_max_distance,
@@ -923,12 +942,13 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_forward_structure_ratios[actor_id] = 0.0
         self._episode_returns[actor_id] = 0.0
         self._visit_grid[actor_id].zero_()
+        self._heading_visited[actor_id].zero_()
         self._prev_linear_vels[actor_id].zero_()
         self._prev_angular_vels[actor_id].zero_()
         self._needs_reset_mask[actor_id] = False
 
-        depth_batch, semantic_batch, valid_batch = self._cast_actor_batch_tensors((actor_id,))
-        current_clearance = depth_batch[0].amin() * self._max_distance
+        depth_batch, semantic_batch, valid_batch, clamped_metric_batch = self._cast_actor_batch_tensors((actor_id,))
+        current_clearance = clamped_metric_batch[0].amin()
         obs_tensor, depth_cpu, delta_tensor = self._consume_actor_observation(
             actor_id=actor_id,
             step_id=0,
@@ -943,7 +963,7 @@ class SdfDagBackend(SimulatorBackend):
             _proximity_ratios,
             structure_band_ratios,
             forward_structure_ratios,
-        ) = self._compute_observation_ratios(depth_batch=depth_batch, valid_batch=valid_batch)
+        ) = self._compute_observation_ratios(clamped_metric=clamped_metric_batch, valid_batch=valid_batch)
         self._prev_structure_band_ratios[actor_id] = structure_band_ratios[0]
         self._prev_forward_structure_ratios[actor_id] = forward_structure_ratios[0]
         published = None
@@ -1032,16 +1052,17 @@ class SdfDagBackend(SimulatorBackend):
                 actions_angular=ang_actions,
             )
 
-            depth_batch, semantic_batch, valid_batch = self._cast_actor_batch(
+            depth_batch, semantic_batch, valid_batch, metric_batch = self._cast_actor_batch(
                 tuple(active_actor_ids)
             )
-            all_min_distances = np.min(depth_batch, axis=(1, 2)) * self._max_distance
+            all_min_distances = np.min(metric_batch, axis=(1, 2))
 
             for batch_idx, actor_id in enumerate(active_actor_ids):
                 previous_pose = previous_poses[actor_id]
                 depth_2d = depth_batch[batch_idx]
                 semantic_2d = semantic_batch[batch_idx]
                 valid_2d = valid_batch[batch_idx]
+                metric_2d = metric_batch[batch_idx]
 
                 min_distance = float(all_min_distances[batch_idx])
                 collision = min_distance < _COLLISION_CLEARANCE
@@ -1055,13 +1076,14 @@ class SdfDagBackend(SimulatorBackend):
                         )
                     )
                     self._actor_yaws[actor_id] = previous_pose.yaw
-                    corrected_depth, corrected_semantic, corrected_valid = self._cast_actor_batch(
-                        (actor_id,)
+                    corrected_depth, corrected_semantic, corrected_valid, corrected_metric = (
+                        self._cast_actor_batch((actor_id,))
                     )
                     depth_2d = corrected_depth[0]
                     semantic_2d = corrected_semantic[0]
                     valid_2d = corrected_valid[0]
-                    min_distance = float(np.min(depth_2d)) * self._max_distance
+                    metric_2d = corrected_metric[0]
+                    min_distance = float(np.min(metric_2d))
 
                 (
                     starvation_ratio,
@@ -1069,9 +1091,8 @@ class SdfDagBackend(SimulatorBackend):
                     structure_band_ratio,
                     forward_structure_ratio,
                 ) = _observation_profile(
-                    depth_2d,
+                    metric_2d,
                     valid_2d,
-                    max_distance=self._max_distance,
                     proximity_distance_threshold=self._proximity_distance_threshold,
                     structure_band_min_distance=self._structure_band_min_distance,
                     structure_band_max_distance=self._structure_band_max_distance,
@@ -1083,6 +1104,7 @@ class SdfDagBackend(SimulatorBackend):
                     depth_2d=depth_2d,
                     semantic_2d=semantic_2d,
                     valid_2d=valid_2d,
+                    min_distance_metric=min_distance,
                 )
 
                 self._actor_steps[actor_id] += 1
@@ -1269,6 +1291,7 @@ class SdfDagBackend(SimulatorBackend):
                 proximity_ratios_t,
                 structure_band_ratios_t,
                 forward_structure_ratios_t,
+                _clamped_metric_t,
             ) = self._postprocess_cast_outputs(out_distances, out_semantics)
 
             collisions_t = min_distances_t < _COLLISION_CLEARANCE
@@ -1405,12 +1428,11 @@ class SdfDagBackend(SimulatorBackend):
         )
 
     def _compute_observation_ratios(
-        self, *, depth_batch: Any, valid_batch: Any
+        self, *, clamped_metric: Any, valid_batch: Any
     ) -> tuple[Any, Any, Any, Any]:
         return _compute_observation_ratios_tensor(
-            depth_batch,
+            clamped_metric,
             valid_batch,
-            max_distance=float(getattr(self, "_max_distance", 0.0)),
             structure_band_min_distance=float(
                 getattr(self, "_structure_band_min_distance", _STRUCTURE_BAND_MIN_DISTANCE)
             ),
@@ -1588,15 +1610,16 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_forward_structure_ratios[actor_indices] = 0.0
         self._episode_returns[actor_indices] = 0.0
         self._visit_grid[actor_indices] = 0
+        self._heading_visited[actor_indices] = False
         self._prev_linear_vels[actor_indices] = 0.0
         self._prev_angular_vels[actor_indices] = 0.0
         self._needs_reset_mask[actor_indices] = False
 
-        depth_batch, semantic_batch, valid_batch = self._cast_actor_batch_indexed_tensors(
+        depth_batch, semantic_batch, valid_batch, clamped_metric_batch = self._cast_actor_batch_indexed_tensors(
             actor_indices,
             scratch_slot=scratch_slot,
         )
-        current_clearances = depth_batch.amin(dim=(1, 2)).mul(self._max_distance)
+        current_clearances = clamped_metric_batch.amin(dim=(1, 2))
         obs_batch_t, deltas_batch_t = self._consume_observation_batch(
             actor_indices=actor_indices,
             depth_batch=depth_batch,
@@ -1606,7 +1629,7 @@ class SdfDagBackend(SimulatorBackend):
         )
         _starvation, _proximity, structure_band_ratios_t, forward_structure_ratios_t = (
             self._compute_observation_ratios(
-                depth_batch=depth_batch,
+                clamped_metric=clamped_metric_batch,
                 valid_batch=valid_batch,
             )
         )
@@ -1827,23 +1850,42 @@ class SdfDagBackend(SimulatorBackend):
             self._bbox_max, device=self._device, dtype=self._torch.float32
         )
         extent = grid_max - grid_min
+
+        # Scene-adaptive parameter scaling based on characteristic length
+        char_len = (extent[0] * extent[1] * extent[2]).pow(1.0 / 3.0).item()
+        adapted_grid_res = max(1.0, min(4.0, char_len / 10.0))
+        adapted_grid_res_y = max(1.0, min(4.0, char_len / 10.0))
+        adapted_structure_band_max = min(char_len * 0.6, 50.0)
+        self._grid_res = adapted_grid_res
+        self._grid_res_y = adapted_grid_res_y
+        self._structure_band_max_distance = max(
+            self._structure_band_min_distance + 1.0,
+            adapted_structure_band_max,
+        )
+
         grid_w = int(self._torch.ceil(extent[0] / self._grid_res).item()) + 1
         grid_h = int(self._torch.ceil(extent[2] / self._grid_res).item()) + 1
+        grid_y = int(self._torch.ceil(extent[1] / self._grid_res_y).item()) + 1
 
         self._grid_min.copy_(grid_min)
         self._visit_grid = self._torch.zeros(
-            (self._n_actors, grid_w, grid_h),
+            (self._n_actors, grid_w, grid_y, grid_h),
             device=self._device,
-            dtype=self._torch.uint8,
+            dtype=self._torch.int16,
         )
 
         _LOG.info(
-            "Loaded gmdag asset %s (resolution=%d, nodes=%d, visit_grid=%dx%d)",
+            "Loaded gmdag asset %s (resolution=%d, nodes=%d, visit_grid=%dx%dx%d, "
+            "char_len=%.1f, grid_res=%.2f, struct_band_max=%.1f)",
             asset.path,
             asset.resolution,
             asset.nodes.shape[0],
             grid_w,
+            grid_y,
             grid_h,
+            char_len,
+            self._grid_res,
+            self._structure_band_max_distance,
         )
         spawn_poses = self._find_spawn_poses(self._n_actors)
         for i, (x_pos, y_pos, z_pos, yaw) in enumerate(spawn_poses):
@@ -1868,16 +1910,51 @@ class SdfDagBackend(SimulatorBackend):
         current_forward_structure_ratios: Any,  # (B,)
     ) -> tuple[Any, Any]:
         """Vectorized reward engine implementation (Phase 2)."""
-        grid_coords = (
+        grid_coords_xz = (
             ((current_positions[:, [0, 2]] - self._grid_min[[0, 2]]) / self._grid_res)
             .floor()
             .long()
         )
-        grid_coords[:, 0] = grid_coords[:, 0].clamp(0, self._visit_grid.shape[1] - 1)
-        grid_coords[:, 1] = grid_coords[:, 1].clamp(0, self._visit_grid.shape[2] - 1)
-        was_visited = self._visit_grid[actor_indices, grid_coords[:, 0], grid_coords[:, 1]] > 0
-        exploration_rewards = (~was_visited).float() * _EXPLORATION_REWARD
-        self._visit_grid[actor_indices, grid_coords[:, 0], grid_coords[:, 1]] = 1
+        grid_coords_y = (
+            ((current_positions[:, 1] - self._grid_min[1]) / self._grid_res_y)
+            .floor()
+            .long()
+        )
+        grid_coords_xz[:, 0] = grid_coords_xz[:, 0].clamp(0, self._visit_grid.shape[1] - 1)
+        grid_coords_y = grid_coords_y.clamp(0, self._visit_grid.shape[2] - 1)
+        grid_coords_xz[:, 1] = grid_coords_xz[:, 1].clamp(0, self._visit_grid.shape[3] - 1)
+        visit_counts = self._visit_grid[
+            actor_indices, grid_coords_xz[:, 0], grid_coords_y, grid_coords_xz[:, 1]
+        ].float()
+        exploration_rewards = _EXPLORATION_REWARD / (1.0 + visit_counts)
+        self._visit_grid[
+            actor_indices, grid_coords_xz[:, 0], grid_coords_y, grid_coords_xz[:, 1]
+        ] += 1
+        # Heading novelty: reward visiting new heading sectors
+        yaws = self._actor_yaws.index_select(0, actor_indices)
+        heading_sectors = ((yaws % (2.0 * math.pi)) / (2.0 * math.pi) * _HEADING_SECTORS).long()
+        heading_sectors = heading_sectors.clamp(0, _HEADING_SECTORS - 1)
+        was_heading_visited = self._heading_visited[actor_indices, heading_sectors]
+        heading_novelty = (~was_heading_visited).float() * _HEADING_NOVELTY_SCALE
+        exploration_rewards = exploration_rewards + heading_novelty
+        self._heading_visited[actor_indices, heading_sectors] = True
+        # Frontier bonus: reward being near unvisited territory.
+        # Check 6 face-adjacent neighbors in the 3D grid.
+        gx = grid_coords_xz[:, 0]
+        gy = grid_coords_y
+        gz = grid_coords_xz[:, 1]
+        g_shape = self._visit_grid.shape  # (actors, W, Y, H)
+        neighbor_unvisited = self._torch.zeros(
+            actor_indices.shape[0], device=self._device, dtype=self._torch.float32
+        )
+        for dx, dy, dz in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]:
+            nx = (gx + dx).clamp(0, g_shape[1] - 1)
+            ny = (gy + dy).clamp(0, g_shape[2] - 1)
+            nz = (gz + dz).clamp(0, g_shape[3] - 1)
+            neighbor_unvisited += (self._visit_grid[actor_indices, nx, ny, nz] == 0).float()
+        # Normalize: 0-6 unvisited neighbors → 0-1 range
+        frontier_bonus = (neighbor_unvisited / 6.0) * _FRONTIER_BONUS_SCALE
+        exploration_rewards = exploration_rewards + frontier_bonus
         prev_struct = self._prev_structure_band_ratios[actor_indices]
         prev_fwd = self._prev_forward_structure_ratios[actor_indices]
         impl = getattr(self, "_reward_components_compiled", _reward_components_tensor)
@@ -2061,19 +2138,20 @@ class SdfDagBackend(SimulatorBackend):
     def _cast_actor_batch(
         self,
         actor_ids: tuple[int, ...],
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        depth_t, semantic_t, valid_t = self._cast_actor_batch_tensors(actor_ids)
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        depth_t, semantic_t, valid_t, cm_t = self._cast_actor_batch_tensors(actor_ids)
         depth_2d = depth_t.detach().cpu().numpy().astype(np.float32, copy=False)
         semantic_2d = semantic_t.detach().cpu().numpy().astype(np.int32, copy=False)
         valid_2d = valid_t.detach().cpu().numpy().astype(np.bool_, copy=False)
-        return depth_2d, semantic_2d, valid_2d
+        metric_2d = cm_t.detach().cpu().numpy().astype(np.float32, copy=False)
+        return depth_2d, semantic_2d, valid_2d, metric_2d
 
     def _cast_actor_batch_tensors(
         self,
         actor_ids: tuple[int, ...],
         *,
         scratch_slot: int = 0,
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[Any, Any, Any, Any]:
         actor_count = len(actor_ids)
         yaws = self._actor_yaws[list(actor_ids)]
         positions = self._actor_positions[list(actor_ids)]
@@ -2108,17 +2186,17 @@ class SdfDagBackend(SimulatorBackend):
             self._require_asset().resolution,
         )
 
-        depth_2d, semantic_2d, valid_2d, *_unused = self._postprocess_cast_outputs(
-            out_distances, out_semantics
+        depth_2d, semantic_2d, valid_2d, _min_d, _sr, _pr, _sbr, _fsr, clamped_metric = (
+            self._postprocess_cast_outputs(out_distances, out_semantics)
         )
-        return depth_2d, semantic_2d, valid_2d
+        return depth_2d, semantic_2d, valid_2d, clamped_metric
 
     def _cast_actor_batch_indexed_tensors(
         self,
         actor_indices: Any,
         *,
         scratch_slot: int = 0,
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[Any, Any, Any, Any]:
         actor_count = int(actor_indices.shape[0])
         yaws = self._actor_yaws.index_select(0, actor_indices)
         positions = self._actor_positions.index_select(0, actor_indices)
@@ -2153,10 +2231,10 @@ class SdfDagBackend(SimulatorBackend):
             self._require_asset().resolution,
         )
 
-        depth_2d, semantic_2d, valid_2d, *_unused = self._postprocess_cast_outputs(
-            out_distances, out_semantics
+        depth_2d, semantic_2d, valid_2d, _min_d, _sr, _pr, _sbr, _fsr, clamped_metric = (
+            self._postprocess_cast_outputs(out_distances, out_semantics)
         )
-        return depth_2d, semantic_2d, valid_2d
+        return depth_2d, semantic_2d, valid_2d, clamped_metric
 
     def _coerce_batch_actor_indices(self, *, actor_count: int, actor_indices: Any | None) -> Any:
         if actor_indices is None:
@@ -2267,6 +2345,7 @@ class SdfDagBackend(SimulatorBackend):
         depth_2d: np.ndarray,
         semantic_2d: np.ndarray,
         valid_2d: np.ndarray,
+        min_distance_metric: float,
     ) -> DistanceMatrix:
         prev_depth_cpu = self._prev_depth_tensors[actor_id].detach().cpu().numpy()
         if float(np.abs(prev_depth_cpu).sum()) < 1e-6:
@@ -2277,7 +2356,7 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_depth_tensors[actor_id].copy_(
             self._torch.from_numpy(depth_2d).to(device=self._device, dtype=self._torch.float32)
         )
-        self._prev_min_distances[actor_id] = float(depth_2d.min()) * self._max_distance
+        self._prev_min_distances[actor_id] = min_distance_metric
 
         return self._materialize_observation(
             actor_id=actor_id,
@@ -2303,21 +2382,50 @@ class SdfDagBackend(SimulatorBackend):
         current_forward_structure_ratio: float,
     ) -> tuple[float, np.ndarray]:
         # Single actor implementation for compatibility (Phase 1/2)
-        # grid mapping logic
+        # 3D grid mapping logic
         curr_pos_t = self._torch.tensor(
             [current_pose.x, current_pose.y, current_pose.z],
             device=self._device,
             dtype=self._torch.float32,
         )
-        grid_coords = (
-            ((curr_pos_t[[0, 2]] - self._grid_min[[0, 2]]) / self._grid_res).floor().long()
+        grid_coord_x = int(
+            ((curr_pos_t[0] - self._grid_min[0]) / self._grid_res).floor().clamp(
+                0, self._visit_grid.shape[1] - 1
+            ).item()
         )
-        grid_coords[0] = grid_coords[0].clamp(0, self._visit_grid.shape[1] - 1)
-        grid_coords[1] = grid_coords[1].clamp(0, self._visit_grid.shape[2] - 1)
+        grid_coord_y = int(
+            ((curr_pos_t[1] - self._grid_min[1]) / self._grid_res_y).floor().clamp(
+                0, self._visit_grid.shape[2] - 1
+            ).item()
+        )
+        grid_coord_z = int(
+            ((curr_pos_t[2] - self._grid_min[2]) / self._grid_res).floor().clamp(
+                0, self._visit_grid.shape[3] - 1
+            ).item()
+        )
 
-        was_visited = self._visit_grid[actor_id, grid_coords[0], grid_coords[1]] > 0
-        exploration_reward = _EXPLORATION_REWARD if not was_visited else 0.0
-        self._visit_grid[actor_id, grid_coords[0], grid_coords[1]] = 1
+        visit_count = int(self._visit_grid[actor_id, grid_coord_x, grid_coord_y, grid_coord_z].item())
+        exploration_reward = _EXPLORATION_REWARD / (1.0 + visit_count)
+        self._visit_grid[actor_id, grid_coord_x, grid_coord_y, grid_coord_z] += 1
+
+        # Heading novelty bonus
+        yaw = float(self._actor_yaws[actor_id])
+        heading_sector = int((yaw % (2.0 * math.pi)) / (2.0 * math.pi) * _HEADING_SECTORS)
+        heading_sector = max(0, min(_HEADING_SECTORS - 1, heading_sector))
+        if not bool(self._heading_visited[actor_id, heading_sector].item()):
+            exploration_reward += _HEADING_NOVELTY_SCALE
+        self._heading_visited[actor_id, heading_sector] = True
+
+        # Frontier bonus: reward adjacency to unvisited territory
+        g_shape = self._visit_grid.shape
+        unvisited_count = 0
+        for ddx, ddy, ddz in [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]:
+            nx = max(0, min(g_shape[1] - 1, grid_coord_x + ddx))
+            ny = max(0, min(g_shape[2] - 1, grid_coord_y + ddy))
+            nz = max(0, min(g_shape[3] - 1, grid_coord_z + ddz))
+            if int(self._visit_grid[actor_id, nx, ny, nz].item()) == 0:
+                unvisited_count += 1
+        exploration_reward += (unvisited_count / 6.0) * _FRONTIER_BONUS_SCALE
 
         dx = current_pose.x - previous_pose.x
         dy = current_pose.y - previous_pose.y
@@ -2441,28 +2549,20 @@ class SdfDagBackend(SimulatorBackend):
             np.isfinite(metric_distances), metric_distances <= self._max_distance
         )
         clamped_metric = np.where(valid, metric_distances, self._max_distance)
-        if self._max_distance > 0.0:
-            depth = np.clip(clamped_metric / self._max_distance, 0.0, 1.0).astype(
-                np.float32, copy=False
-            )
-        else:
-            depth = np.zeros_like(clamped_metric, dtype=np.float32)
         scores: list[tuple[float, tuple[float, float, float, float]]] = []
         for idx, candidate in enumerate(candidates):
-            depth_2d = depth[idx]
+            metric_2d = clamped_metric[idx]
             valid_2d = valid[idx]
             score = _spawn_candidate_score(
-                depth_2d,
+                metric_2d,
                 valid_2d,
-                max_distance=self._max_distance,
                 proximity_distance_threshold=self._proximity_distance_threshold,
                 structure_band_min_distance=self._structure_band_min_distance,
                 structure_band_max_distance=self._structure_band_max_distance,
             )
             best_yaw = _select_spawn_yaw_from_observation(
-                depth_2d,
+                metric_2d,
                 valid_2d,
-                max_distance=self._max_distance,
                 structure_band_min_distance=self._structure_band_min_distance,
                 structure_band_max_distance=self._structure_band_max_distance,
             )

@@ -88,7 +88,9 @@ class EnvironmentConfig(BaseSettings):
     )
     azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS", gt=0)
     elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS", gt=0)
-    max_distance: float = Field(default=30.0, gt=0.0)
+    max_distance: float = Field(
+        default=100.0, gt=0.0, validation_alias="NAVI_MAX_DISTANCE"
+    )
     physics_dt: float = Field(default=0.02, gt=0.0)
     steps_per_decision: int = Field(default=1, gt=0)
     drone_max_speed: float = Field(default=10.0, gt=0.0)
@@ -145,7 +147,7 @@ class EnvironmentConfig(BaseSettings):
         gt=0.0,
     )
     structure_band_max_distance: float = Field(
-        default=10.0,
+        default=30.0,
         validation_alias="NAVI_STRUCTURE_BAND_MAX_DISTANCE",
         gt=0.0,
     )

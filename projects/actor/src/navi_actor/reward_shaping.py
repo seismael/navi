@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 import torch
@@ -19,12 +20,14 @@ def _shape_batch_impl(
     forward_velocities: Tensor,
     intrinsic_rewards: Tensor,
     loop_similarities: Tensor,
+    loop_temporal_distances: Tensor,
     collision_penalty: float,
     existential_tax: float,
     velocity_weight: float,
     beta: float,
     loop_penalty_coeff: float,
     loop_threshold: float,
+    loop_temporal_half_life: float,
 ) -> Tensor:
     dones = dones.to(dtype=torch.bool)
     col_penalties = torch.where(
@@ -34,7 +37,10 @@ def _shape_batch_impl(
     )
     vel_bonus = velocity_weight * forward_velocities.clamp(min=0.0)
     intrinsic = beta * intrinsic_rewards
-    loop_pen = loop_penalty_coeff * (loop_similarities - loop_threshold).clamp(min=0.0)
+    raw_loop_pen = loop_penalty_coeff * (loop_similarities - loop_threshold).clamp(min=0.0)
+    # Scale loop penalty by temporal recency: recent revisits are penalized more.
+    temporal_decay = torch.exp(-loop_temporal_distances / max(loop_temporal_half_life, 1.0))
+    loop_pen = raw_loop_pen * temporal_decay
     return raw_rewards + col_penalties + existential_tax + vel_bonus + intrinsic - loop_pen
 
 
@@ -86,6 +92,7 @@ class RewardShaper:
         intrinsic_anneal_steps: int = 500_000,
         loop_penalty_coeff: float = 2.0,
         loop_threshold: float = 0.85,
+        loop_temporal_half_life: float = 200.0,
         torch_compile: bool = True,
     ) -> None:
         self._collision_penalty = collision_penalty
@@ -96,6 +103,7 @@ class RewardShaper:
         self._anneal_steps = intrinsic_anneal_steps
         self._lambda_loop = loop_penalty_coeff
         self._tau = loop_threshold
+        self._loop_temporal_half_life = loop_temporal_half_life
         self._global_step = 0
         self._torch_compile_requested = bool(torch_compile)
         self._torch_compile_enabled = False
@@ -191,6 +199,7 @@ class RewardShaper:
         angular_velocity: float = 0.0,
         intrinsic_reward: float = 0.0,
         loop_similarity: float = 0.0,
+        loop_temporal_distance: float = 0.0,
     ) -> ShapedReward:
         """Compute the total shaped reward for a single transition.
 
@@ -201,6 +210,7 @@ class RewardShaper:
             angular_velocity: agent's angular velocity magnitude.
             intrinsic_reward: RND normalized intrinsic reward.
             loop_similarity: episodic memory cosine similarity score.
+            loop_temporal_distance: how many steps ago the similar embedding was stored.
 
         Returns:
             ShapedReward with all components and the final total.
@@ -224,8 +234,10 @@ class RewardShaper:
         beta = self.beta
         intrinsic = beta * intrinsic_reward
 
-        # Loop penalty: fires when similarity exceeds threshold
-        loop_pen = self._lambda_loop * max(0.0, loop_similarity - self._tau)
+        # Loop penalty: fires when similarity exceeds threshold, scaled by temporal recency.
+        raw_loop_pen = self._lambda_loop * max(0.0, loop_similarity - self._tau)
+        temporal_decay = math.exp(-loop_temporal_distance / max(self._loop_temporal_half_life, 1.0))
+        loop_pen = raw_loop_pen * temporal_decay
 
         total = extrinsic + col_penalty + tax + vel_bonus + intrinsic - loop_pen
 
@@ -248,6 +260,7 @@ class RewardShaper:
         angular_velocities: Tensor,
         intrinsic_rewards: Tensor,
         loop_similarities: Tensor,
+        loop_temporal_distances: Tensor | None = None,
     ) -> Tensor:
         """Vectorized reward shaping for a batch of transitions.
 
@@ -259,17 +272,21 @@ class RewardShaper:
         """
         del angular_velocities
         dones = dones.to(dtype=torch.bool)
+        if loop_temporal_distances is None:
+            loop_temporal_distances = torch.zeros_like(loop_similarities)
         total: Tensor = self._shape_batch_fn(
             raw_rewards,
             dones,
             forward_velocities,
             intrinsic_rewards,
             loop_similarities,
+            loop_temporal_distances,
             self._collision_penalty,
             self._existential_tax,
             self._velocity_weight,
             self.beta,
             self._lambda_loop,
             self._tau,
+            self._loop_temporal_half_life,
         )
         return total
