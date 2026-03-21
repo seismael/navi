@@ -457,19 +457,36 @@ function Invoke-LoggedProcess {
 
     $stdoutPath = "$LogPath.stdout"
     $stderrPath = "$LogPath.stderr"
-    $result = Invoke-NativeProcessCapture -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -TimeoutSeconds 0
-    Set-Content -Encoding UTF8 -Path $stdoutPath -Value $result.stdout
-    Set-Content -Encoding UTF8 -Path $stderrPath -Value $result.stderr
-    $merged = @()
-    if (-not [string]::IsNullOrWhiteSpace($result.stderr)) {
-        $merged += ($result.stderr -split "`r?`n")
+
+    # Use cmd /c with native file redirects — most reliable cross-version
+    # approach on Windows that avoids .NET Process event-handler crashes
+    # and PowerShell Start-Process handle accumulation issues.
+    $quotedArgs = ($ArgumentList | ForEach-Object {
+        if ($_ -match '[\s"]') { "`"$($_ -replace '"', '\"')`"" } else { $_ }
+    }) -join ' '
+    $quotedFilePath = if ($FilePath -match '\s') { "`"$FilePath`"" } else { $FilePath }
+    $cmdLine = "$quotedFilePath $quotedArgs > `"$stdoutPath`" 2> `"$stderrPath`""
+    Push-Location $WorkingDirectory
+    try {
+        cmd /c $cmdLine
+        $exitCode = $LASTEXITCODE
     }
-    if (-not [string]::IsNullOrWhiteSpace($result.stdout)) {
-        $merged += ($result.stdout -split "`r?`n")
+    finally {
+        Pop-Location
+    }
+
+    $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { (Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
+    $stderrText = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
+    $merged = @()
+    if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+        $merged += ($stderrText -split "`r?`n")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($stdoutText)) {
+        $merged += ($stdoutText -split "`r?`n")
     }
     Set-Content -Encoding UTF8 -Path $LogPath -Value $merged
     return [pscustomobject]@{
-        exit_code = $result.exit_code
+        exit_code = $exitCode
         stdout_path = $stdoutPath
         stderr_path = $stderrPath
         log_path = $LogPath
@@ -718,6 +735,13 @@ try {
     }
     Add-PhaseResult -Summary $summary -SummaryPath $summaryPath -Name "cleanup" -Status "passed" -Details ([ordered]@{ ports = @(5557, 5558, 5559, 5560) })
 
+    $corpusRoot = Join-Path $repoRoot "artifacts\gmdag\corpus"
+    $preflightScene = Get-ChildItem -Path $corpusRoot -Recurse -File -Filter "apartment_1.gmdag" | Select-Object -First 1
+    if ($null -eq $preflightScene) {
+        throw "Preflight scene apartment_1.gmdag not found under $corpusRoot"
+    }
+    $preflightGmdag = $preflightScene.FullName
+
     Set-CurrentActivity -Summary $summary -SummaryPath $summaryPath -ProgressLogPath $progressLogPath -Activity "preflight:check-sdfdag:start"
     $checkJson = Invoke-JsonCommand -FilePath "uv" -WorkingDirectory $repoRoot -ArgumentList @(
         "run",
@@ -725,7 +749,7 @@ try {
         "--project", (Join-Path $repoRoot "projects\environment"),
         "navi-environment",
         "check-sdfdag",
-        "--gmdag-file", (Join-Path $repoRoot "artifacts\gmdag\corpus\apartment_1.gmdag"),
+        "--gmdag-file", $preflightGmdag,
         "--json"
     ) -OutputPath (Join-Path $preflightDir "check-sdfdag.out.json") -ErrorPath (Join-Path $preflightDir "check-sdfdag.err.log") -TimeoutSeconds 240 -ProgressLogPath $progressLogPath
     if (-not $checkJson.ok) {
@@ -739,7 +763,7 @@ try {
         "--project", (Join-Path $repoRoot "projects\auditor"),
         "navi-auditor",
         "dataset-audit",
-        "--gmdag-file", (Join-Path $repoRoot "artifacts\gmdag\corpus\apartment_1.gmdag"),
+        "--gmdag-file", $preflightGmdag,
         "--actors", "4",
         "--steps", "100",
         "--warmup-steps", "20",
@@ -750,11 +774,17 @@ try {
     }
     Add-PhaseResult -Summary $summary -SummaryPath $summaryPath -Name "preflight" -Status "passed" -Details ([ordered]@{ check_sdfdag = $checkJson; dataset_audit = $auditJson })
 
+    Set-CurrentActivity -Summary $summary -SummaryPath $summaryPath -ProgressLogPath $progressLogPath -Activity "focused-tests:contracts:start"
+    $contractsTests = Invoke-ProjectPytest -ProjectPath (Join-Path $repoRoot "projects\contracts") -LogPath (Join-Path $preflightTestDir "contracts.log") -BaseTempRelative ".pytest_tmp" -Tests @(
+        ".\projects\contracts\tests"
+    )
+    if ($contractsTests.exit_code -ne 0) {
+        throw "Contracts nightly regression suite failed"
+    }
+
     Set-CurrentActivity -Summary $summary -SummaryPath $summaryPath -ProgressLogPath $progressLogPath -Activity "focused-tests:actor:start"
     $actorTests = Invoke-ProjectPytest -ProjectPath (Join-Path $repoRoot "projects\actor") -LogPath (Join-Path $preflightTestDir "actor.log") -BaseTempRelative ".pytest_tmp" -Tests @(
-        ".\projects\actor\tests\unit\test_trajectory_buffer.py",
-        ".\projects\actor\tests\unit\test_ppo_learner.py",
-        ".\projects\actor\tests\unit\test_training_state.py"
+        ".\projects\actor\tests"
     )
     if ($actorTests.exit_code -ne 0) {
         throw "Actor nightly regression suite failed"
@@ -762,9 +792,7 @@ try {
 
     Set-CurrentActivity -Summary $summary -SummaryPath $summaryPath -ProgressLogPath $progressLogPath -Activity "focused-tests:environment:start"
     $environmentTests = Invoke-ProjectPytest -ProjectPath (Join-Path $repoRoot "projects\environment") -LogPath (Join-Path $preflightTestDir "environment.log") -BaseTempRelative ".pytest_tmp" -Tests @(
-        ".\projects\environment\tests\unit\test_sdfdag_conventions.py",
-        ".\projects\environment\tests\unit\test_voxel_dag_integration.py",
-        ".\projects\environment\tests\integration\test_live_corpus_validation.py"
+        ".\projects\environment\tests"
     )
     if ($environmentTests.exit_code -ne 0) {
         throw "Environment nightly regression suite failed"
@@ -772,8 +800,7 @@ try {
 
     Set-CurrentActivity -Summary $summary -SummaryPath $summaryPath -ProgressLogPath $progressLogPath -Activity "focused-tests:voxel-dag:start"
     $voxelDagTests = Invoke-ProjectPytest -ProjectPath (Join-Path $repoRoot "projects\voxel-dag") -LogPath (Join-Path $preflightTestDir "voxel-dag.log") -BaseTempRelative ".pytest_tmp" -Tests @(
-        ".\projects\voxel-dag\tests\test_suite.py",
-        ".\projects\voxel-dag\tests\test_dedup_contract.py"
+        ".\projects\voxel-dag\tests"
     )
     if ($voxelDagTests.exit_code -ne 0) {
         throw "Voxel-dag nightly regression suite failed"
@@ -781,7 +808,7 @@ try {
 
     Set-CurrentActivity -Summary $summary -SummaryPath $summaryPath -ProgressLogPath $progressLogPath -Activity "focused-tests:torch-sdf:start"
     $torchSdfTests = Invoke-ProjectPytest -ProjectPath (Join-Path $repoRoot "projects\torch-sdf") -LogPath (Join-Path $preflightTestDir "torch-sdf.log") -BaseTempRelative ".pytest_tmp" -Tests @(
-        ".\projects\torch-sdf\tests\test_sphere_tracing.py"
+        ".\projects\torch-sdf\tests"
     )
     if ($torchSdfTests.exit_code -ne 0) {
         throw "Torch-SDF nightly regression suite failed"
@@ -795,7 +822,7 @@ try {
     if ($auditorTests.exit_code -ne 0) {
         throw "Auditor nightly regression suite failed"
     }
-    Add-PhaseResult -Summary $summary -SummaryPath $summaryPath -Name "focused-tests" -Status "passed" -Details ([ordered]@{ actor_log = $actorTests.log_path; environment_log = $environmentTests.log_path; voxel_dag_log = $voxelDagTests.log_path; torch_sdf_log = $torchSdfTests.log_path; auditor_log = $auditorTests.log_path })
+    Add-PhaseResult -Summary $summary -SummaryPath $summaryPath -Name "focused-tests" -Status "passed" -Details ([ordered]@{ contracts_log = $contractsTests.log_path; actor_log = $actorTests.log_path; environment_log = $environmentTests.log_path; voxel_dag_log = $voxelDagTests.log_path; torch_sdf_log = $torchSdfTests.log_path; auditor_log = $auditorTests.log_path })
 
     Set-CurrentActivity -Summary $summary -SummaryPath $summaryPath -ProgressLogPath $progressLogPath -Activity "qualification:start"
     $qualificationLog = Invoke-LoggedProcess -FilePath $powerShellExe -WorkingDirectory $repoRoot -LogPath (Join-Path $logsDir "qualification.log") -ArgumentList @(

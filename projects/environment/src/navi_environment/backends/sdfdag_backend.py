@@ -414,8 +414,13 @@ def _postprocess_cast_outputs_tensor(
     actor_count = int(out_distances.shape[0])
     metric_distances = out_distances.reshape(actor_count, az_bins, el_bins)
     semantic_batch = out_semantics.reshape(actor_count, az_bins, el_bins).to(dtype=torch.int32)
+    # A ray is valid only when the sphere tracer actually found surface
+    # geometry (semantic != 0).  Rays that exhaust max_steps without
+    # converging write finite current_t with semantic=0 — those must be
+    # treated as misses to avoid garbage depth contamination.
+    hit_mask = semantic_batch != 0
     if max_distance > 0.0:
-        valid_batch = torch.isfinite(metric_distances) & (metric_distances <= max_distance)
+        valid_batch = hit_mask & torch.isfinite(metric_distances) & (metric_distances <= max_distance)
         clamped_metric = torch.where(
             valid_batch,
             metric_distances,
@@ -423,7 +428,7 @@ def _postprocess_cast_outputs_tensor(
         )
         depth_batch = (clamped_metric / max_distance).clamp(min=0.0, max=1.0)
     else:
-        valid_batch = torch.isfinite(metric_distances)
+        valid_batch = hit_mask & torch.isfinite(metric_distances)
         clamped_metric = torch.where(
             valid_batch, metric_distances, torch.zeros_like(metric_distances)
         )

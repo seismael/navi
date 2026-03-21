@@ -8,10 +8,9 @@ compression, and CUDA-accelerated raycasting.
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any
 
 import numpy as np
 import pytest
@@ -46,9 +45,13 @@ def _require_voxel_dag() -> Any:
 
 
 def _require_oracle_house() -> Any:
-    _setup_sys_path()
-    import navi_contracts.testing.oracle_house as oracle_house
-    return oracle_house
+    """Load oracle_house directly to avoid triggering navi_contracts.__init__ (needs msgpack)."""
+    path = _repo_root() / "projects" / "contracts" / "src" / "navi_contracts" / "testing" / "oracle_house.py"
+    spec = importlib.util.spec_from_file_location("oracle_house", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
 
 
 def _require_sdfdag_backend() -> Any:

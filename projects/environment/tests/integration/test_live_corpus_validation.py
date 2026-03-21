@@ -38,9 +38,23 @@ def test_live_corpus_uses_downloaded_datasets_only() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     scenes = manifest.get("scenes", [])
     assert scenes, "Live compiled corpus must contain at least one scene"
-    assert set(manifest.get("compiled_resolutions", [])) == {512}
+    resolution = manifest.get("requested_resolution") or manifest.get("compiled_resolutions")
+    if isinstance(resolution, list):
+        assert set(resolution) == {512}
+    else:
+        assert resolution == 512
 
-    allowed_datasets = {"habitat_test_scenes", "hssd", "replicacad", "ai-habitat_habitat_test_scenes", "hssd-hab", "ai-habitat_ReplicaCAD_dataset", "ai-habitat_habitat-test-scenes"}
+    allowed_datasets = {
+        "habitat_test_scenes",
+        "hssd",
+        "replicacad",
+        "ai-habitat_habitat_test_scenes",
+        "ai-habitat_habitat-test-scenes",
+        "ai-habitat_ReplicaCAD_baked_lighting",
+        "ai-habitat_ReplicaCAD_dataset",
+        "hssd-hab",
+        "hssd_hssd-hab",
+    }
     forbidden_tokens = (
         "sample",
         "generated",

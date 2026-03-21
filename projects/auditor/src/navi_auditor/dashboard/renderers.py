@@ -202,6 +202,8 @@ def depth_to_viridis(
 def depth_to_observer_palette(
     depth: np.ndarray,
     valid: np.ndarray | None = None,
+    *,
+    fog_of_war: bool = True,
 ) -> np.ndarray:
     """Convert depth to a structure-revealing observer palette.
 
@@ -243,7 +245,7 @@ def depth_to_observer_palette(
     r = np.interp(flat, control_x, control_bgr[:, 2])
     coloured = np.stack([b, g, r], axis=-1).reshape((*depth.shape, 3)).astype(np.uint8)
 
-    if valid is not None:
+    if fog_of_war and valid is not None:
         _apply_fog_of_war(coloured, ~valid)
 
     return coloured
@@ -513,7 +515,7 @@ def render_first_person(
 
     depth_src = centered_depth.T.astype(np.float32)
     valid_src = centered_valid.T.astype(np.uint8)
-    heatmap_src = depth_to_observer_palette(depth_src, centered_valid.T)
+    heatmap_src = depth_to_observer_palette(depth_src, centered_valid.T, fog_of_war=False)
     blended = cv2.resize(heatmap_src, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
     valid_up = cv2.resize(valid_src, (target_w, target_h), interpolation=cv2.INTER_NEAREST) > 0
     _apply_fog_of_war(blended, ~valid_up)

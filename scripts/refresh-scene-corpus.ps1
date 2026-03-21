@@ -131,10 +131,10 @@ function Download-HFFile {
 # ── Main Refresh Logic ─────────────────────────────────────────
 
 $repoRoot = Get-RepoRoot
-$logsRoot = Join-Path $repoRoot "artifacts\tmp\corpus-refresh\logs"
+$logsRoot = Join-Path $repoRoot "artifacts\logs"
 Ensure-Directory -PathToCreate $logsRoot
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$transcriptPath = Join-Path $logsRoot "refresh_$timestamp.log"
+$transcriptPath = Join-Path $logsRoot "corpus_refresh_$timestamp.log"
 Start-Transcript -Path $transcriptPath -Force | Out-Null
 
 $refreshSucceeded = $false
@@ -232,45 +232,31 @@ try {
     # 4. Generate Final Manifest
     Write-Host ""
     Write-Host "Generating compiled corpus manifest..."
-    # We call prepare-corpus to ensure the manifest is written to the staging directory
-    $prepareArgs = @(
-        "run",
-        "--python", $PythonVersion,
-        "--project", (Join-Path $repoRoot "projects\environment"),
-        "navi-environment", "prepare-corpus",
-        "--gmdag-root", $stageCompiledRoot,
-        "--resolution", "$Resolution",
-        "--force-recompile"
-    )
-    & uv @prepareArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Manifest generation failed with exit code $LASTEXITCODE"
+
+    $stageManifest = Join-Path $stageCompiledRoot "gmdag_manifest.json"
+    $compiledFiles = Get-ChildItem -Path $stageCompiledRoot -Filter "*.gmdag" -Recurse
+    if ($compiledFiles.Count -eq 0) {
+        throw "No compiled `.gmdag` files were produced. Refresh failed."
     }
 
-    # Verify manifest exists
-    $stageManifest = Join-Path $stageCompiledRoot "gmdag_manifest.json"
-    if (-not (Test-Path $stageManifest)) {
-        Write-Warning "gmdag_manifest.json not found in $stageCompiledRoot. Attempting manual creation..."
-        $compiledFiles = Get-ChildItem -Path $stageCompiledRoot -Filter "*.gmdag" -Recurse
-        $manifestObj = @{
-            generated = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-            source_root = $stageCompiledRoot
-            gmdag_root = $stageCompiledRoot
-            scene_count = $compiledFiles.Count
-            requested_resolution = $Resolution
-            scenes = @()
-        }
-        foreach ($file in $compiledFiles) {
-            $relPath = $file.FullName.Replace($stageCompiledRoot, "").TrimStart('\')
-            $manifestObj.scenes += @{
-                source_path = $relPath
-                gmdag_path = $relPath
-                dataset = (Split-Path (Split-Path $file.FullName -Parent) -Leaf)
-                scene_name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-            }
-        }
-        $manifestObj | ConvertTo-Json -Depth 10 | Set-Content -Path $stageManifest
+    $manifestObj = @{
+        generated = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+        source_root = $finalCompiledRoot
+        gmdag_root = $finalCompiledRoot
+        scene_count = $compiledFiles.Count
+        requested_resolution = $Resolution
+        scenes = @()
     }
+    foreach ($file in $compiledFiles) {
+        $relPath = $file.FullName.Replace($stageCompiledRoot, "").TrimStart('\')
+        $manifestObj.scenes += @{
+            source_path = $relPath
+            gmdag_path = $relPath
+            dataset = (Split-Path (Split-Path $file.FullName -Parent) -Leaf)
+            scene_name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+        }
+    }
+    $manifestObj | ConvertTo-Json -Depth 10 | Set-Content -Path $stageManifest
 
     $backupRoot = Join-Path (Split-Path -Parent $finalCompiledRoot) ("corpus_backup_" + $timestamp)
     if (Test-Path $finalCompiledRoot) {

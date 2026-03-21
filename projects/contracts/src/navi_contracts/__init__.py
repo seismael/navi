@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
+from typing import Any
+
 from navi_contracts.logging import setup_logging
 from navi_contracts.models import (
     Action,
@@ -24,7 +27,6 @@ from navi_contracts.observability import (
     get_run_id,
     write_process_manifest,
 )
-from navi_contracts.serialization import deserialize, serialize
 from navi_contracts.testing.oracle_house import (
     OracleObservation,
     canonical_house_bbox,
@@ -94,7 +96,20 @@ __all__: list[str] = [
     "house_observation_delta",
     "write_process_manifest",
     "write_square_house_obj",
-    # Serialization
+    # Serialization (lazy — loaded on first access to avoid requiring msgpack at import time)
     "serialize",
     "setup_logging",
 ]
+
+# Lazy imports for serialization (requires msgpack which may not be available
+# in all consumer venvs, e.g. torch-sdf).
+_LAZY_SERIALIZATION = {"serialize", "deserialize"}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_SERIALIZATION:
+        mod = importlib.import_module("navi_contracts.serialization")
+        val = getattr(mod, name)
+        globals()[name] = val  # cache for subsequent access
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

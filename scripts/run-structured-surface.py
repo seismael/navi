@@ -233,6 +233,48 @@ def _resolve_benchmark_gmdag_file(gmdag_file: str, check_payload: dict[str, Any]
     return str(gmdag_path)
 
 
+def _environment_python() -> str:
+    """Return the path to the environment project's venv Python."""
+    repo_root = _repo_root()
+    import sys
+    if sys.platform == "win32":
+        candidate = repo_root / "projects" / "environment" / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = repo_root / "projects" / "environment" / ".venv" / "bin" / "python"
+    if candidate.exists():
+        return str(candidate)
+    raise RuntimeError(f"Environment venv Python not found: {candidate}")
+
+
+def _run_environment_subprocess(command: str, argv: list[str]) -> tuple[int, dict[str, Any]]:
+    """Run an environment CLI command via subprocess and parse JSON output."""
+    import subprocess
+
+    env_python = _environment_python()
+    full_args = [env_python, "-m", "navi_environment.cli", command, *argv, "--json"]
+    completed = subprocess.run(  # noqa: S603
+        full_args,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(_repo_root()),
+    )
+    stdout = completed.stdout.strip()
+    if not stdout:
+        msg = f"Environment CLI {command} produced no JSON output"
+        stderr = completed.stderr.strip()
+        if stderr:
+            msg = f"{msg}: {stderr}"
+        raise RuntimeError(msg)
+    root_start = stdout.find("{")
+    if root_start < 0:
+        raise RuntimeError(f"Environment CLI {command} did not emit JSON: {stdout[:200]}")
+    payload = json.loads(stdout[root_start:])
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Environment CLI {command} emitted {type(payload).__name__}, expected dict")
+    return completed.returncode, payload
+
+
 def _run_dataset_audit(argv: list[str]) -> tuple[int, dict[str, Any]]:
     from navi_contracts import setup_logging
 
@@ -248,37 +290,41 @@ def _run_dataset_audit(argv: list[str]) -> tuple[int, dict[str, Any]]:
     max_distance = _parse_float_flag(argv, "--max-distance", 30.0)
     sdf_max_steps = _parse_int_flag(argv, "--sdf-max-steps", 256)
 
-    check_returncode, check_payload = _run_environment_check([
+    check_returncode, check_payload = _run_environment_subprocess(
         "check-sdfdag",
-        "--expected-resolution",
-        str(expected_resolution),
-        *( ["--gmdag-file", gmdag_file] if gmdag_file else []),
-    ])
+        [
+            "--expected-resolution",
+            str(expected_resolution),
+            *(["--gmdag-file", gmdag_file] if gmdag_file else []),
+        ],
+    )
     issues = list(check_payload.get("issues", []))
 
     benchmark_payload: dict[str, Any] | None = None
     benchmark_ok = not benchmark
     if benchmark and check_returncode == 0:
         resolved_gmdag_file = _resolve_benchmark_gmdag_file(gmdag_file, check_payload)
-        benchmark_returncode, benchmark_payload = _run_environment_bench([
+        benchmark_returncode, benchmark_payload = _run_environment_subprocess(
             "bench-sdfdag",
-            "--gmdag-file",
-            resolved_gmdag_file,
-            "--actors",
-            str(actors),
-            "--steps",
-            str(steps),
-            "--warmup-steps",
-            str(warmup_steps),
-            "--azimuth-bins",
-            str(azimuth_bins),
-            "--elevation-bins",
-            str(elevation_bins),
-            "--max-distance",
-            str(max_distance),
-            "--sdf-max-steps",
-            str(sdf_max_steps),
-        ])
+            [
+                "--gmdag-file",
+                resolved_gmdag_file,
+                "--actors",
+                str(actors),
+                "--steps",
+                str(steps),
+                "--warmup-steps",
+                str(warmup_steps),
+                "--azimuth-bins",
+                str(azimuth_bins),
+                "--elevation-bins",
+                str(elevation_bins),
+                "--max-distance",
+                str(max_distance),
+                "--sdf-max-steps",
+                str(sdf_max_steps),
+            ],
+        )
         benchmark_ok = benchmark_returncode == 0
         if not benchmark_ok and benchmark_payload is not None:
             issues.extend(benchmark_payload.get("issues", []))
