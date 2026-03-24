@@ -122,10 +122,10 @@ kernel-launch overhead created by the unfused temporal-core path.
 Therefore the canonical performance rule is:
 
 - one canonical trainer surface is mandatory on the production actor hot path
-- on the active hardware, that surface now defaults to the cuDNN GRU path because repeated profiled bounded runs beat `mambapy` on `steady_sps`, `ppo_update_ms`, and `gpu_backward_ms`
-- `mambapy` may be selected explicitly on that same surface for controlled comparisons, but performance conclusions must compare like-for-like bounded runs with only the temporal-core selector changed
-- benchmark-proven end-to-end trainer wins may replace GRU or another supported backend as the canonical default, but only when config defaults, wrappers, validation, and docs are updated together so the repo keeps one performance truth
-- throughput attribution must measure the selected runtime on the real trainer surface before assigning the remaining `~100 SPS` ceiling to the temporal core alone
+- on the active hardware, that surface now defaults to the pure-PyTorch Mamba-2 SSD path because a 25K-step head-to-head comparison proved significantly better learning quality (reward_ema -0.88 vs GRU's -1.48) with only a modest throughput trade-off (~72 SPS vs ~100 SPS)
+- `gru` and `mambapy` may be selected explicitly on that same surface for controlled comparisons, but performance conclusions must compare like-for-like bounded runs with only the temporal-core selector changed
+- benchmark-proven end-to-end trainer wins may replace Mamba2 SSD or another supported backend as the canonical default, but only when config defaults, wrappers, validation, and docs are updated together so the repo keeps one performance truth
+- throughput attribution must measure the selected runtime on the real trainer surface before assigning the remaining throughput ceiling to the temporal core alone
 - future fused temporal-core work may reduce part of PPO update cost, but it does not remove RayViT token-attention scaling on higher observation profiles
 
 Why this is mandatory in practice:
@@ -134,11 +134,11 @@ Why this is mandatory in practice:
 - an unfused Python Mamba path decomposes that sequence into many smaller tensor ops
 - the CPU pays for every dispatcher entry, argument check, autograd node, and launch submission
 - the GPU may still execute only a smaller fraction of the total wall time
-- a future fused Mamba-2 build may still collapse that sequence math further, but the current production question is how much of the remaining wall time comes from rollout cadence, environment variance, telemetry, PPO update structure, and the now-dominant RayViT encoder path on the active GRU-based trainer surface
+- a future fused Mamba-2 build may still collapse that sequence math further, but the current production question is how much of the remaining wall time comes from rollout cadence, environment variance, telemetry, PPO update structure, and the now-dominant RayViT encoder path on the active Mamba2 SSD trainer surface
 
 Future switch-back rule:
 
-- fused Mamba-2 may be introduced later, but only after the supported environment exists and the real bounded trainer proves that it beats the current GRU baseline without reopening deployment friction on the active platform
+- fused Mamba-2 (`mamba-ssm`) may be introduced later, but only after the supported environment exists and the real bounded trainer proves that it beats the current Mamba2 SSD baseline without reopening deployment friction on the active platform
 
 ### 3.5 Keep Observability Passive
 
@@ -185,7 +185,7 @@ that interpretation.
 ## 4.1 Observation-Resolution Scaling
 
 March 2026 bounded canonical trainer sweeps produced the current reference
-results for the active 4-actor GRU surface:
+results for the active 4-actor canonical trainer surface:
 
 | Profile | Rays / Actor | Steady SPS | `env_ms` | `ppo_update_ms` | Outcome |
 | --- | --- | --- | --- | --- | --- |
@@ -236,7 +236,7 @@ diagnostic `diag(...)` suffix with GPU execution totals and per-stage host-gap
 deltas for eval, backward, clip, optimizer, RND, and stats. Use that surface to
 separate Python/autograd orchestration overhead from actual GPU execution time on
 the active learner path. That diagnostic surface now also splits `eval` into
-encoder, temporal-core, and heads buckets so GRU-path investigation can decide
+encoder, temporal-core, and heads buckets so investigation can decide
 whether the remaining wall time belongs to RayViT encoding, sequence-core work,
 or actor/critic head evaluation before changing the canonical runtime.
 The canonical RayViT encoder patch-token path should use direct strided patch

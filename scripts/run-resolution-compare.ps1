@@ -18,8 +18,8 @@ param(
     [int]$BpttLen = 8,
     [int]$RolloutLength = 512,
     [int]$CheckpointEvery = 0,
-    [ValidateSet("gru", "mambapy")]
-    [string]$TemporalCore = "gru",
+    [ValidateSet("gru", "mambapy", "mamba2")]
+    [string]$TemporalCore = "mamba2",
     [int]$Repeats = 3,
     [switch]$ProfileCudaEvents,
     [int]$BaseActorTelemetryPort = 5680,

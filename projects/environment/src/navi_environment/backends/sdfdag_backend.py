@@ -808,6 +808,8 @@ class SdfDagBackend(SimulatorBackend):
             (self._n_actors, 1, 1, 1), device=self._device, dtype=self._torch.int16
         )
         self._grid_min = self._torch.zeros((3,), device=self._device, dtype=self._torch.float32)
+        self._scene_bbox_min_t = self._torch.zeros((3,), device=self._device, dtype=self._torch.float32)
+        self._scene_bbox_max_t = self._torch.zeros((3,), device=self._device, dtype=self._torch.float32)
 
         scene_path = self._scene_pool[0] if self._scene_pool else config.gmdag_file
         self._load_scene(scene_path)
@@ -1868,6 +1870,8 @@ class SdfDagBackend(SimulatorBackend):
         grid_y = int(self._torch.ceil(extent[1] / self._grid_res_y).item()) + 1
 
         self._grid_min.copy_(grid_min)
+        self._scene_bbox_min_t.copy_(grid_min)
+        self._scene_bbox_max_t.copy_(grid_max)
         self._visit_grid = self._torch.zeros(
             (self._n_actors, grid_w, grid_y, grid_h),
             device=self._device,
@@ -2016,6 +2020,11 @@ class SdfDagBackend(SimulatorBackend):
         )
         self._prev_linear_vels[actor_indices] = smooth_linear
         self._prev_angular_vels[actor_indices] = smooth_angular
+        # Clamp positions to scene bounding box to prevent actors escaping
+        # through thin walls into void space.
+        updated_positions = updated_positions.clamp(
+            min=self._scene_bbox_min_t, max=self._scene_bbox_max_t,
+        )
         self._actor_positions[actor_indices] = updated_positions
         self._actor_yaws[actor_indices] = updated_yaws
 
@@ -2054,6 +2063,11 @@ class SdfDagBackend(SimulatorBackend):
         )
         self._prev_linear_vels[actor_indices] = smooth_linear
         self._prev_angular_vels[actor_indices] = smooth_angular
+        # Clamp positions to scene bounding box to prevent actors escaping
+        # through thin walls into void space.
+        updated_positions = updated_positions.clamp(
+            min=self._scene_bbox_min_t, max=self._scene_bbox_max_t,
+        )
         self._actor_positions[actor_indices] = updated_positions
         self._actor_yaws[actor_indices] = updated_yaws
 

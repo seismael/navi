@@ -81,9 +81,9 @@ inside the actor project environment so canonical training does not depend on
 console-script resolution state.
 
 Canonical training currently assumes the actor temporal core runs through the
-native cuDNN GRU path by default on the active Windows machine. The canonical
-train and serve surfaces expose one explicit temporal-core selector contract on
-the same trainer surface: `gru` (default) and `mambapy`.
+pure-PyTorch Mamba-2 SSD path by default. The canonical train and serve
+surfaces expose one explicit temporal-core selector contract on the same
+trainer surface: `mamba2` (default), `gru`, and `mambapy`.
 
 The active benchmark machine is an MX150 (`sm_61`, `2 GB` VRAM). That matters
 for training guidance:
@@ -179,7 +179,7 @@ $env:NAVI_ACTOR_ATTACH_RESOURCE_SNAPSHOTS = "false"
 
 # One-command bounded temporal comparison on the canonical trainer surface
 ./scripts/run-temporal-compare.ps1
-./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy')
+./scripts/run-temporal-compare.ps1 -TemporalCores @('mamba2','gru','mambapy')
 
 # One-command bounded observation-resolution comparison on the canonical trainer surface
 ./scripts/run-resolution-compare.ps1
@@ -267,15 +267,15 @@ For a bounded like-for-like backend comparison on the canonical trainer surface:
 
 ```powershell
 ./scripts/run-temporal-compare.ps1
-./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy')
-./scripts/run-temporal-compare.ps1 -TemporalCores @('gru','mambapy') -TotalSteps 256
+./scripts/run-temporal-compare.ps1 -TemporalCores @('mamba2','gru')
+./scripts/run-temporal-compare.ps1 -TemporalCores @('mamba2','gru','mambapy') -TotalSteps 256
 ```
 
 The comparison wrapper runs each backend sequentially on the direct actor
 trainer surface with isolated per-repeat logs, checkpoints,
 and summary JSON files under one timestamped artifact root. The wrapper now
-defaults to the canonical `gru` runtime on the active machine; pass
-`-TemporalCores @('gru','mambapy')` for an explicit like-for-like comparison run. The
+defaults to the canonical `mamba2` runtime; pass
+`-TemporalCores @('mamba2','gru')` for an explicit like-for-like comparison run. The
 wrapper records both mean and median aggregate metrics so local Windows
 variance does not decide the temporal-core conclusion.
 Use `-ProfileCudaEvents` only for diagnostic comparison runs when you need
@@ -331,7 +331,7 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 ## 8. Operational Notes
 
 - production training advertises only the canonical `sdfdag` path
-- production training defaults the temporal core to `gru` on the active machine, with `mambapy` available as an explicit selector on the same surface when comparing runs
+- production training defaults the temporal core to `mamba2`, with `gru` and `mambapy` available as explicit selectors on the same surface when comparing runs
 - wrappers default to the canonical `256x48` observation contract with minibatch `64`, BPTT `8`, and rollout `512`
 - corpus compilation defaults to `512`, aligned with the canonical `256x48` environment observation contract
 - benchmarks, wrappers, and tests must use real dataset scenes or compiled dataset `.gmdag` assets; generated or sample scenes are not part of the canonical path
@@ -350,5 +350,5 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - those observation frames reuse the canonical spherical contract; any half-sphere or other display transform belongs in auditor code only
 - the current grouped rollout surface may launch actor subsets on per-group CUDA streams, but any future ping-pong rewrite must preserve actor-local `observation -> action -> next observation` ordering and prove its value with bounded canonical measurements
 - PPO update-loss scalar materialization is diagnostic-only on the canonical hot path: the trainer still emits coarse `actor.training.ppo.update` events for mode/status detection by default, but full PPO loss fields are populated only when explicit update-loss telemetry is enabled
-- when a supported fused Mamba-2 environment is ready later, re-promotion must be proven by rerunning the canonical temporal profile and bounded canonical training surfaces before the active docs and scripts are switched away from GRU
+- when a future temporal-core candidate proves better, re-promotion must be proven by rerunning a controlled head-to-head training comparison and bounded canonical training surfaces before the active docs and scripts are switched away from Mamba2 SSD
 - stronger hardware may move the high-resolution ceiling outward, but documentation and scripts must not imply that higher observation profiles are already production-safe on the active MX150 machine

@@ -175,29 +175,62 @@ class RollingPlot(pg.PlotWidget):
 
 
 class StatusBar(QtWidgets.QFrame):
-    """Minimal status bar with mode indicator and compact metrics."""
+    """Compact header bar: mode indicator, actor selector, and metrics — all in one row."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(44)
+        self.setFixedHeight(36)
         self.setStyleSheet("QFrame { background: #0d0d1a; border-bottom: 1px solid #333; }")
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(16)
+        layout.setSpacing(10)
 
         # Mode indicator
         self._mode_label = QtWidgets.QLabel("[ OBSERVER ]")
         self._mode_label.setStyleSheet(
-            "color: #aaa; font-weight: 700; font-size: 14px; padding: 2px 8px;"
+            "color: #aaa; font-weight: 700; font-size: 13px; padding: 2px 6px;"
         )
         layout.addWidget(self._mode_label)
 
+        # Actor selector (hidden until enabled)
+        self._selector_widget = QtWidgets.QWidget()
+        sel_layout = QtWidgets.QHBoxLayout(self._selector_widget)
+        sel_layout.setContentsMargins(0, 0, 0, 0)
+        sel_layout.setSpacing(4)
+
+        sel_label = QtWidgets.QLabel("Actor:")
+        sel_label.setStyleSheet("color: #888; font-size: 12px; font-weight: 600;")
+        sel_layout.addWidget(sel_label)
+
+        self._actor_combo = QtWidgets.QComboBox()
+        self._actor_combo.setStyleSheet(
+            "QComboBox { background: #1a1a2e; color: #fff; border: 1px solid #333; "
+            "padding: 2px 8px; border-radius: 3px; min-width: 80px; font-weight: bold; font-size: 12px; } "
+            "QComboBox::drop-down { border: none; } "
+            "QComboBox QAbstractItemView { background: #1a1a2e; color: #fff; selection-background-color: #2e86de; }"
+        )
+        sel_layout.addWidget(self._actor_combo)
+
+        self._actor_info = QtWidgets.QLabel()
+        self._actor_info.setStyleSheet("color: #666; font-size: 11px;")
+        sel_layout.addWidget(self._actor_info)
+
+        self._selector_widget.setVisible(False)
+        layout.addWidget(self._selector_widget)
+
+        # Separator
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        sep.setStyleSheet("color: #333;")
+        layout.addWidget(sep)
+
+        # Metrics
         self._metrics_label = QtWidgets.QLabel(
-            "stall=-- | rollout_sps=-- | env_sps=-- | per_actor_sps=-- | ema=-- | ep=0 | step=--"
+            "SPS=-- | Env=-- | EMA=-- | Ep=0 | Step=--"
         )
         self._metrics_label.setStyleSheet(
-            "color: #d5dde8; font-weight: 700; font-size: 14px; padding: 2px 4px;"
+            "color: #d5dde8; font-weight: 600; font-size: 13px; padding: 2px 4px;"
         )
         layout.addWidget(self._metrics_label)
 
@@ -206,9 +239,10 @@ class StatusBar(QtWidgets.QFrame):
     def set_mode(self, mode: str) -> None:
         """Update mode indicator text and colour."""
         styles: dict[str, str] = {
-            "OBSERVER": "color: #aaa; font-weight: 700; font-size: 14px; padding: 2px 8px;",
-            "MANUAL": "color: #f0ad4e; font-weight: 700; font-size: 14px; padding: 2px 8px; background: #332200;",
-            "TRAINING": "color: #5bc0de; font-weight: 700; font-size: 14px; padding: 2px 8px; background: #002233;",
+            "OBSERVER": "color: #aaa; font-weight: 700; font-size: 13px; padding: 2px 6px;",
+            "WAITING": "color: #666; font-weight: 700; font-size: 13px; padding: 2px 6px;",
+            "MANUAL": "color: #f0ad4e; font-weight: 700; font-size: 13px; padding: 2px 6px; background: #332200;",
+            "TRAINING": "color: #5bc0de; font-weight: 700; font-size: 13px; padding: 2px 6px; background: #002233;",
         }
         self._mode_label.setText(f"[ {mode} ]")
         self._mode_label.setStyleSheet(styles.get(mode, styles["OBSERVER"]))
@@ -216,3 +250,15 @@ class StatusBar(QtWidgets.QFrame):
     def set_metrics_text(self, text: str) -> None:
         """Update compact telemetry details rendered beside mode."""
         self._metrics_label.setText(text)
+
+    # ── actor selector helpers ───────────────────────────────────────
+
+    @property
+    def actor_combo(self) -> QtWidgets.QComboBox:
+        return self._actor_combo
+
+    def enable_selector(self) -> None:
+        self._selector_widget.setVisible(True)
+
+    def set_actor_info(self, text: str) -> None:
+        self._actor_info.setText(text)

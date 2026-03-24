@@ -7,7 +7,7 @@ The repository is aligned around one canonical training path:
 - scene compilation through `projects/voxel-dag` into `.gmdag`
 - batched CUDA ray execution through `projects/torch-sdf`
 - direct in-process actor training over `SdfDagBackend`
-- GRU as the active temporal-core default on the Windows training machine
+- Mamba-2 SSD as the active temporal-core default (pure-PyTorch, no Triton dependency)
 - passive auditor attachment only when explicitly requested
 
 Legacy helper code removed during this work stays removed. Legacy public server
@@ -41,8 +41,8 @@ surface.
 
 - `RayViTEncoder` has compile wrapping with eager fallback and existing positional-encoding caching
 - encoder compile remains disabled automatically on stacks that cannot support it cleanly
-- canonical temporal execution is `torch.nn.GRU(batch_first=True)` on the active Windows machine
-- `mambapy` remains an explicit comparison backend, not a second canonical path
+- canonical temporal execution is `Mamba2SSDTemporalCore` (pure-PyTorch SSD, Algorithm 1 from Gu & Dao 2024)
+- `gru` and `mambapy` remain explicit comparison backends, not second canonical paths
 
 ### 5. Config Alignment
 

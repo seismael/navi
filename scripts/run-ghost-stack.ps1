@@ -21,8 +21,8 @@
     # Canonical PPO training with an explicit scene override and refresh
     .\run-ghost-stack.ps1 -Train -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag
 
-  # Resume from checkpoint
-  .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint "checkpoints\policy_step_0010000.pt"
+    # Resume from an explicit prior run checkpoint
+    .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint ".\artifacts\runs\<run_id>\checkpoints\policy_step_0010000.pt"
 #>
 param(
     # ── Mode ──
@@ -55,8 +55,8 @@ param(
     [int]$LogEvery = 100,
     [int]$RolloutLength = 256,
     [int]$ActorTelemetryPort = 5557,
-    [ValidateSet("gru", "mambapy")]
-    [string]$TemporalCore = "gru",
+    [ValidateSet("gru", "mambapy", "mamba2")]
+    [string]$TemporalCore = "mamba2",
 
     # ── Inference-mode ZMQ addresses ──
     [string]$EnvironmentPub = "tcp://*:5559",
@@ -422,6 +422,15 @@ if ($Train) {
         $CheckpointDir = Join-Path $repoRoot "projects\actor\$CheckpointDir"
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
+        if (-not [System.IO.Path]::IsPathRooted($Checkpoint)) {
+            $Checkpoint = Join-Path $repoRoot "projects\actor\$Checkpoint"
+        }
+        if (-not (Test-Path $Checkpoint)) {
+            throw "Checkpoint file not found: $Checkpoint"
+        }
+    }
+
     $trainArgs = @(
         "run",
         "--python", $PythonVersion,
@@ -488,6 +497,9 @@ if ($Train) {
         Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
         Write-Host "  Control    : tcp://localhost:$ActorControlPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
+        if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
+            Write-Host "  Resume     : $Checkpoint"
+        }
         Write-Host "  Dashboard  : $(if ($dashboardEnabled) { 'enabled (passive observer)' } else { 'disabled by default for canonical training; observation stream off' })"
         Write-Host "  Metrics    : $($runContext.MetricsRoot)"
         Write-Host "========================================================"

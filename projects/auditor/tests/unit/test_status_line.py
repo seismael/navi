@@ -11,11 +11,9 @@ from navi_contracts import TelemetryEvent
 
 def test_build_status_metrics_line_waiting_state() -> None:
     text = build_status_metrics_line(None)
-    assert "stall=--" in text
-    assert "rollout_sps=--" in text
-    assert "env_sps=--" in text
-    assert "per_actor_sps=--" in text
-    assert "step=--" in text
+    assert "SPS=--" in text
+    assert "Env=--" in text
+    assert "Step=--" in text
 
 
 def test_build_status_metrics_line_training_values() -> None:
@@ -37,17 +35,17 @@ def test_build_status_metrics_line_training_values() -> None:
         ),
     )
 
-    text = build_status_metrics_line(state, now=100.2, actor_count=4)
+    text = build_status_metrics_line(state, now=100.2)
 
-    assert "stall=200ms" in text
-    assert "rollout_sps=22.5" in text
-    assert "env_sps=--" in text
-    assert "per_actor_sps=5.6" in text
-    assert "ema=-0.734" in text
-    assert "ep=1" in text
-    assert "step=6400" in text
-    assert "opt=145ms" in text
-    assert "zw=3.0%" in text
+    assert "SPS=22.5" in text
+    assert "Env=--" in text
+    assert "EMA=-0.734" in text
+    assert "Ep=1" in text
+    assert "Step=6400" in text
+    assert "Opt=145ms" in text
+    assert "ZW=3%" in text
+    # Stall < 1s should not appear
+    assert "Stall=" not in text
 
 
 def test_build_status_metrics_line_falls_back_to_environment_perf() -> None:
@@ -68,11 +66,10 @@ def test_build_status_metrics_line_falls_back_to_environment_perf() -> None:
 
     text = build_status_metrics_line(state, now=50.2)
 
-    assert "rollout_sps=--" in text
-    assert "env_sps=64.2" in text
-    assert "per_actor_sps=--" in text
-    assert "opt=14ms" in text
-    assert "step=320" in text
+    assert "SPS=--" in text
+    assert "Env=64.2" in text
+    assert "Opt=14ms" in text
+    assert "Step=320" in text
 
 
 def test_build_status_metrics_line_uses_shared_fallback_metrics() -> None:
@@ -87,14 +84,12 @@ def test_build_status_metrics_line_uses_shared_fallback_metrics() -> None:
     fallback.perf_zero_wait_history.append(0.02)
     fallback.episode_return_history.append(3.0)
 
-    text = build_status_metrics_line(state, now=75.2, fallback_state=fallback, actor_count=8)
+    text = build_status_metrics_line(state, now=75.2, fallback_state=fallback)
 
-    assert "stall=200ms" in text
-    assert "rollout_sps=58.4" in text
-    assert "env_sps=--" in text
-    assert "per_actor_sps=7.3" in text
-    assert "ema=1.234" in text
-    assert "ep=1" in text
-    assert "step=912" in text
-    assert "opt=91ms" in text
-    assert "zw=2.0%" in text
+    assert "SPS=58.4" in text
+    assert "Env=--" in text
+    assert "EMA=1.234" in text
+    assert "Ep=1" in text
+    assert "Step=912" in text
+    assert "Opt=91ms" in text
+    assert "ZW=2%" in text

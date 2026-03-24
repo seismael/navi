@@ -1,4 +1,9 @@
-"""Tests for PpoLearner (full PPO training)."""
+"""Tests for PpoLearner (full PPO training).
+
+PPO learner tests pin temporal_core="gru" for stable gradient dynamics on
+synthetic data.  The canonical Mamba2 SSD default is validated by
+test_cognitive_policy.py::test_policy_uses_canonical_mamba2_temporal_core.
+"""
 
 from __future__ import annotations
 
@@ -13,29 +18,39 @@ from navi_actor.learner_ppo import PpoLearner, PpoMetrics, _materialize_metric_m
 from navi_actor.rollout_buffer import MultiTrajectoryBuffer, PPOTransition, TrajectoryBuffer
 
 
-def _fill_buffer(n: int = 64) -> TrajectoryBuffer:
-    """Create a trajectory buffer with n dummy transitions."""
+def _make_ppo_policy() -> CognitiveMambaPolicy:
+    """GRU-pinned policy for stable PPO mechanics tests on synthetic data."""
+    return CognitiveMambaPolicy(embedding_dim=128, temporal_core="gru")
+
+
+@torch.no_grad()
+def _fill_buffer(policy: CognitiveMambaPolicy, n: int = 64) -> TrajectoryBuffer:
+    """Create a trajectory buffer with policy-derived log_probs for KL stability."""
     buf = TrajectoryBuffer(gamma=0.99, gae_lambda=0.95)
+    policy.eval()
     for _ in range(n):
+        obs = torch.randn(3, 128, 24)
+        action, log_prob, value, *_ = policy(obs.unsqueeze(0))
         buf.append(
             PPOTransition(
-                observation=torch.randn(3, 128, 24),
-                action=torch.randn(4),
-                log_prob=-0.5,
-                value=0.5,
+                observation=obs,
+                action=action.squeeze(0).detach(),
+                log_prob=float(log_prob.squeeze()),
+                value=float(value.squeeze()),
                 reward=1.0,
                 done=False,
             )
         )
+    policy.train()
     buf.compute_returns_and_advantages(last_value=0.0)
     return buf
 
 
 def test_ppo_epoch_returns_metrics() -> None:
     """train_ppo_epoch should return PpoMetrics."""
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
-    buf = _fill_buffer(64)
+    buf = _fill_buffer(policy, 64)
 
     metrics = learner.train_ppo_epoch(
         policy,
@@ -95,13 +110,13 @@ def test_materialize_metric_means_packs_epoch_metrics_once() -> None:
 
 def test_ppo_epoch_improves_loss() -> None:
     """Multiple PPO epochs should change the loss."""
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
-    buf = _fill_buffer(128)
+    buf = _fill_buffer(policy, 128)
 
     m1 = learner.train_ppo_epoch(policy, buf, ppo_epochs=1, minibatch_size=64, seq_len=0)
     # Rebuild buffer for second pass (same data)
-    buf2 = _fill_buffer(128)
+    buf2 = _fill_buffer(policy, 128)
     m2 = learner.train_ppo_epoch(policy, buf2, ppo_epochs=1, minibatch_size=64, seq_len=0)
     # Losses should differ between calls (policy updated)
     assert m1.total_loss != m2.total_loss or m1.policy_loss != m2.policy_loss
@@ -109,9 +124,9 @@ def test_ppo_epoch_improves_loss() -> None:
 
 def test_ppo_clip_fraction_bounded() -> None:
     """Clip fraction should be between 0 and 1."""
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(clip_ratio=0.2)
-    buf = _fill_buffer(64)
+    buf = _fill_buffer(policy, 64)
     metrics = learner.train_ppo_epoch(
         policy,
         buf,
@@ -124,9 +139,9 @@ def test_ppo_clip_fraction_bounded() -> None:
 
 def test_ppo_epoch_can_skip_summary_scalar_materialization() -> None:
     """Canonical trainer may skip epoch-end scalar host sync when update telemetry is off."""
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
-    buf = _fill_buffer(64)
+    buf = _fill_buffer(policy, 64)
 
     metrics = learner.train_ppo_epoch(
         policy,
@@ -150,7 +165,7 @@ def test_ppo_epoch_can_skip_summary_scalar_materialization() -> None:
 
 def test_empty_buffer_returns_zeros() -> None:
     """An empty buffer should return zero metrics."""
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner()
     buf = TrajectoryBuffer()
     buf.compute_returns_and_advantages(last_value=0.0)
@@ -192,7 +207,7 @@ def test_default_value_coeff_is_low() -> None:
 
 def test_optimizer_covers_full_policy() -> None:
     """PpoLearner should keep one optimizer over the full policy module."""
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
 
     optimizer = learner._get_optimizer(policy)
@@ -214,7 +229,7 @@ def test_optimizer_covers_full_policy() -> None:
 
 
 def test_prime_update_runtime_eagerly_populates_optimizer_and_param_cache() -> None:
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
 
     learner.prime_update_runtime(policy)
@@ -256,14 +271,14 @@ def test_create_adam_optimizer_falls_back_to_foreach_when_fused_is_unavailable(
 
 def test_gradient_isolation_policy_updates_actor() -> None:
     """After one PPO step, actor head weights should change but not due to value loss."""
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-2, value_coeff=0.005)
 
     # Record initial actor + critic weights
     actor_w_before = policy.heads.actor[0].weight.data.clone()
     critic_w_before = policy.heads.critic[0].weight.data.clone()
 
-    buf = _fill_buffer(64)
+    buf = _fill_buffer(policy, 64)
     learner.train_ppo_epoch(
         policy,
         buf,
@@ -285,9 +300,9 @@ def test_gradient_isolation_policy_updates_actor() -> None:
 
 
 def test_ppo_epoch_invokes_progress_callback() -> None:
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
-    buf = _fill_buffer(64)
+    buf = _fill_buffer(policy, 64)
     callback_calls = 0
 
     def on_progress() -> None:
@@ -307,21 +322,31 @@ def test_ppo_epoch_invokes_progress_callback() -> None:
 
 
 def test_ppo_epoch_accepts_tensor_native_sequence_minibatches() -> None:
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 
-    for step in range(1, 3):
-        buffer.append_batch(
-            observations=torch.randn(2, 3, 128, 24),
-            actions=torch.randn(2, 4),
-            log_probs=torch.randn(2),
-            values=torch.full((2,), 0.25 * step),
-            rewards=torch.full((2,), float(step)),
-            dones=torch.zeros(2, dtype=torch.bool),
-            truncateds=torch.zeros(2, dtype=torch.bool),
-            aux_tensors=torch.randn(2, 3),
-        )
+    policy.eval()
+    with torch.no_grad():
+        for step in range(1, 3):
+            obs = torch.randn(2, 3, 128, 24)
+            actions_list, lp_list, val_list = [], [], []
+            for i in range(2):
+                a, lp, v, *_ = policy(obs[i : i + 1])
+                actions_list.append(a.squeeze(0))
+                lp_list.append(lp.squeeze())
+                val_list.append(v.squeeze())
+            buffer.append_batch(
+                observations=obs,
+                actions=torch.stack(actions_list),
+                log_probs=torch.stack(lp_list),
+                values=torch.stack(val_list),
+                rewards=torch.full((2,), float(step)),
+                dones=torch.zeros(2, dtype=torch.bool),
+                truncateds=torch.zeros(2, dtype=torch.bool),
+                aux_tensors=torch.randn(2, 3),
+            )
+    policy.train()
 
     buffer.compute_returns_and_advantages(last_values=torch.zeros(2))
 
@@ -338,7 +363,7 @@ def test_ppo_epoch_accepts_tensor_native_sequence_minibatches() -> None:
 
 
 def test_ppo_epoch_sequence_minibatch_does_not_require_flat_obs_tensors() -> None:
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 
@@ -388,7 +413,7 @@ def test_ppo_epoch_sequence_minibatch_does_not_require_flat_obs_tensors() -> Non
 
 
 def test_ppo_epoch_sequence_minibatch_requires_sequence_native_views() -> None:
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 
@@ -437,7 +462,7 @@ def test_ppo_epoch_sequence_minibatch_requires_sequence_native_views() -> None:
 
 
 def test_ppo_epoch_sequence_minibatch_works_without_hidden_fields() -> None:
-    policy = CognitiveMambaPolicy(embedding_dim=128)
+    policy = _make_ppo_policy()
     learner = PpoLearner(learning_rate=1e-3)
     buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=2)
 

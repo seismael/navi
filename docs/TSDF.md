@@ -59,7 +59,7 @@ Parts of this file preserve imported design rationale. The current canonical
 repository status is:
 
 - production observation default is `256x48`, not `128x24`
-- the active production temporal-core default is `gru`, not fused Mamba-2
+- the active production temporal-core default is `mamba2` (pure-PyTorch Mamba-2 SSD), not fused Mamba-2
 - high-resolution trainer scaling is currently limited by actor-side RayViT
     attention before the environment runtime itself hits the same wall on the
     active MX150 machine

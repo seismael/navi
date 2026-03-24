@@ -13,7 +13,7 @@ in `AGENTS.md`, `docs/PERFORMANCE.md`, `docs/ACTOR.md`, `docs/TRAINING.md`, and
 - GPU: NVIDIA GeForce MX150
 - CUDA capability: `sm_61`
 - VRAM: `2 GB`
-- canonical trainer temporal core: `gru`
+- canonical trainer temporal core: `mamba2`
 - canonical production observation contract: `256x48`
 
 ## 2. Canonical Trainer Sweep

@@ -27,7 +27,7 @@ def test_actor_config_allows_field_name_overrides_with_aliases() -> None:
     assert config.step_endpoint == "tcp://127.0.0.1:19002"
     assert config.azimuth_bins == 128
     assert config.elevation_bins == 24
-    assert config.temporal_core == "gru"
+    assert config.temporal_core == "mamba2"
     assert config.emit_observation_stream is True
     assert config.dashboard_observation_hz == 10.0
     assert config.emit_training_telemetry is True
@@ -41,12 +41,13 @@ def test_actor_config_allows_field_name_overrides_with_aliases() -> None:
 
 
 def test_actor_config_temporal_core_override_and_default() -> None:
-    """Temporal-core selector should default to GRU and accept explicit overrides."""
-    assert ActorConfig().temporal_core == "gru"
+    """Temporal-core selector should default to Mamba2 SSD and accept explicit overrides."""
+    assert ActorConfig().temporal_core == "mamba2"
     assert ActorConfig(temporal_core="mambapy").temporal_core == "mambapy"
+    assert ActorConfig(temporal_core="gru").temporal_core == "gru"
 
 
 def test_actor_config_rejects_unsupported_temporal_core() -> None:
     """Unsupported temporal-core names should fail validation immediately."""
-    with pytest.raises(ValidationError, match=r"mambapy|gru"):
+    with pytest.raises(ValidationError, match=r"mambapy|gru|mamba2"):
         ActorConfig(temporal_core=cast("Any", "mamba-ssm"))

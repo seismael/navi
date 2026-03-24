@@ -21,8 +21,8 @@ param(
     [int]$CheckpointEvery = 25000,
     [string]$LogDir = "",
     [int]$ActorTelemetryPort = 5557,
-    [ValidateSet("gru", "mambapy")]
-    [string]$TemporalCore = "gru",
+    [ValidateSet("gru", "mambapy", "mamba2")]
+    [string]$TemporalCore = "mamba2",
     [string]$PythonVersion = "3.12",
     [int]$NumActors = 4
 )
@@ -303,6 +303,12 @@ if ($AutoCompileGmDag) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) {
+    if (-not [System.IO.Path]::IsPathRooted($ResumeCheckpoint)) {
+        $ResumeCheckpoint = Join-Path $repoRoot "projects\actor\$ResumeCheckpoint"
+    }
+    if (-not (Test-Path $ResumeCheckpoint)) {
+        throw "Checkpoint file not found: $ResumeCheckpoint"
+    }
     $actorArgs += @("--checkpoint", $ResumeCheckpoint)
 }
 

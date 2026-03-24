@@ -9,8 +9,8 @@ from pydantic import Field
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-TemporalCoreName = Literal["gru", "mambapy"]
-SUPPORTED_TEMPORAL_CORES: tuple[TemporalCoreName, ...] = ("gru", "mambapy")
+TemporalCoreName = Literal["gru", "mambapy", "mamba2"]
+SUPPORTED_TEMPORAL_CORES: tuple[TemporalCoreName, ...] = ("gru", "mambapy", "mamba2")
 
 __all__: list[str] = ["ActorConfig", "SUPPORTED_TEMPORAL_CORES", "TemporalCoreName"]
 
@@ -59,7 +59,7 @@ class ActorConfig(BaseSettings):
 
     mode: str = "async"
     temporal_core: TemporalCoreName = Field(
-        default="gru",
+        default="mamba2",
         validation_alias="NAVI_ACTOR_TEMPORAL_CORE",
     )
     azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")

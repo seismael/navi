@@ -12,10 +12,11 @@ import torch
 from navi_actor.cognitive_policy import CognitiveMambaPolicy
 from navi_actor.config import TemporalCoreName
 from navi_actor.gru_core import GRUTemporalCore
+from navi_actor.mamba2_core import Mamba2SSDTemporalCore
 from navi_actor.mambapy_core import MambapyTemporalCore
 
 
-def _make_policy(*, temporal_core: TemporalCoreName = "gru") -> CognitiveMambaPolicy:
+def _make_policy(*, temporal_core: TemporalCoreName = "mamba2") -> CognitiveMambaPolicy:
     return CognitiveMambaPolicy(
         embedding_dim=128,
         temporal_core=temporal_core,
@@ -231,11 +232,11 @@ def test_evaluate_actor_gradient_flows_to_backbone() -> None:
     assert len(temporal_grads) > 0, "Temporal core must receive policy-loss gradients"
 
 
-def test_policy_uses_canonical_gru_temporal_core() -> None:
-    """The default policy should instantiate the canonical GRU core."""
+def test_policy_uses_canonical_mamba2_temporal_core() -> None:
+    """The default policy should instantiate the canonical Mamba2 SSD core."""
     policy = _make_policy()
 
-    assert isinstance(policy.temporal_core, GRUTemporalCore)
+    assert isinstance(policy.temporal_core, Mamba2SSDTemporalCore)
 
 
 def test_gru_temporal_core_flattens_once_per_cuda_device() -> None:

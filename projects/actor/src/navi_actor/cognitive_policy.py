@@ -24,6 +24,7 @@ from torch import Tensor, nn
 from navi_actor.actor_critic import ActorCriticHeads
 from navi_actor.config import SUPPORTED_TEMPORAL_CORES, TemporalCoreName
 from navi_actor.gru_core import GRUTemporalCore
+from navi_actor.mamba2_core import Mamba2SSDTemporalCore
 from navi_actor.mambapy_core import MambapyTemporalCore
 
 _log = logging.getLogger(__name__)
@@ -89,6 +90,13 @@ def _build_temporal_core(
         )
     if temporal_core == "gru":
         return GRUTemporalCore(d_model=embedding_dim)
+    if temporal_core == "mamba2":
+        return Mamba2SSDTemporalCore(
+            d_model=embedding_dim,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+        )
     supported = ", ".join(SUPPORTED_TEMPORAL_CORES)
     raise ValueError(f"Unsupported temporal core '{temporal_core}'. Expected one of: {supported}")
 
@@ -107,7 +115,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         self,
         embedding_dim: int = 128,
         *,
-        temporal_core: TemporalCoreName = "gru",
+        temporal_core: TemporalCoreName = "mamba2",
         azimuth_bins: int = 128,
         elevation_bins: int = 24,
         max_forward: float = 1.0,

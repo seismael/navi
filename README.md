@@ -13,9 +13,12 @@ Canonical training and inference now assume a precompiled actor temporal-core
 path that works on the active Windows hardware with no extra extension build.
 The environment hot path is already sufficiently optimized that unfused Python
 temporal implementations simply move the bottleneck into host-side PPO sequence
-execution. For the active Windows machine, the native cuDNN GRU path is the
-default canonical production path, with `mambapy` available only as an
-explicit comparison backend on the same trainer and serve surfaces.
+execution. The pure-PyTorch Mamba-2 SSD path is the default canonical
+production path, proven by a 25K-step head-to-head comparison to deliver
+significantly better learning quality (final reward_ema -0.88 vs GRU's -1.48)
+with only a modest throughput trade-off (~72 SPS vs ~100 SPS). `gru` and
+`mambapy` remain available as explicit comparison backends on the same trainer
+and serve surfaces.
 
 Current benchmark interpretation is now split clearly by layer:
 
@@ -37,10 +40,10 @@ Current benchmark interpretation is now split clearly by layer:
 # 2. Start canonical continuous training
 ./scripts/train.ps1
 
-# 2b. Compare the same run with Mambapy on the same trainer surface
-./scripts/train.ps1 -TemporalCore mambapy
+# 2b. Compare the same run with GRU on the same trainer surface
+./scripts/train.ps1 -TemporalCore gru
 
-# 2c. Run a bounded side-by-side comparison for mambapy and GRU
+# 2c. Run a bounded side-by-side comparison for mamba2 and gru
 ./scripts/run-temporal-compare.ps1
 
 # 2d. Run a bounded observation-resolution sweep on the canonical trainer
@@ -59,7 +62,7 @@ When no scene, manifest, or step limit is supplied, Navi now:
 - recompiles corpus assets when explicitly requested
 - removes transient source downloads after a successful staged refresh
 - trains continuously until stopped
-- defaults the actor temporal core to `gru`, with `mambapy` available through an explicit selector on the same canonical surface
+- defaults the actor temporal core to `mamba2`, with `gru` and `mambapy` available through explicit selectors on the same canonical surface
 
 ## Project Layout
 
@@ -100,8 +103,8 @@ uv run dashboard
 # Canonical actor service
 ./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
 
-# Canonical actor service with Mambapy selected explicitly
-./scripts/run-brain.ps1 -TemporalCore mambapy --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
+# Canonical actor service with GRU selected explicitly
+./scripts/run-brain.ps1 -TemporalCore gru --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
 
 # Canonical full inference stack
 ./scripts/run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
@@ -109,8 +112,8 @@ uv run dashboard
 # Canonical full training stack
 ./scripts/run-ghost-stack.ps1 -Train
 
-# Canonical full training stack with Mambapy selected explicitly
-./scripts/run-ghost-stack.ps1 -Train -TemporalCore mambapy
+# Canonical full training stack with GRU selected explicitly
+./scripts/run-ghost-stack.ps1 -Train -TemporalCore gru
 ```
 
 ## Corpus Tooling

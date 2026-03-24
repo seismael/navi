@@ -66,8 +66,8 @@ transient source staging
 
 The actor segment of that path is canonical only when the temporal core runs
 through the one production selector contract used on the active Windows
-machine. The repository defaults that selector to the native cuDNN GRU
-path, while allowing `mambapy` to run on the same trainer surface for
+machine. The repository defaults that selector to the pure-PyTorch Mamba-2 SSD
+path, while allowing `gru` and `mambapy` to run on the same trainer surface for
 like-for-like comparisons without introducing a second actor architecture.
 
 The canonical training integration point is at the CLI and orchestration

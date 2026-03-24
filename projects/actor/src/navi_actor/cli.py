@@ -214,7 +214,7 @@ def serve(
     ),
     temporal_core: str = typer.Option(
         "",
-        help="Temporal core selector: gru (default) or mambapy.",
+        help="Temporal core selector: mamba2 (default), gru, or mambapy.",
     ),
     azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
     elevation_bins: int = typer.Option(48, help="Expected distance-matrix elevation resolution"),
@@ -292,7 +292,7 @@ def train(
     ),
     temporal_core: str = typer.Option(
         "",
-        help="Temporal core selector: gru (default) or mambapy.",
+        help="Temporal core selector: mamba2 (default), gru, or mambapy.",
     ),
     azimuth_bins: int = typer.Option(256, help="Expected azimuth resolution"),
     elevation_bins: int = typer.Option(48, help="Expected elevation resolution"),

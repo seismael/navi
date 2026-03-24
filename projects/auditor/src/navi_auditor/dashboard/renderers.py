@@ -174,6 +174,8 @@ def _apply_fog_of_war(img: np.ndarray, invalid_mask: np.ndarray) -> None:
 def depth_to_viridis(
     depth: np.ndarray,
     valid: np.ndarray | None = None,
+    *,
+    max_distance: float = 30.0,
 ) -> np.ndarray:
     """Convert 2-D float32 depth to Viridis-coloured BGR with fog-of-war.
 
@@ -181,9 +183,9 @@ def depth_to_viridis(
     still show clear depth variation instead of a single-colour heatmap.
     """
     # Linearize log-normalized depth for visualization (see observer palette).
-    vis_log_denom = np.float32(np.log1p(100.0))
+    vis_log_denom = np.float32(np.log1p(max_distance))
     depth = np.expm1(np.clip(depth, 0.0, 1.0).astype(np.float32) * vis_log_denom) / np.float32(
-        100.0
+        max_distance
     )
 
     if valid is not None and np.any(valid):
@@ -210,6 +212,7 @@ def depth_to_observer_palette(
     valid: np.ndarray | None = None,
     *,
     fog_of_war: bool = True,
+    max_distance: float = 30.0,
 ) -> np.ndarray:
     """Convert depth to a structure-revealing observer palette.
 
@@ -220,12 +223,12 @@ def depth_to_observer_palette(
     structure detail.  Contrast is stretched dynamically from the valid
     depth distribution so indoor scenes keep clear separation.
     """
-    # The observation depth channel is log-normalized: log1p(d)/log1p(100).
+    # The observation depth channel is log-normalized: log1p(d)/log1p(max_distance).
     # Invert to recover metric-proportional depth for visualization so
     # the perceptual near=warm / far=cool gradient stays familiar.
-    vis_log_denom = np.float32(np.log1p(100.0))
+    vis_log_denom = np.float32(np.log1p(max_distance))
     depth = np.expm1(np.clip(depth, 0.0, 1.0).astype(np.float32) * vis_log_denom) / np.float32(
-        100.0
+        max_distance
     )
 
     if valid is not None and np.any(valid):
@@ -521,9 +524,9 @@ def render_first_person(
     if az_bins == 0 or el_bins == 0:
         return np.full((height, width, 3), 15, dtype=np.uint8), 0.0
 
-    pad_x = 16
-    pad_top = 24
-    pad_bottom = 28
+    pad_x = 4
+    pad_top = 4
+    pad_bottom = 4
     target_w = max(1, width - 2 * pad_x)
     target_h = max(1, height - pad_top - pad_bottom)
 
@@ -549,11 +552,12 @@ def render_first_person(
         canvas, (pad_x - 1, pad_top - 1), (pad_x + target_w, pad_top + target_h), (70, 70, 70), 1
     )
 
-    cv2.putText(canvas, "UP", (cx - 10, 18), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "UP", (cx - 10, pad_top + 16), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    down_size = cv2.getTextSize("DOWN", _HUD_FONT, 0.45, 1)[0]
     cv2.putText(
-        canvas, "DOWN", (cx - 24, height - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+        canvas, "DOWN", (cx - down_size[0] // 2, pad_top + target_h - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
     )
-    left_y = min(height - 10, max(20, cy + 5))
+    left_y = min(pad_top + target_h - 10, max(pad_top + 16, cy + 5))
     cv2.putText(
         canvas, "LEFT", (pad_x, left_y), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
     )
@@ -574,7 +578,7 @@ def render_first_person(
         cv2.putText(
             canvas,
             f"pitch {pitch_deg:+.1f}\xb0",
-            (cx - 40, 24),
+            (cx - 40, pad_top + 30),
             _HUD_FONT,
             0.45,
             _HEADING_COLOR,

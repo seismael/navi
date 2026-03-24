@@ -383,6 +383,9 @@ class PpoLearner:
                 obs_seq_tensor = None
                 acts_seq_tensor = None
                 aux_seq_tensor = None
+                obs: Tensor | None = None
+                acts: Tensor | None = None
+                aux_tensor: Tensor | None = None
                 if use_sequence_path:
                     assert mb.sequence_observations is not None
                     assert mb.sequence_actions is not None
@@ -390,6 +393,14 @@ class PpoLearner:
                     acts_seq_tensor = _prepare_minibatch_tensor(mb.sequence_actions, device)
                     if mb.sequence_aux_tensors is not None:
                         aux_seq_tensor = _prepare_minibatch_tensor(mb.sequence_aux_tensors, device)
+                else:
+                    obs = _prepare_minibatch_tensor(mb.observations, device)
+                    acts = _prepare_minibatch_tensor(mb.actions, device)
+                    aux_tensor = (
+                        _prepare_minibatch_tensor(mb.aux_tensors, device)
+                        if mb.aux_tensors is not None
+                        else None
+                    )
                 h0: Tensor | None = None
                 prep_ms = (time.perf_counter() - t_prep_start) * 1000
                 prep_ms_acc += prep_ms
@@ -420,13 +431,8 @@ class PpoLearner:
                                 aux_seq=aux_seq_tensor,
                             )
                     else:
-                        obs = _prepare_minibatch_tensor(mb.observations, device)
-                        acts = _prepare_minibatch_tensor(mb.actions, device)
-                        aux_tensor = (
-                            _prepare_minibatch_tensor(mb.aux_tensors, device)
-                            if mb.aux_tensors is not None
-                            else None
-                        )
+                        assert obs is not None
+                        assert acts is not None
                         if self._profile_cuda_events:
                             new_lp, new_vals, ent, _, z_mb, eval_stage_metrics = (
                                 policy.evaluate_profiled(
@@ -482,7 +488,8 @@ class PpoLearner:
                     continue
 
                 with torch.no_grad():
-                    _approx_kl = (ratio - 1.0 - log_ratio).mean().item()
+                    approx_kl = (ratio - 1.0 - log_ratio).mean()
+                    _approx_kl = float(approx_kl.detach().to(device="cpu").item())
                 if _approx_kl > 0.03:
                     _LOGGER.warning(
                         "KL divergence %.4f exceeds threshold 0.03, stopping epoch early",
@@ -490,14 +497,6 @@ class PpoLearner:
                     )
                     _kl_early_stop = True
                     break
-
-                with torch.no_grad():
-                    _max_val = new_vals.abs().max().item()
-                if _max_val > 1000.0:
-                    _LOGGER.warning(
-                        "Value function prediction |V|=%.1f exceeds 1000, possible explosion",
-                        _max_val,
-                    )
 
                 # Optimization step
                 with _stage_timer(
@@ -526,6 +525,7 @@ class PpoLearner:
 
                 # RND distillation
                 rnd_loss_metric: Tensor | None = None
+                rnd_wall_ms = 0.0
                 if rnd is not None and rnd_optimizer is not None:
                     with _stage_timer(
                         device=device, use_cuda_events=self._profile_cuda_events
@@ -537,6 +537,7 @@ class PpoLearner:
                         rnd_optimizer.step()
                         if track_summary_scalars:
                             rnd_loss_metric = rnd_loss.detach()
+                    rnd_wall_ms = rnd_ms.wall_ms
                     rnd_step_ms_acc += rnd_ms.wall_ms
                     rnd_device_ms_acc += rnd_ms.device_ms
 
@@ -588,7 +589,7 @@ class PpoLearner:
                     + backward_ms.wall_ms
                     + clip_ms.wall_ms
                     + optimizer_ms.wall_ms
-                    + (rnd_ms.wall_ms if rnd is not None and rnd_optimizer is not None else 0.0)
+                    + rnd_wall_ms
                 )
                 timed_update_ms += stats_wall_ms + callback_ms
                 update_total_ms = (time.perf_counter() - update_total_start) * 1000

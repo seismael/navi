@@ -147,9 +147,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidates",
         nargs="+",
-        default=["gru"],
-        choices=["gru", "mambapy"],
-        help="Temporal-core candidates to benchmark. GRU is the canonical default on the active Windows machine.",
+        default=["mamba2"],
+        choices=["gru", "mambapy", "mamba2"],
+        help="Temporal-core candidates to benchmark. Mamba2 SSD is the canonical default.",
     )
     parser.add_argument(
         "--device",

@@ -685,8 +685,14 @@ class PpoTrainer:
         # PPO Inference sub-stage (GAE + advantage calculation)
         t_inf_start = time.perf_counter()
         with torch.no_grad():
-            b_obs = obs_batch.to(self._device)
-            b_aux = aux_batch.to(self._device)
+            # Rollout is paused during PPO update, so the latest bootstrap tensors can be
+            # reused directly instead of cloning full CUDA state before the value pass.
+            b_obs = obs_batch.detach()
+            b_aux = aux_batch.detach()
+            if b_obs.device != self._device:
+                b_obs = b_obs.to(self._device)
+            if b_aux.device != self._device:
+                b_aux = b_aux.to(self._device)
 
             self._learner_policy.eval()
             _, _, b_val, _, _ = self._learner_policy.forward(b_obs, None, aux_tensor=b_aux)
@@ -2258,8 +2264,8 @@ class PpoTrainer:
                 self._learner.set_learning_rate(cosine_lr, rnd_lr=cosine_rnd_lr)
             self._run_ppo_update(
                 multi_buffer=self._multi_buffers,
-                obs_batch=current_obs_batch.detach().clone(),
-                aux_batch=aux_states.detach().clone(),
+                obs_batch=current_obs_batch,
+                aux_batch=aux_states,
                 ppo_epochs=ep,
                 minibatch_size=mb,
                 seq_len=sl,

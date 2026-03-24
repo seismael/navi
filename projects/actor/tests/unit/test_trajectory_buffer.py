@@ -7,7 +7,11 @@ from typing import cast
 import pytest
 import torch
 
-from navi_actor.rollout_buffer import MultiTrajectoryBuffer, PPOTransition, TrajectoryBuffer
+from navi_actor.rollout_buffer import (
+    MultiTrajectoryBuffer,
+    PPOTransition,
+    TrajectoryBuffer,
+)
 
 
 def _assert_same_device(actual: torch.device, expected: torch.device) -> None:

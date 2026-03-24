@@ -19,7 +19,7 @@ observations *to* the engine's canonical `(1, Az, El)` DistanceMatrix format.
 1. **RayViTEncoder** — ViT `(B, 3, Az, El)` → `(B, 128)` spatial embedding
 2. **RND Curiosity** — intrinsic exploration reward from embedding novelty
 3. **EpisodicMemory** — tensor-native cosine-similarity loop-avoidance and context retrieval
-4. **TemporalCore** — canonical sequence engine (`gru` by default, `mambapy` by explicit comparison)
+4. **TemporalCore** — canonical sequence engine (`mamba2` by default, `gru` and `mambapy` by explicit comparison)
 5. **ActorCriticHeads** — 4-DOF action distribution + value estimation
 
 Input contract: only `depth` and `semantic` from `DistanceMatrix` are consumed.
@@ -174,14 +174,15 @@ Install CUDA-enabled PyTorch wheels into the actor virtual environment.
 Default profile is pinned for wider GPU architecture support (including `sm_61`):
 `torch==2.5.1+cu121` on Python 3.12.
 
-Actor canonical runtime now defaults to the native cuDNN GRU path, with `mambapy` available on the same train and serve surfaces for explicit comparisons.
+Actor canonical runtime now defaults to the pure-PyTorch Mamba-2 SSD path, with `gru` and `mambapy` available on the same train and serve surfaces for explicit comparisons.
 
-The active repository decision is to keep the profiled cuDNN GRU runtime as the
-default production temporal path after repeated bounded trainer runs showed an
-end-to-end throughput win over `mambapy` on the same selector surface.
+The active repository decision promotes pure-PyTorch Mamba-2 SSD as the
+default production temporal path after a controlled 25K-step training comparison
+proved significantly better learning quality (final reward_ema -0.88 vs GRU's
+-1.48) with only a modest throughput trade-off (~72 SPS vs ~100 SPS).
 
-Future fused Mamba-2 work is still supported, but it is deferred until a better
-environment and hardware surface are available.
+Future fused Mamba-2 (`mamba-ssm`) work is still supported, but it is deferred
+until a better hardware surface is available.
 
 Optional future fused install from vendored sources:
 

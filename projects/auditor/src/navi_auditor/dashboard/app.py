@@ -24,9 +24,6 @@ from navi_auditor.stream_engine import StreamEngine, StreamState
 
 __all__: list[str] = ["GhostMatrixDashboard"]
 
-# ── FOV slice fraction ───────────────────────────────────────────────
-_FOV_FRACTION: float = 120.0 / 360.0
-
 
 class GhostMatrixDashboard(QtWidgets.QMainWindow):
     """High-performance real-time selected-actor visualiser.
@@ -95,7 +92,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         # ── build UI ─────────────────────────────────────────────────
         self._status_bar = StatusBar()
-        self._actor_panel = ImagePanel(title="LIVE ACTOR")
+        self._actor_panel = ImagePanel()
         self._build_layout()
 
         # ── tick timer ───────────────────────────────────────────────
@@ -107,85 +104,64 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
     # ── layout construction ──────────────────────────────────────────
 
     def _build_layout(self) -> None:
-        """Build the main window layout with one live actor panel."""
+        """Build the main window layout: single header row + full-bleed actor panel."""
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         main_layout = QtWidgets.QVBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Top status bar
+        # Single header row (mode + actor selector + metrics)
         main_layout.addWidget(self._status_bar)
 
         if self._enable_actor_selector:
-            self._actor_selector_label = QtWidgets.QLabel()
-            self._actor_selector_label.setStyleSheet(
-                "color: #d5dde8; font-weight: 700; font-size: 13px; padding: 2px 6px;"
-            )
-            self._actor_selector = QtWidgets.QComboBox()
-            self._actor_selector.setStyleSheet(
-                "QComboBox { background: #1a1a2e; color: #fff; border: 1px solid #333; "
-                "padding: 5px; border-radius: 4px; min-width: 120px; font-weight: bold; } "
-                "QComboBox::drop-down { border: none; } "
-                "QComboBox QAbstractItemView { background: #1a1a2e; color: #fff; selection-background-color: #2e86de; }"
-            )
-            self._actor_selector.addItem(f"Actor {self._selected_actor}", self._selected_actor)
-            self._actor_selector.currentIndexChanged.connect(self._on_actor_selector_changed)
+            self._status_bar.enable_selector()
+            combo = self._status_bar.actor_combo
+            combo.addItem(f"Actor {self._selected_actor}", self._selected_actor)
+            combo.currentIndexChanged.connect(self._on_actor_selector_changed)
             if self._known_actors:
-                self._actor_selector.clear()
+                combo.clear()
                 for actor_id in self._known_actors:
-                    self._actor_selector.addItem(f"Actor {actor_id}", actor_id)
-                idx = self._actor_selector.findData(self._selected_actor)
+                    combo.addItem(f"Actor {actor_id}", actor_id)
+                idx = combo.findData(self._selected_actor)
                 if idx >= 0:
-                    self._actor_selector.setCurrentIndex(idx)
+                    combo.setCurrentIndex(idx)
             self._update_actor_selector_label()
 
-            selector_container = QtWidgets.QWidget()
-            selector_layout = QtWidgets.QHBoxLayout(selector_container)
-            selector_layout.setContentsMargins(10, 5, 10, 5)
-            selector_layout.addWidget(QtWidgets.QLabel("ACTOR:"))
-            selector_layout.addWidget(self._actor_selector)
-            selector_layout.addWidget(self._actor_selector_label)
-            selector_layout.addStretch()
-            main_layout.addWidget(selector_container)
-
-        content = QtWidgets.QWidget()
-        content_layout = QtWidgets.QHBoxLayout(content)
-        content_layout.setContentsMargins(8, 8, 8, 8)
-        content_layout.setSpacing(8)
-        content_layout.addWidget(self._actor_panel, stretch=1)
-        main_layout.addWidget(content, stretch=1)
+        # Actor panel — no margins, fills all remaining space
+        main_layout.addWidget(self._actor_panel, stretch=1)
 
     def _update_actor_selector_label(self) -> None:
         """Render the currently watched actor beside the selector."""
         if not self._enable_actor_selector:
             return
         known_count = len(self._known_actors)
-        suffix = f" | discovered={known_count}" if known_count > 0 else " | waiting"
-        self._actor_selector_label.setText(f"Watching actor {self._selected_actor}{suffix}")
+        suffix = f"({known_count})" if known_count > 0 else "(waiting)"
+        self._status_bar.set_actor_info(suffix)
 
     def _refresh_selector(self) -> None:
         """Refresh actor selector options from discovered stream actors."""
         if not self._enable_actor_selector:
             return
+        combo = self._status_bar.actor_combo
         discovered = sorted(self._engine.actor_states.keys())
         if discovered != self._known_actors:
             self._known_actors = discovered
-            self._actor_selector.blockSignals(True)
-            self._actor_selector.clear()
+            combo.blockSignals(True)
+            combo.clear()
             for actor_id in discovered:
-                self._actor_selector.addItem(f"Actor {actor_id}", actor_id)
-            idx = self._actor_selector.findData(self._selected_actor)
+                combo.addItem(f"Actor {actor_id}", actor_id)
+            idx = combo.findData(self._selected_actor)
             if idx >= 0:
-                self._actor_selector.setCurrentIndex(idx)
-            self._actor_selector.blockSignals(False)
+                combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
         self._update_actor_selector_label()
 
     def _on_actor_selector_changed(self, _index: int) -> None:
         """Switch selected actor from UI selector."""
         if not self._enable_actor_selector:
             return
-        actor_id = self._actor_selector.currentData()
+        actor_id = self._status_bar.actor_combo.currentData()
         if actor_id is None:
             return
         resolved_actor = int(actor_id)
@@ -224,7 +200,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             return
 
         # Determine mode (Standard: Mode Detection)
-        has_training_data = len(state.reward_history) > 0 or len(state.ppo_reward_ema_history) > 0
+        # Check ALL actor states — training telemetry is only published for the
+        # selected stream actor, so non-selected actors would never accumulate
+        # reward history even though they are part of the same training session.
+        has_training_data = any(
+            len(s.reward_history) > 0 or len(s.ppo_reward_ema_history) > 0
+            for s in self._engine.actor_states.values()
+        )
         has_inference_data = state.latest_features is not None
 
         if self._manual_mode:
@@ -241,7 +223,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
                 state,
                 now=time.time(),
                 fallback_state=self._shared_metrics_state(),
-                actor_count=self._engine.n_actors,
             ),
         )
 
@@ -255,12 +236,16 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         from navi_contracts import DistanceMatrix
 
         assert isinstance(dm, DistanceMatrix)
+        # Render at the panel's current pixel size for full-bleed display
+        size = panel.size()
+        render_w = max(320, size.width())
+        render_h = max(200, size.height())
         actor_img, _center_m = render_first_person(
             dm.depth[0],
             dm.semantic[0],
             dm.valid_mask[0],
-            960,
-            540,
+            render_w,
+            render_h,
             pitch=float(dm.robot_pose.pitch),
         )
         panel.set_image(actor_img)

@@ -472,7 +472,9 @@ class MultiTrajectoryBuffer:
         return sequence_views
 
     def sample_minibatches(
-        self, batch_size: int = 64, seq_len: int = 32
+        self,
+        batch_size: int = 64,
+        seq_len: int = 32,
     ) -> Generator[TrajectoryBuffer.MiniBatch, None, None]:
         """Sample minibatches across all actors while preserving sequences."""
         self._ensure_batch_cache()
@@ -539,11 +541,7 @@ class MultiTrajectoryBuffer:
                     old_values=mb_vals_seqs.flatten(),
                     advantages=mb_advs_seqs.flatten(),
                     returns=mb_rets_seqs.flatten(),
-                    aux_tensors=(
-                        mb_aux_seqs.flatten(0, 1)
-                        if mb_aux_seqs is not None and all_aux is not None
-                        else None
-                    ),
+                    aux_tensors=mb_aux_seqs.flatten(0, 1) if mb_aux_seqs is not None else None,
                     sequence_observations=mb_obs_seqs,
                     sequence_actions=mb_acts_seqs,
                     sequence_aux_tensors=mb_aux_seqs,
@@ -570,6 +568,7 @@ class MultiTrajectoryBuffer:
                     returns=rets_flat[idx],
                     aux_tensors=aux_flat[idx] if aux_flat is not None else None,
                 )
+
 
     def __len__(self) -> int:
         if self._batched_actor_step_counts is None:

@@ -137,13 +137,13 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Training Surface Rule:** Scripts, examples, and CLI defaults for production training must advertise only the canonical `sdfdag` path. Alternative backend references may remain only where they are explicitly framed as diagnostic or regression tooling.
 - **Default Scene Rule:** Scripts, examples, and CLI defaults for production training must advertise the full discovered canonical corpus as the default training dataset. Single-scene examples must be framed as explicit overrides.
 
-### 2.7 Temporal Core Migration Standard (Mar 2026)
-- **Canonical Runtime:** The actor temporal core canonical runtime on the active Windows training machine is the native cuDNN `gru` path because repeated bounded trainer runs proved a real end-to-end throughput win over `mambapy` on the canonical surface.
-- **No-Build Rule:** The canonical temporal runtime must work from the standard PyTorch CUDA install with no custom C++ extension build step on the active Windows training machine.
-- **Controlled Selector Rule:** Production scripts, wrappers, defaults, and docs MUST expose one temporal-core selector contract on the one canonical trainer surface. The active Windows machine supports `gru` as the default runtime and `mambapy` as an explicit comparison backend; alternate trainer architectures and parallel production surfaces are forbidden.
+### 2.7 Temporal Core Standard (Mar 2026)
+- **Canonical Runtime:** The actor temporal core canonical runtime is the pure-PyTorch Mamba-2 SSD path because a 25K-step head-to-head training comparison proved significantly better learning quality (final reward_ema -0.88 vs -1.48) over cuDNN GRU, with only a modest throughput trade-off (~72 SPS vs ~100 SPS) that is dominated by PPO optimizer cost rather than the temporal core itself.
+- **No-Build Rule:** The canonical temporal runtime must work from the standard PyTorch CUDA install with no custom C++ extension build step, no Triton dependency, and no platform-specific fused wheels.
+- **Controlled Selector Rule:** Production scripts, wrappers, defaults, and docs MUST expose one temporal-core selector contract on the one canonical trainer surface. The active machine supports `mamba2` as the default runtime, with `gru` and `mambapy` available as explicit comparison backends; alternate trainer architectures and parallel production surfaces are forbidden.
 - **Update-Frequency Rule:** PPO cadence tuning MAY reduce how often optimizer updates run, but must happen on the one canonical trainer surface rather than by introducing alternate temporal-runtime branches.
-- **Future Promotion Rule:** Hardware-fused `mamba-ssm` remains a future upgrade target. It may replace the active GRU path only after a supported environment exists and the real bounded trainer proves the upgrade.
-- **Promotion Rule:** Benchmark-proven end-to-end training throughput wins MAY replace the current temporal-core default or other canonical performance defaults, but only when config defaults, wrappers, tests, and docs are updated together in the same change so the repository has one coherent source of truth.
+- **Future Promotion Rule:** Hardware-fused `mamba-ssm` remains a future upgrade target. It may replace the active Mamba2 SSD path only after a supported environment exists and the real bounded trainer proves the upgrade.
+- **Promotion Rule:** Benchmark-proven end-to-end training quality or throughput wins MAY replace the current temporal-core default or other canonical performance defaults, but only when config defaults, wrappers, tests, and docs are updated together in the same change so the repository has one coherent source of truth.
 
 ## 3) Performance Mandates
 
@@ -187,7 +187,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Any observation publication or telemetry materialization required for live viewing MUST remain a passive seam outside the core rollout math and MUST NOT become a prerequisite for canonical training or inference.
 - Tensor-only actor helper graphs such as reward shaping SHOULD use `torch.compile` on supported GPU/compiler stacks when they remain on the PyTorch side of the rollout hot path; unsupported stacks MUST fall back cleanly to eager execution with explicit attribution visibility.
 - Canonical PPO update code MUST avoid redundant tensor device copies, allocator churn, and repeated optimizer-side host sync when minibatch tensors already reside on CUDA.
-- Canonical PPO update code MUST keep the temporal-core sequence path inside precompiled backend operators such as cuDNN GRU on the active path; Python-level sequence unrolling, dispatcher-heavy scan decomposition, and large autograd-graph construction are forbidden on the production hot path.
+- Canonical PPO update code MUST keep the temporal-core sequence path inside efficient backend operators such as Mamba2 SSD chunked scans or cuDNN GRU on the active path; Python-level sequence unrolling, dispatcher-heavy scan decomposition, and large autograd-graph construction are forbidden on the production hot path.
 - Canonical throughput analysis MUST not blame high-resolution trainer regressions on the SDF/DAG runtime alone when RayViT encoder attention or PPO update memory clearly dominates the measured wall time.
 - Canonical PPO update work SHOULD prefer optimizer/runtime improvements on the existing learner path before changing training hyperparameter defaults.
 - Actor-side performance telemetry SHOULD expose enough sub-metrics to distinguish memory, transport, reward shaping, and buffer-append overhead when investigating stalls.
