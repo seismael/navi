@@ -33,6 +33,11 @@ void validate_direction_norms(const torch::Tensor& dirs) {
     );
 }
 
+// Lightweight finite-only check: ensures no NaN/Inf without a GPU→CPU pipeline drain.
+void validate_direction_finite(const torch::Tensor& dirs) {
+    TORCH_CHECK(torch::isfinite(dirs).all().item<bool>(), "dirs must contain only finite values");
+}
+
 }  // namespace
 
 void cast_rays_forward(
@@ -45,7 +50,8 @@ void cast_rays_forward(
     float max_distance,
     std::vector<float> bbox_min,
     std::vector<float> bbox_max,
-    int resolution) 
+    int resolution,
+    bool skip_direction_validation) 
 {
     // --- Interface Contract Enforcements ---
     TORCH_CHECK(dag_tensor.is_cuda(), "dag_tensor must be a CUDA tensor");
@@ -78,7 +84,9 @@ void cast_rays_forward(
     TORCH_CHECK(std::isfinite(max_distance) && max_distance > 0.0f, "max_distance must be a finite positive float");
     TORCH_CHECK(resolution > 0, "resolution must be a positive integer");
     validate_bounds(bbox_min, bbox_max);
-    validate_direction_norms(dirs);
+    if (!skip_direction_validation) {
+        validate_direction_norms(dirs);
+    }
     
     int num_rays = origins.size(0) * origins.size(1);
 
@@ -102,7 +110,13 @@ void cast_rays_forward(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("cast_rays", &cast_rays_forward, "TopoNav bounded stackless sphere tracing");
+    m.def("cast_rays", &cast_rays_forward, "TopoNav bounded stackless sphere tracing",
+        py::arg("dag_tensor"), py::arg("origins"), py::arg("dirs"),
+        py::arg("out_distances"), py::arg("out_semantics"),
+        py::arg("max_steps"), py::arg("max_distance"),
+        py::arg("bbox_min"), py::arg("bbox_max"),
+        py::arg("resolution"),
+        py::arg("skip_direction_validation") = false);
 }
 
 } // namespace toponav

@@ -219,11 +219,26 @@ Canonical raycasting tensors:
 | `out_distances` | `[B, R]` | `float32` | CUDA | preallocated output |
 | `out_semantics` | `[B, R]` | `int32` | CUDA | preallocated output |
 
+Scalar parameters:
+
+| Parameter | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `sdf_max_steps` | `int` | config | max sphere-tracing iterations |
+| `max_distance` | `float` | config | horizon clamp distance |
+| `bbox_min` / `bbox_max` | `float` | asset | DAG world bounds |
+| `resolution` | `int` | asset | DAG voxel resolution |
+| `skip_direction_validation` | `bool` | `False` | bypass direction-norm validation |
+
 Boundary rules:
 
 - device placement, rank, and contiguity are validated before kernel launch
 - direction vectors must be normalized within an explicit tolerance; exact
   floating-point equality with `1.0` is not a valid contract rule
+- when `skip_direction_validation=True`, the caller guarantees normalization
+  and the four GPU→CPU synchronization barriers for norm checking are skipped;
+  canonical `SdfDagBackend` hot-path calls use this mode because yaw-rotated
+  unit vectors are mathematically guaranteed normalized
+- probe, inspection, and diagnostic calls should keep `skip_direction_validation=False`
 - canonical runtime is CUDA-only; CPU fallback is not part of this seam
 - long CUDA execution should release the Python GIL
 

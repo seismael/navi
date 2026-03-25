@@ -338,9 +338,9 @@ def train(
     # Logging
     log_every: int = typer.Option(100, help="Steps between log messages"),
     # Telemetry fan-out (performance)
-    telemetry_actor_id: int = typer.Option(0, help="Actor ID to emit telemetry for (default: 0)."),
+    telemetry_actor_id: int = typer.Option(0, help="[Deprecated, ignored] Actor ID 0 is always used."),
     telemetry_all_actors: bool = typer.Option(
-        False, help="Emit telemetry for all actors (higher overhead)."
+        False, help="[Deprecated, ignored] Only actor 0 telemetry is emitted."
     ),
     emit_observation_stream: bool = typer.Option(
         True,
@@ -388,7 +388,6 @@ def train(
         help="Compile tensor-only actor reward shaping helper graphs with torch.compile when supported.",
     ),
     actor_pub: str = typer.Option(None, help="Actor PUB bind address"),
-    actor_control: str = typer.Option(None, help="Actor selector REP bind address"),
 ) -> None:
     """Single canonical PPO training surface with direct in-process sdfdag stepping."""
     setup_logging("navi_actor_train")
@@ -404,7 +403,6 @@ def train(
         # Resolve actor config
         config = ActorConfig(
             pub_address=actor_pub or default_config.pub_address,
-            control_address=actor_control or default_config.control_address,
             mode="step",
             temporal_core=resolved_temporal_core,
             azimuth_bins=azimuth_bins,
@@ -436,8 +434,6 @@ def train(
             loop_penalty_coeff=loop_penalty_coeff,
             enable_episodic_memory=enable_episodic_memory,
             enable_reward_shaping=enable_reward_shaping,
-            telemetry_actor_id=telemetry_actor_id,
-            telemetry_all_actors=telemetry_all_actors,
             emit_observation_stream=emit_observation_stream,
             dashboard_observation_hz=dashboard_observation_hz,
             emit_training_telemetry=emit_training_telemetry,

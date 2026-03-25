@@ -1,8 +1,7 @@
-"""Ghost-Matrix RL Dashboard — selected actor observer view.
+"""Ghost-Matrix RL Dashboard — actor 0 observer view.
 
-The dashboard is intentionally visual-only: it renders one live actor
-depth view with mode/status indication. The actor selector is enabled by
-default so operators can switch the watched actor without relaunching.
+The dashboard is intentionally visual-only: it renders one live actor 0
+depth view with mode/status indication and a count of discovered actors.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ __all__: list[str] = ["GhostMatrixDashboard"]
 
 
 class GhostMatrixDashboard(QtWidgets.QMainWindow):
-    """High-performance real-time selected-actor visualiser.
+    """High-performance real-time actor-0 visualiser.
 
     Parameters
     ----------
@@ -49,10 +48,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self,
         matrix_sub: str = "",
         actor_sub: str = "",
-        actor_control_endpoint: str = "",
         step_endpoint: str = "",
-        actor_id: int = 0,
-        enable_actor_selector: bool = True,
         hz: float = 30.0,
         linear_speed: float = 1.5,
         yaw_rate: float = 1.5,
@@ -64,22 +60,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self.resize(1920, 1080)
         self.setStyleSheet("QMainWindow { background: #0d0d1a; }")
 
-        self._known_actors: list[int] = []
-        self._selected_actor: int = actor_id
-        self._enable_actor_selector = enable_actor_selector
-
-        # Stream engine
+        # Stream engine — always watching actor 0
         self._engine = StreamEngine(
             matrix_sub=matrix_sub,
             actor_sub=actor_sub,
-            actor_control_endpoint=actor_control_endpoint,
             step_endpoint=step_endpoint,
-            selected_actor_id=actor_id,
+            selected_actor_id=0,
         )
-        snapshot_actor_ids, snapshot_selected_actor = self._engine.request_actor_snapshot()
-        if snapshot_selected_actor is not None:
-            self._selected_actor = int(snapshot_selected_actor)
-        self._known_actors = sorted(int(value) for value in snapshot_actor_ids)
 
         # Teleop state
         self._linear_speed = linear_speed
@@ -111,66 +98,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Single header row (mode + actor selector + metrics)
+        # Single header row (mode + actor count + metrics)
         main_layout.addWidget(self._status_bar)
-
-        if self._enable_actor_selector:
-            self._status_bar.enable_selector()
-            combo = self._status_bar.actor_combo
-            combo.addItem(f"Actor {self._selected_actor}", self._selected_actor)
-            combo.currentIndexChanged.connect(self._on_actor_selector_changed)
-            if self._known_actors:
-                combo.clear()
-                for actor_id in self._known_actors:
-                    combo.addItem(f"Actor {actor_id}", actor_id)
-                idx = combo.findData(self._selected_actor)
-                if idx >= 0:
-                    combo.setCurrentIndex(idx)
-            self._update_actor_selector_label()
 
         # Actor panel — no margins, fills all remaining space
         main_layout.addWidget(self._actor_panel, stretch=1)
-
-    def _update_actor_selector_label(self) -> None:
-        """Render the currently watched actor beside the selector."""
-        if not self._enable_actor_selector:
-            return
-        known_count = len(self._known_actors)
-        suffix = f"({known_count})" if known_count > 0 else "(waiting)"
-        self._status_bar.set_actor_info(suffix)
-
-    def _refresh_selector(self) -> None:
-        """Refresh actor selector options from discovered stream actors."""
-        if not self._enable_actor_selector:
-            return
-        combo = self._status_bar.actor_combo
-        discovered = sorted(self._engine.actor_states.keys())
-        if discovered != self._known_actors:
-            self._known_actors = discovered
-            combo.blockSignals(True)
-            combo.clear()
-            for actor_id in discovered:
-                combo.addItem(f"Actor {actor_id}", actor_id)
-            idx = combo.findData(self._selected_actor)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
-            combo.blockSignals(False)
-        self._update_actor_selector_label()
-
-    def _on_actor_selector_changed(self, _index: int) -> None:
-        """Switch selected actor from UI selector."""
-        if not self._enable_actor_selector:
-            return
-        actor_id = self._status_bar.actor_combo.currentData()
-        if actor_id is None:
-            return
-        resolved_actor = int(actor_id)
-        if self._engine.request_selected_actor(resolved_actor):
-            self._selected_actor = resolved_actor
-        else:
-            self._selected_actor = resolved_actor
-            self._engine.set_selected_actor(self._selected_actor)
-        self._update_actor_selector_label()
 
     def _shared_metrics_state(self) -> StreamState | None:
         """Return one actor state carrying shared coarse trainer metrics."""
@@ -192,8 +124,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Ingest capped ZMQ burst (Standard: UI Throughput)
         _msgs_processed = self._engine.poll(max_messages=100)
 
-        self._refresh_selector()
-        state = self._engine.actor_states.get(self._selected_actor)
+        # Update actor count display
+        n_actors = self._engine.n_actors
+        self._status_bar.set_actor_count(n_actors)
+
+        state = self._engine.actor_states.get(0)
         if state is None:
             self._status_bar.set_mode("WAITING")
             self._status_bar.set_metrics_text(build_status_metrics_line(None))
@@ -322,10 +257,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 def run_dashboard(
     matrix_sub: str = "",
     actor_sub: str = "",
-    actor_control_endpoint: str = "",
     step_endpoint: str = "",
-    actor_id: int = 0,
-    enable_actor_selector: bool = True,
     hz: float = 30.0,
     linear_speed: float = 1.5,
     yaw_rate: float = 1.5,
@@ -338,10 +270,7 @@ def run_dashboard(
     dashboard = GhostMatrixDashboard(
         matrix_sub=matrix_sub,
         actor_sub=actor_sub,
-        actor_control_endpoint=actor_control_endpoint,
         step_endpoint=step_endpoint,
-        actor_id=actor_id,
-        enable_actor_selector=enable_actor_selector,
         hz=hz,
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,

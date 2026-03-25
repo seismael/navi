@@ -59,6 +59,8 @@ Key runtime properties:
 - `DistanceMatrix` materialization is preserved for service mode and passive tooling
 - the canonical trainer may consume equivalent CUDA tensors directly
 - observer requirements do not change the environment's tensor math, observation normalization, or step semantics
+- canonical hot-path `cast_rays()` calls use `skip_direction_validation=True` because yaw-rotated unit vectors are mathematically guaranteed normalized, eliminating four GPU→CPU pipeline drains per call; probe and inspection calls retain validation
+- CUDA graph capture of the full step path is not feasible due to data-dependent control flow
 
 ## 3.1 Runtime-Only Scaling Interpretation
 

@@ -175,7 +175,7 @@ class RollingPlot(pg.PlotWidget):
 
 
 class StatusBar(QtWidgets.QFrame):
-    """Compact header bar: mode indicator, actor selector, and metrics — all in one row."""
+    """Compact header bar: mode indicator, actor count, and metrics — all in one row."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -193,31 +193,12 @@ class StatusBar(QtWidgets.QFrame):
         )
         layout.addWidget(self._mode_label)
 
-        # Actor selector (hidden until enabled)
-        self._selector_widget = QtWidgets.QWidget()
-        sel_layout = QtWidgets.QHBoxLayout(self._selector_widget)
-        sel_layout.setContentsMargins(0, 0, 0, 0)
-        sel_layout.setSpacing(4)
-
-        sel_label = QtWidgets.QLabel("Actor:")
-        sel_label.setStyleSheet("color: #888; font-size: 12px; font-weight: 600;")
-        sel_layout.addWidget(sel_label)
-
-        self._actor_combo = QtWidgets.QComboBox()
-        self._actor_combo.setStyleSheet(
-            "QComboBox { background: #1a1a2e; color: #fff; border: 1px solid #333; "
-            "padding: 2px 8px; border-radius: 3px; min-width: 80px; font-weight: bold; font-size: 12px; } "
-            "QComboBox::drop-down { border: none; } "
-            "QComboBox QAbstractItemView { background: #1a1a2e; color: #fff; selection-background-color: #2e86de; }"
+        # Actor count indicator
+        self._actor_count_label = QtWidgets.QLabel("Actors: --")
+        self._actor_count_label.setStyleSheet(
+            "color: #888; font-weight: 600; font-size: 12px; padding: 2px 6px;"
         )
-        sel_layout.addWidget(self._actor_combo)
-
-        self._actor_info = QtWidgets.QLabel()
-        self._actor_info.setStyleSheet("color: #666; font-size: 11px;")
-        sel_layout.addWidget(self._actor_info)
-
-        self._selector_widget.setVisible(False)
-        layout.addWidget(self._selector_widget)
+        layout.addWidget(self._actor_count_label)
 
         # Separator
         sep = QtWidgets.QFrame()
@@ -251,14 +232,9 @@ class StatusBar(QtWidgets.QFrame):
         """Update compact telemetry details rendered beside mode."""
         self._metrics_label.setText(text)
 
-    # ── actor selector helpers ───────────────────────────────────────
+    # ── actor count helpers ────────────────────────────────────────
 
-    @property
-    def actor_combo(self) -> QtWidgets.QComboBox:
-        return self._actor_combo
-
-    def enable_selector(self) -> None:
-        self._selector_widget.setVisible(True)
-
-    def set_actor_info(self, text: str) -> None:
-        self._actor_info.setText(text)
+    def set_actor_count(self, n: int) -> None:
+        """Update the discovered actor count display."""
+        text = f"Actors: {n}" if n > 0 else "Actors: --"
+        self._actor_count_label.setText(text)

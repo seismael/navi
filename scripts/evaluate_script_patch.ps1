@@ -51,7 +51,6 @@
                   "--python", $PythonVersion,
                   "--project", (Join-Path $repoRoot "projects\auditor"),
                   "python", "-m", "navi_auditor.dashboard.app",
-                  "--actor-control", "tcp://localhost:$ActorControlPort",
                   "--actor-pub", "tcp://localhost:$ActorTelemetryPort",
                   "--passive"
               )

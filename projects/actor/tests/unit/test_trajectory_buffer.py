@@ -584,3 +584,124 @@ def test_trajectory_buffer_sequence_sampling_exposes_tensor_native_sequence_view
     assert first.dones.shape == (2, 2)
     assert first.sequence_aux_tensors is not None
     assert first.sequence_aux_tensors.shape == (2, 2, 3)
+
+
+# ── Per-actor staggered PPO buffer methods ──────────────────────
+
+
+def _fill_multi_buffer(
+    buffer: MultiTrajectoryBuffer, n_actors: int, steps_per_actor: int
+) -> None:
+    """Fill a MultiTrajectoryBuffer with deterministic data for testing."""
+    for step in range(steps_per_actor):
+        buffer.append_batch(
+            observations=torch.full((n_actors, 3, 8, 4), float(step + 1)),
+            actions=torch.full((n_actors, 4), float(step)),
+            log_probs=torch.full((n_actors,), -0.5),
+            values=torch.full((n_actors,), 0.5),
+            rewards=torch.full((n_actors,), 1.0),
+            dones=torch.zeros(n_actors, dtype=torch.bool),
+            truncateds=torch.zeros(n_actors, dtype=torch.bool),
+            aux_tensors=None,
+        )
+
+
+def test_get_actor_step_counts_tracks_per_actor_fills() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=4, gamma=0.99, gae_lambda=0.95, capacity=8)
+    # Before any data
+    counts = buffer.get_actor_step_counts()
+    assert counts.shape == (4,)
+    assert int(counts.sum().item()) == 0
+
+    # Add 1 step for actors [0, 2]
+    buffer.append_batch(
+        observations=torch.randn(2, 3, 8, 4),
+        actions=torch.randn(2, 4),
+        log_probs=torch.randn(2),
+        values=torch.randn(2),
+        rewards=torch.randn(2),
+        dones=torch.zeros(2, dtype=torch.bool),
+        truncateds=torch.zeros(2, dtype=torch.bool),
+        aux_tensors=None,
+        actor_indices=torch.tensor([0, 2]),
+    )
+    counts = buffer.get_actor_step_counts()
+    assert int(counts[0].item()) == 1
+    assert int(counts[1].item()) == 0
+    assert int(counts[2].item()) == 1
+    assert int(counts[3].item()) == 0
+
+
+def test_actor_data_len_sums_subset() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=4, gamma=0.99, gae_lambda=0.95, capacity=8)
+    _fill_multi_buffer(buffer, 4, 4)
+    assert buffer.actor_data_len(torch.tensor([0, 1])) == 8
+    assert buffer.actor_data_len(torch.tensor([2])) == 4
+    assert buffer.actor_data_len(torch.tensor([0, 1, 2, 3])) == 16
+
+
+def test_clear_actors_only_clears_specified() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=4, gamma=0.99, gae_lambda=0.95, capacity=8)
+    _fill_multi_buffer(buffer, 4, 4)
+    assert len(buffer) == 16
+
+    buffer.clear_actors(torch.tensor([1, 3]))
+    counts = buffer.get_actor_step_counts()
+    assert int(counts[0].item()) == 4
+    assert int(counts[1].item()) == 0
+    assert int(counts[2].item()) == 4
+    assert int(counts[3].item()) == 0
+    assert len(buffer) == 8
+
+
+def test_compute_returns_and_advantages_for_actors_per_actor_gae() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=4)
+    _fill_multi_buffer(buffer, 2, 4)
+
+    # Compute GAE only for actor 0
+    buffer.compute_returns_and_advantages_for_actors(
+        actor_ids=torch.tensor([0]),
+        last_values=torch.tensor([0.0]),
+    )
+    assert buffer._batch_advantages is not None
+    # Actor 0 should have non-trivial advantages
+    a0_advs = buffer._batch_advantages[0, :4]
+    assert a0_advs.abs().sum().item() > 0.0
+
+
+def test_sample_minibatches_for_actors_yields_correct_data() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=4, gamma=0.99, gae_lambda=0.95, capacity=8)
+    _fill_multi_buffer(buffer, 4, 8)
+
+    # Compute GAE for actor subset
+    actor_ids = torch.tensor([0, 2])
+    buffer.compute_returns_and_advantages_for_actors(
+        actor_ids=actor_ids,
+        last_values=torch.zeros(2),
+    )
+
+    # Sample minibatches from subset
+    minibatches = list(buffer.sample_minibatches_for_actors(actor_ids, batch_size=4, seq_len=4))
+    assert len(minibatches) > 0
+    total_samples = sum(mb.observations.shape[0] for mb in minibatches)
+    # 2 actors × 8 steps, seq_len=4 → 2 seqs/actor × 2 actors = 4 seqs × 4 steps = 16 samples
+    assert total_samples == 16
+
+
+def test_sample_minibatches_for_actors_rejects_unequal_lengths() -> None:
+    buffer = MultiTrajectoryBuffer(n_actors=2, gamma=0.99, gae_lambda=0.95, capacity=8)
+    # Fill actor 0 with 1 step
+    buffer.append_batch(
+        observations=torch.randn(1, 3, 8, 4),
+        actions=torch.randn(1, 4),
+        log_probs=torch.randn(1),
+        values=torch.randn(1),
+        rewards=torch.randn(1),
+        dones=torch.zeros(1, dtype=torch.bool),
+        truncateds=torch.zeros(1, dtype=torch.bool),
+        aux_tensors=None,
+        actor_indices=torch.tensor([0]),
+    )
+
+    with pytest.raises(RuntimeError, match="equal step counts"):
+        list(buffer.sample_minibatches_for_actors(torch.tensor([0, 1]), batch_size=4, seq_len=2))

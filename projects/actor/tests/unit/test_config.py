@@ -15,7 +15,6 @@ def test_actor_config_allows_field_name_overrides_with_aliases() -> None:
     config = ActorConfig(
         sub_address="tcp://127.0.0.1:19000",
         pub_address="tcp://127.0.0.1:19557",
-        control_address="tcp://127.0.0.1:19561",
         step_endpoint="tcp://127.0.0.1:19002",
         azimuth_bins=128,
         elevation_bins=24,
@@ -23,7 +22,6 @@ def test_actor_config_allows_field_name_overrides_with_aliases() -> None:
 
     assert config.sub_address == "tcp://127.0.0.1:19000"
     assert config.pub_address == "tcp://127.0.0.1:19557"
-    assert config.control_address == "tcp://127.0.0.1:19561"
     assert config.step_endpoint == "tcp://127.0.0.1:19002"
     assert config.azimuth_bins == 128
     assert config.elevation_bins == 24

@@ -190,6 +190,9 @@ Important limit:
 
 - `torch.compile` does not optimize the internal DAG traversal inside `projects/torch-sdf/cpp_src/kernel.cu`; deeper traversal caching remains a separate CUDA/runtime project with its own correctness and benchmark gates
 - the compiled tensor-helper path also depends on the active GPU/compiler stack; on unsupported devices such as the current `sm_61` MX150 surface, Navi now warns and keeps the eager tensor helper path active
+- canonical `cast_rays()` calls on the hot path use `skip_direction_validation=True` because ray directions are yaw-rotated unit vectors (mathematically guaranteed normalized); this eliminates four GPU→CPU pipeline drains per call; probe and inspection calls retain full validation
+- CUDA graph capture of the full environment step path is not feasible due to data-dependent control flow (`nonzero()`, `.item()`, dynamic allocation, tensor-dependent loop bounds, advanced indexing with computed indices)
+- on `sm_61`, the eager PyTorch dispatcher inserts ~10-100μs gaps between each of the ~72-90 kernel launches per rollout tick; this dispatcher overhead is the primary remaining cause of low measured GPU compute utilization and can only be eliminated by kernel fusion via `torch.compile` (requires `sm_70+`) or hardware-fused operator libraries
 
 Current traversal reuse notes:
 

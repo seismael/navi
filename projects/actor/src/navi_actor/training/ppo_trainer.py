@@ -27,13 +27,10 @@ from navi_actor.rollout_buffer import MultiTrajectoryBuffer
 from navi_contracts import (
     TOPIC_DISTANCE_MATRIX,
     TOPIC_TELEMETRY_EVENT,
-    ActorControlRequest,
-    ActorControlResponse,
     DistanceMatrix,
     JsonlMetricsSink,
     TelemetryEvent,
     build_phase_metrics_payload,
-    deserialize,
     get_or_create_run_context,
     serialize,
 )
@@ -124,6 +121,7 @@ _PERF_TELEMETRY_FIELDS: tuple[str, ...] = (
     "ppo_inference_ms",
     "ppo_optimization_ms",
     "ppo_aux_ms",
+    "n_actors",
 )
 
 _RUNTIME_PERF_FIELDS: tuple[str, ...] = (
@@ -367,8 +365,6 @@ class PpoTrainer:
         self._scene_pool = scene_pool
         self._last_dashboard_observation: DistanceMatrix | None = None
         self._last_dashboard_heartbeat_at: float = 0.0
-        self._selected_actor_lock = threading.Lock()
-        self._selected_stream_actor_id: int = int(config.telemetry_actor_id)
         self._run_context = get_or_create_run_context("actor-train")
         self._metrics_sink: JsonlMetricsSink | None = None
         if config.emit_internal_stats:
@@ -501,9 +497,7 @@ class PpoTrainer:
             maxsize=1024
         )
         self._telemetry_thread: threading.Thread | None = None
-        self._control_thread: threading.Thread | None = None
-        self._control_stop_event = threading.Event()
-        self._rollout_group_count = 1
+        self._rollout_group_count = max(1, min(self._config.rollout_overlap_groups, self._n_actors))
         self._rollout_group_indices = tuple(
             group.contiguous()
             for group in torch.chunk(
@@ -573,97 +567,6 @@ class PpoTrainer:
         pub.close(linger=0)
         ctx.term()
         _LOGGER.info("Async telemetry worker stopped")
-
-    def _get_selected_stream_actor_id(self) -> int:
-        with self._selected_actor_lock:
-            configured_actor_id = int(self._config.telemetry_actor_id)
-            if configured_actor_id >= 0 and configured_actor_id != self._selected_stream_actor_id:
-                self._selected_stream_actor_id = configured_actor_id
-                self._last_dashboard_observation = None
-                self._last_dashboard_heartbeat_at = 0.0
-            return self._selected_stream_actor_id
-
-    def _set_selected_stream_actor_id(self, actor_id: int) -> bool:
-        if actor_id < 0 or actor_id >= self._n_actors:
-            return False
-        with self._selected_actor_lock:
-            changed = actor_id != self._selected_stream_actor_id
-            self._selected_stream_actor_id = actor_id
-            if changed:
-                self._last_dashboard_observation = None
-                self._last_dashboard_heartbeat_at = 0.0
-        return True
-
-    def _actor_control_response(
-        self, *, ok: bool, actor_id: int, message: str
-    ) -> ActorControlResponse:
-        return ActorControlResponse(
-            ok=ok,
-            actor_id=actor_id,
-            actor_ids=np.arange(self._n_actors, dtype=np.int32),
-            message=message,
-            timestamp=time.time(),
-        )
-
-    def _control_worker(self) -> None:
-        ctx = zmq.Context()
-        rep = ctx.socket(zmq.REP)
-        rep.setsockopt(zmq.LINGER, 0)
-        rep.setsockopt(zmq.RCVTIMEO, 250)
-        rep.bind(self._config.control_address)
-        _LOGGER.info("Actor selector control worker started on %s", self._config.control_address)
-
-        try:
-            while not self._control_stop_event.is_set():
-                try:
-                    data = rep.recv()
-                except zmq.Again:
-                    continue
-                except Exception as exc:
-                    _LOGGER.warning("Actor selector control receive failure: %s", exc)
-                    continue
-
-                try:
-                    request = deserialize(data)
-                    if not isinstance(request, ActorControlRequest):
-                        response = self._actor_control_response(
-                            ok=False,
-                            actor_id=self._get_selected_stream_actor_id(),
-                            message="unsupported-request",
-                        )
-                    elif request.command == "snapshot":
-                        response = self._actor_control_response(
-                            ok=True,
-                            actor_id=self._get_selected_stream_actor_id(),
-                            message="snapshot",
-                        )
-                    elif request.command == "select":
-                        changed = self._set_selected_stream_actor_id(int(request.actor_id))
-                        response = self._actor_control_response(
-                            ok=changed,
-                            actor_id=self._get_selected_stream_actor_id(),
-                            message="selected" if changed else "invalid-actor-id",
-                        )
-                    else:
-                        response = self._actor_control_response(
-                            ok=False,
-                            actor_id=self._get_selected_stream_actor_id(),
-                            message="unknown-command",
-                        )
-                except Exception as exc:
-                    _LOGGER.warning("Actor selector control failure: %s", exc)
-                    response = self._actor_control_response(
-                        ok=False,
-                        actor_id=self._get_selected_stream_actor_id(),
-                        message="internal-error",
-                    )
-
-                with contextlib.suppress(Exception):
-                    rep.send(serialize(response))
-        finally:
-            rep.close(linger=0)
-            ctx.term()
-            _LOGGER.info("Actor selector control worker stopped")
 
     def _sync_rollout_policy(self) -> None:
         """Copy weights from learner_policy to rollout_policy with thread safety."""
@@ -883,6 +786,121 @@ class PpoTrainer:
                 ),
             )
 
+    def _run_staggered_ppo_update(
+        self,
+        *,
+        actor_ids: torch.Tensor,
+        multi_buffer: MultiTrajectoryBuffer,
+        obs_batch: torch.Tensor,
+        aux_batch: torch.Tensor,
+        ppo_epochs: int,
+        minibatch_size: int,
+        seq_len: int,
+    ) -> None:
+        """Run a PPO update for a subset of actors (staggered per-actor PPO).
+
+        Only the specified actors' rollout data is used for GAE, optimization,
+        and buffer clearing.  The shared rollout policy is synced afterwards so
+        all actors benefit from the update.
+        """
+        t_opt_start = time.perf_counter()
+        n_ready = int(actor_ids.numel())
+
+        # Stage 1: Inference — compute bootstrap values for ready actors only
+        t_inf_start = time.perf_counter()
+        with torch.no_grad():
+            b_obs = obs_batch[actor_ids].detach()
+            b_aux = aux_batch[actor_ids].detach()
+            if b_obs.device != self._device:
+                b_obs = b_obs.to(self._device)
+            if b_aux.device != self._device:
+                b_aux = b_aux.to(self._device)
+            self._learner_policy.eval()
+            _, _, b_val, _, _ = self._learner_policy.forward(b_obs, None, aux_tensor=b_aux)
+            multi_buffer.compute_returns_and_advantages_for_actors(
+                actor_ids=actor_ids, last_values=b_val
+            )
+        inf_ms = (time.perf_counter() - t_inf_start) * 1000
+        self._opt_inference_acc += inf_ms
+
+        # Stage 2: Optimization — train on ready actors' data only
+        t_train_start = time.perf_counter()
+        progress_callback: Callable[[], None] | None = None
+        if self._config.emit_observation_stream and self._last_dashboard_observation is not None:
+
+            def emit_progress_callback() -> None:
+                self._maybe_publish_dashboard_heartbeat(step_id=self._total_sim_steps)
+
+            progress_callback = emit_progress_callback
+
+        self._last_opt_metrics = self._learner.train_ppo_epoch(
+            self._learner_policy,
+            multi_buffer,
+            ppo_epochs=ppo_epochs,
+            minibatch_size=minibatch_size,
+            seq_len=seq_len,
+            actor_ids=actor_ids,
+            rnd=self._rnd,
+            progress_callback=progress_callback,
+            materialize_summary_scalars=(
+                (self._config.emit_training_telemetry and self._config.emit_update_loss_telemetry)
+                or _LOGGER.isEnabledFor(logging.DEBUG)
+            ),
+        )
+        opt_ms = (time.perf_counter() - t_train_start) * 1000
+        self._opt_optimization_acc += opt_ms
+
+        # Stage 3: Auxiliary — sync policy and clear only the ready actors
+        t_aux_start = time.perf_counter()
+        self._sync_rollout_policy()
+        multi_buffer.clear_actors(actor_ids)
+        aux_ms = (time.perf_counter() - t_aux_start) * 1000
+        self._opt_aux_acc += aux_ms
+
+        total_ms = (time.perf_counter() - t_opt_start) * 1000
+        self._last_opt_duration_ms = total_ms
+        self._opt_duration_acc += total_ms
+        self._opt_duration_count += 1
+
+        actor_id_list = actor_ids.detach().to(device="cpu", dtype=torch.int64).tolist()
+        _LOGGER.info(
+            "Staggered PPO update for actors %s completed in %.2fms "
+            "(inf=%.2fms opt=%.2fms aux=%.2fms n_ready=%d)",
+            actor_id_list,
+            total_ms,
+            inf_ms,
+            opt_ms,
+            aux_ms,
+            n_ready,
+        )
+        if total_ms > _SOFT_WARN_MAX_OPT_MS:
+            _LOGGER.warning(
+                "Soft stall monitor: staggered optimizer wall-time high (%.1fms > %.1fms) actors=%s",
+                total_ms,
+                _SOFT_WARN_MAX_OPT_MS,
+                actor_id_list,
+            )
+        if self._last_opt_metrics is not None:
+            self._emit_metrics_record(
+                "ppo_update_summary",
+                build_phase_metrics_payload(
+                    "ppo_update",
+                    elapsed_ms=total_ms,
+                    step_id=self._total_sim_steps,
+                    cuda_device=self._device,
+                    include_resources=self._config.attach_resource_snapshots,
+                    metadata={
+                        "staggered": True,
+                        "actor_ids": actor_id_list,
+                        "total_ms": total_ms,
+                        "inference_ms": inf_ms,
+                        "optimization_ms": opt_ms,
+                        "aux_ms": aux_ms,
+                        "n_updates": self._last_opt_metrics.n_updates,
+                    },
+                ),
+            )
+
     def start(self) -> None:
         """Initialize trainer resources for the canonical runtime."""
         started_at = time.perf_counter()
@@ -892,16 +910,12 @@ class PpoTrainer:
         # Start background telemetry thread
         self._telemetry_thread = threading.Thread(target=self._telemetry_worker, daemon=True)
         self._telemetry_thread.start()
-        self._control_stop_event.clear()
-        self._control_thread = threading.Thread(target=self._control_worker, daemon=True)
-        self._control_thread.start()
 
         _LOGGER.info(
-            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s control=%s temporal=%s (async)",
+            "Canonical PPO trainer started: actors=%d gmdag=%s pub=%s temporal=%s (async)",
             self._n_actors,
             self._gmdag_file or "<state-only>",
             self._config.pub_address,
-            self._config.control_address,
             self._config.temporal_core,
         )
         self._emit_metrics_record(
@@ -916,7 +930,6 @@ class PpoTrainer:
                     "actors": self._n_actors,
                     "gmdag_file": self._gmdag_file or "<state-only>",
                     "pub_address": self._config.pub_address,
-                    "control_address": self._config.control_address,
                     "temporal_core": self._config.temporal_core,
                     "run_root": str(self._run_context.run_root),
                 },
@@ -931,11 +944,6 @@ class PpoTrainer:
             self._telemetry_queue.put(None)
             self._telemetry_thread.join(timeout=2.0)
             self._telemetry_thread = None
-
-        self._control_stop_event.set()
-        if self._control_thread:
-            self._control_thread.join(timeout=2.0)
-            self._control_thread = None
 
         if self._runtime is not None:
             with contextlib.suppress(Exception):
@@ -1435,17 +1443,10 @@ class PpoTrainer:
         """Return the actor ids whose low-rate dashboard observations may be published."""
         if not self._config.emit_observation_stream:
             return ()
-        if self._config.telemetry_all_actors:
-            return tuple(range(self._n_actors))
-        selected_actor = self._get_selected_stream_actor_id()
-        if selected_actor < 0 or selected_actor >= self._n_actors:
-            return ()
-        return (selected_actor,)
+        return (0,)
 
     def _should_publish_actor_telemetry(self, actor_id: int) -> bool:
-        if self._config.telemetry_all_actors:
-            return True
-        return actor_id == self._get_selected_stream_actor_id()
+        return actor_id == 0
 
     def _publish_step_telemetry(
         self, *, step_id: int, episode_id: int, actor_id: int, **kwargs: Any
@@ -1501,7 +1502,7 @@ class PpoTrainer:
         event = TelemetryEvent(
             event_type="actor.training.ppo.update",
             episode_id=0,
-            env_id=self._get_selected_stream_actor_id(),
+            env_id=0,
             step_id=step_id,
             payload=p,
             timestamp=time.time(),
@@ -1557,7 +1558,7 @@ class PpoTrainer:
         event = TelemetryEvent(
             event_type="actor.training.ppo.perf",
             episode_id=0,
-            env_id=self._get_selected_stream_actor_id(),
+            env_id=0,
             step_id=step_id,
             payload=p,
             timestamp=time.time(),
@@ -1839,20 +1840,13 @@ class PpoTrainer:
         """Return only the done actors whose episode telemetry will be published."""
         if not self._config.emit_training_telemetry:
             return done_indices[:0]
-        if self._config.telemetry_all_actors:
-            return done_indices
-        telemetry_actor = self._get_selected_stream_actor_id()
-        return done_indices[done_indices == telemetry_actor]
+        return done_indices[done_indices == 0]
 
     def _selected_step_telemetry_actor_indices(self) -> torch.Tensor:
         """Return only the actors whose per-step telemetry will be mirrored to CPU."""
         if not self._config.emit_training_telemetry:
             return torch.empty((0,), dtype=torch.int64, device=self._device)
-        if self._config.telemetry_all_actors:
-            return torch.arange(self._n_actors, dtype=torch.int64, device=self._device)
-        return torch.tensor(
-            [self._get_selected_stream_actor_id()], dtype=torch.int64, device=self._device
-        )
+        return torch.tensor([0], dtype=torch.int64, device=self._device)
 
     def _active_actor_local_indices(
         self,
@@ -1963,6 +1957,23 @@ class PpoTrainer:
 
         last_checkpoint_step = 0
 
+        # ── Staggered per-actor PPO: compute initial targets ──
+        stagger_active = self._config.stagger_ppo and n > 1
+        if stagger_active:
+            stagger_step = max(1, rl // n)
+            actor_rollout_targets = torch.tensor(
+                [rl - i * stagger_step for i in range(n)],
+                dtype=torch.int64,
+                device=self._device,
+            )
+            _LOGGER.info(
+                "Staggered PPO enabled: initial per-actor targets=%s stagger_step=%d",
+                actor_rollout_targets.tolist(),
+                stagger_step,
+            )
+        else:
+            actor_rollout_targets = None
+
         while unbounded or step_id < total_steps:
             rollout_actor_steps = 0
             primed_group: _PrimedRolloutGroup | None = None
@@ -2006,9 +2017,6 @@ class PpoTrainer:
                         aux_states=aux_states,
                     )
                     forward = self._launch_rollout_forward(prepared=prepared)
-                    torch.cuda.current_stream(self._device).wait_stream(
-                        self._rollout_streams[prepared.group_slot]
-                    )
                     step_batch, group_step_ms = self._launch_rollout_step(
                         group_slot=prepared.group_slot,
                         actor_indices=prepared.actor_indices,
@@ -2190,6 +2198,54 @@ class PpoTrainer:
                 acc_tick += tick_ms
                 t_cnt += 1
 
+                # ── Staggered per-actor PPO trigger ──
+                if stagger_active and actor_rollout_targets is not None:
+                    step_counts = self._multi_buffers.get_actor_step_counts()
+                    ready_mask = step_counts >= actor_rollout_targets
+                    if ready_mask.any():
+                        ready_ids = ready_mask.nonzero(as_tuple=False).flatten().to(
+                            device=self._device, dtype=torch.int64
+                        )
+                        # LR anneal before PPO (same schedule as monolithic path)
+                        if self._config.lr_schedule_steps > 0:
+                            frac = min(1.0, step_id / self._config.lr_schedule_steps)
+                            lr_init = self._config.learning_rate
+                            lr_final = self._config.learning_rate_final
+                            cosine_lr = lr_final + 0.5 * (lr_init - lr_final) * (
+                                1.0 + math.cos(math.pi * frac)
+                            )
+                            rnd_lr_init = self._config.rnd_learning_rate
+                            rnd_lr_final = self._config.rnd_learning_rate_final
+                            cosine_rnd_lr = rnd_lr_final + 0.5 * (rnd_lr_init - rnd_lr_final) * (
+                                1.0 + math.cos(math.pi * frac)
+                            )
+                            self._learner.set_learning_rate(cosine_lr, rnd_lr=cosine_rnd_lr)
+                        self._run_staggered_ppo_update(
+                            actor_ids=ready_ids,
+                            multi_buffer=self._multi_buffers,
+                            obs_batch=current_obs_batch,
+                            aux_batch=aux_states,
+                            ppo_epochs=ep,
+                            minibatch_size=mb,
+                            seq_len=sl,
+                        )
+                        # After first PPO, all actors use full rollout length
+                        actor_rollout_targets[ready_ids] = rl
+                        if self._last_opt_metrics:
+                            reward_ema_value = float(
+                                r_ema.detach().to(device="cpu", dtype=torch.float32)
+                            )
+                            self._publish_update_telemetry(
+                                step_id, reward_ema_value, self._last_opt_metrics
+                            )
+                        if _should_save_checkpoint(
+                            step_id, last_checkpoint_step, checkpoint_every
+                        ):
+                            self.save_training_state(
+                                Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt"
+                            )
+                            last_checkpoint_step = step_id
+
                 if log_every > 0 and step_id % log_every < n:
                     now_perf = time.perf_counter()
                     sps = log_every / max(
@@ -2231,6 +2287,7 @@ class PpoTrainer:
                         ppo_update_ms=self._last_opt_duration_ms,
                         host_extract_ms=host_extract_ms,
                         telemetry_publish_ms=telemetry_ms,
+                        n_actors=float(self._n_actors),
                     )
                     self._publish_runtime_perf(step_id=step_id)
                     if sps < _SOFT_WARN_MIN_SPS:
@@ -2252,33 +2309,72 @@ class PpoTrainer:
                 break
 
             # --- Rollout Loop Finished ---
-            # Cosine LR annealing: decay learning rate over training.
-            if self._config.lr_schedule_steps > 0:
-                frac = min(1.0, step_id / self._config.lr_schedule_steps)
-                lr_init = self._config.learning_rate
-                lr_final = self._config.learning_rate_final
-                cosine_lr = lr_final + 0.5 * (lr_init - lr_final) * (1.0 + math.cos(math.pi * frac))
-                rnd_lr_init = self._config.rnd_learning_rate
-                rnd_lr_final = self._config.rnd_learning_rate_final
-                cosine_rnd_lr = rnd_lr_final + 0.5 * (rnd_lr_init - rnd_lr_final) * (1.0 + math.cos(math.pi * frac))
-                self._learner.set_learning_rate(cosine_lr, rnd_lr=cosine_rnd_lr)
-            self._run_ppo_update(
-                multi_buffer=self._multi_buffers,
-                obs_batch=current_obs_batch,
-                aux_batch=aux_states,
-                ppo_epochs=ep,
-                minibatch_size=mb,
-                seq_len=sl,
-            )
-            if self._last_opt_metrics:
-                reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))
-                self._publish_update_telemetry(step_id, reward_ema_value, self._last_opt_metrics)
+            if stagger_active:
+                # Staggered PPO updates already ran inside the rollout loop.
+                # Only handle checkpoint if not already saved by a stagger trigger.
+                if _should_save_checkpoint(step_id, last_checkpoint_step, checkpoint_every):
+                    self.save_training_state(Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt")
+                    last_checkpoint_step = step_id
+            else:
+                # Monolithic PPO: Cosine LR annealing + single PPO update for all actors.
+                if self._config.lr_schedule_steps > 0:
+                    frac = min(1.0, step_id / self._config.lr_schedule_steps)
+                    lr_init = self._config.learning_rate
+                    lr_final = self._config.learning_rate_final
+                    cosine_lr = lr_final + 0.5 * (lr_init - lr_final) * (1.0 + math.cos(math.pi * frac))
+                    rnd_lr_init = self._config.rnd_learning_rate
+                    rnd_lr_final = self._config.rnd_learning_rate_final
+                    cosine_rnd_lr = rnd_lr_final + 0.5 * (rnd_lr_init - rnd_lr_final) * (1.0 + math.cos(math.pi * frac))
+                    self._learner.set_learning_rate(cosine_lr, rnd_lr=cosine_rnd_lr)
+                self._run_ppo_update(
+                    multi_buffer=self._multi_buffers,
+                    obs_batch=current_obs_batch,
+                    aux_batch=aux_states,
+                    ppo_epochs=ep,
+                    minibatch_size=mb,
+                    seq_len=sl,
+                )
+                if self._last_opt_metrics:
+                    reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))
+                    self._publish_update_telemetry(step_id, reward_ema_value, self._last_opt_metrics)
 
-            # Save when we've advanced at least one checkpoint interval since the last save.
-            # This remains correct even when rollout boundaries do not land on exact modulo values.
-            if _should_save_checkpoint(step_id, last_checkpoint_step, checkpoint_every):
-                self.save_training_state(Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt")
-                last_checkpoint_step = step_id
+                # Save when we've advanced at least one checkpoint interval since the last save.
+                # This remains correct even when rollout boundaries do not land on exact modulo values.
+                if _should_save_checkpoint(step_id, last_checkpoint_step, checkpoint_every):
+                    self.save_training_state(Path(checkpoint_dir) / f"policy_step_{step_id:07d}.pt")
+                    last_checkpoint_step = step_id
+
+        # ── Stagger drain: flush any remaining per-actor data ──
+        if stagger_active:
+            drain_counts = self._multi_buffers.get_actor_step_counts()
+            for count_val in drain_counts.unique().tolist():
+                if count_val == 0:
+                    continue
+                actors_at_count = (drain_counts == count_val).nonzero(as_tuple=False).flatten().to(
+                    device=self._device, dtype=torch.int64
+                )
+                if self._config.lr_schedule_steps > 0:
+                    frac = min(1.0, step_id / self._config.lr_schedule_steps)
+                    lr_init_d = self._config.learning_rate
+                    lr_final_d = self._config.learning_rate_final
+                    cosine_lr_d = lr_final_d + 0.5 * (lr_init_d - lr_final_d) * (
+                        1.0 + math.cos(math.pi * frac)
+                    )
+                    rnd_lr_init_d = self._config.rnd_learning_rate
+                    rnd_lr_final_d = self._config.rnd_learning_rate_final
+                    cosine_rnd_lr_d = rnd_lr_final_d + 0.5 * (rnd_lr_init_d - rnd_lr_final_d) * (
+                        1.0 + math.cos(math.pi * frac)
+                    )
+                    self._learner.set_learning_rate(cosine_lr_d, rnd_lr=cosine_rnd_lr_d)
+                self._run_staggered_ppo_update(
+                    actor_ids=actors_at_count,
+                    multi_buffer=self._multi_buffers,
+                    obs_batch=current_obs_batch,
+                    aux_batch=aux_states,
+                    ppo_epochs=ep,
+                    minibatch_size=mb,
+                    seq_len=sl,
+                )
 
         reward_mean = float(reward_sum_tensor.item()) / max(1, step_id)
         reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))

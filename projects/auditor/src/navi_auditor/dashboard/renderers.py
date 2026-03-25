@@ -527,45 +527,61 @@ def render_first_person(
     pad_x = 4
     pad_top = 4
     pad_bottom = 4
-    target_w = max(1, width - 2 * pad_x)
-    target_h = max(1, height - pad_top - pad_bottom)
+    avail_w = max(1, width - 2 * pad_x)
+    avail_h = max(1, height - pad_top - pad_bottom)
 
     depth_src = centered_depth.T.astype(np.float32)
     valid_src = centered_valid.T.astype(np.uint8)
     heatmap_src = depth_to_observer_palette(depth_src, centered_valid.T, fog_of_war=False)
+
+    # Preserve the observation's native aspect ratio (e.g. 128:48 = 2.67:1)
+    # to prevent distortion when panel dimensions change with actor count.
+    src_h, src_w = heatmap_src.shape[:2]  # (el_bins, az_bins)
+    src_aspect = src_w / max(src_h, 1)
+    avail_aspect = avail_w / max(avail_h, 1)
+    if avail_aspect > src_aspect:
+        target_h = avail_h
+        target_w = max(1, int(avail_h * src_aspect))
+    else:
+        target_w = avail_w
+        target_h = max(1, int(avail_w / src_aspect))
+
     blended = cv2.resize(heatmap_src, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
     valid_up = cv2.resize(valid_src, (target_w, target_h), interpolation=cv2.INTER_NEAREST) > 0
     _apply_fog_of_war(blended, ~valid_up)
 
     canvas = np.full((height, width, 3), (14, 10, 8), dtype=np.uint8)
-    canvas[pad_top : pad_top + target_h, pad_x : pad_x + target_w] = blended.astype(np.uint8)
+    # Center the aspect-correct heatmap within the available area
+    off_x = pad_x + (avail_w - target_w) // 2
+    off_y = pad_top + (avail_h - target_h) // 2
+    canvas[off_y : off_y + target_h, off_x : off_x + target_w] = blended.astype(np.uint8)
 
-    cx = pad_x + target_w // 2
-    cy = pad_top + target_h // 2
-    cv2.line(canvas, (cx, pad_top), (cx, pad_top + target_h - 1), (58, 58, 58), 1, cv2.LINE_AA)
+    cx = off_x + target_w // 2
+    cy = off_y + target_h // 2
+    cv2.line(canvas, (cx, off_y), (cx, off_y + target_h - 1), (58, 58, 58), 1, cv2.LINE_AA)
     pitch_offset = int(np.clip(float(pitch), -1.0, 1.0) * (target_h * 0.35))
-    horizon_y = int(np.clip(cy + pitch_offset, pad_top, pad_top + target_h - 1))
+    horizon_y = int(np.clip(cy + pitch_offset, off_y, off_y + target_h - 1))
     cv2.line(
-        canvas, (pad_x, horizon_y), (pad_x + target_w - 1, horizon_y), (58, 58, 58), 1, cv2.LINE_AA
+        canvas, (off_x, horizon_y), (off_x + target_w - 1, horizon_y), (58, 58, 58), 1, cv2.LINE_AA
     )
     cv2.rectangle(
-        canvas, (pad_x - 1, pad_top - 1), (pad_x + target_w, pad_top + target_h), (70, 70, 70), 1
+        canvas, (off_x - 1, off_y - 1), (off_x + target_w, off_y + target_h), (70, 70, 70), 1
     )
 
-    cv2.putText(canvas, "UP", (cx - 10, pad_top + 16), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "UP", (cx - 10, off_y + 16), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA)
     down_size = cv2.getTextSize("DOWN", _HUD_FONT, 0.45, 1)[0]
     cv2.putText(
-        canvas, "DOWN", (cx - down_size[0] // 2, pad_top + target_h - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+        canvas, "DOWN", (cx - down_size[0] // 2, off_y + target_h - 8), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
     )
-    left_y = min(pad_top + target_h - 10, max(pad_top + 16, cy + 5))
+    left_y = min(off_y + target_h - 10, max(off_y + 16, cy + 5))
     cv2.putText(
-        canvas, "LEFT", (pad_x, left_y), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
+        canvas, "LEFT", (off_x, left_y), _HUD_FONT, 0.45, _TITLE_TEXT_COLOR, 1, cv2.LINE_AA
     )
     right_size = cv2.getTextSize("RIGHT", _HUD_FONT, 0.45, 1)[0]
     cv2.putText(
         canvas,
         "RIGHT",
-        (max(pad_x, width - right_size[0] - pad_x), left_y),
+        (max(off_x, off_x + target_w - right_size[0]), left_y),
         _HUD_FONT,
         0.45,
         _TITLE_TEXT_COLOR,
@@ -578,7 +594,7 @@ def render_first_person(
         cv2.putText(
             canvas,
             f"pitch {pitch_deg:+.1f}\xb0",
-            (cx - 40, pad_top + 30),
+            (cx - 40, off_y + 30),
             _HUD_FONT,
             0.45,
             _HEADING_COLOR,

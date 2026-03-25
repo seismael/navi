@@ -48,10 +48,6 @@ class ActorConfig(BaseSettings):
         default="tcp://*:5557",
         validation_alias="NAVI_ACTOR_PUB_ADDRESS",
     )
-    control_address: str = Field(
-        default="tcp://*:5561",
-        validation_alias="NAVI_ACTOR_CONTROL_ADDRESS",
-    )
     step_endpoint: str = Field(
         default="tcp://localhost:5560",
         validation_alias="NAVI_ENV_REP_ADDRESS",
@@ -98,8 +94,6 @@ class ActorConfig(BaseSettings):
     loop_threshold: float = 0.85
 
     # Telemetry fan-out controls (performance)
-    telemetry_actor_id: int = 0
-    telemetry_all_actors: bool = False
     emit_observation_stream: bool = True
     dashboard_observation_hz: float = 10.0
     emit_training_telemetry: bool = True
@@ -126,3 +120,18 @@ class ActorConfig(BaseSettings):
     # Diagnostic ablations on the canonical trainer surface
     enable_episodic_memory: bool = True
     enable_reward_shaping: bool = True
+
+    # Rollout overlap: >1 groups pipelines forward/step across CUDA streams.
+    # Default 1 is optimal for small GPUs (MX150, 3 SMs). Set to 2 on larger GPUs.
+    rollout_overlap_groups: int = Field(
+        default=1,
+        validation_alias="NAVI_ACTOR_ROLLOUT_OVERLAP_GROUPS",
+    )
+
+    # Staggered per-actor PPO: each actor independently triggers PPO updates
+    # when its own rollout buffer is full, distributing PPO blocking time across
+    # smaller, more frequent updates instead of one large synchronized barrier.
+    stagger_ppo: bool = Field(
+        default=True,
+        validation_alias="NAVI_ACTOR_STAGGER_PPO",
+    )

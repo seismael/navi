@@ -20,6 +20,14 @@ with only a modest throughput trade-off (~72 SPS vs ~100 SPS). `gru` and
 `mambapy` remain available as explicit comparison backends on the same trainer
 and serve surfaces.
 
+On the active MX150 (`sm_61`), GPU compute utilization during training is
+structurally limited by eager PyTorch dispatcher overhead — each tensor operation
+dispatches a separate CUDA kernel launch with ~10-100μs of idle gap between
+launches. `torch.compile` (which fuses kernels) requires `sm_70+`. The canonical
+hot path contains no unnecessary GPU→CPU synchronization barriers; the remaining
+GPU idle time is a hardware limitation. See `docs/PERFORMANCE.md` §4.0 for the
+full analysis.
+
 Current benchmark interpretation is now split clearly by layer:
 
 - the environment CUDA path scales materially better with observation
@@ -153,7 +161,7 @@ uv run --project .\projects\actor navi-actor train --actors 4
 uv run --project .\projects\actor navi-actor train --actors 8 --total-steps 0
 
 # Separate passive dashboard attach for the direct trainer surface
-uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5557 --actor-control-endpoint tcp://localhost:5561 --passive --actor-id 0
+uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5557 --passive
 
 # Bounded observation-resolution sweep on the canonical trainer surface
 ./scripts/run-resolution-compare.ps1

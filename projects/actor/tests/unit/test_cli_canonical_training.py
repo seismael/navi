@@ -84,7 +84,6 @@ def test_train_defaults_match_canonical_perf_profile() -> None:
     assert _option_default(train, "emit_internal_stats") is None
     assert _option_default(train, "attach_resource_snapshots") is None
     assert _option_default(train, "print_performance_summary") is None
-    assert _option_default(train, "actor_control") is None
 
 
 def test_configure_torch_training_runtime_enables_cudnn_benchmark() -> None:
@@ -200,8 +199,6 @@ def test_train_uses_single_canonical_trainer(
             "--no-emit-observation-stream",
             "--no-emit-training-telemetry",
             "--no-emit-perf-telemetry",
-            "--actor-control",
-            "tcp://*:19561",
             "--checkpoint-dir",
             str(scratch_dir / "ckpts"),
         ],
@@ -218,7 +215,6 @@ def test_train_uses_single_canonical_trainer(
     assert config.enable_episodic_memory is False
     assert config.enable_reward_shaping is False
     assert config.emit_observation_stream is False
-    assert config.control_address == "tcp://*:19561"
     assert config.dashboard_observation_hz == 10.0
     assert config.emit_training_telemetry is False
     assert config.emit_update_loss_telemetry is False

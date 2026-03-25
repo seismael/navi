@@ -52,6 +52,8 @@ def _validate_cast_rays_inputs(
     dirs: Any,
     out_distances: Any,
     out_semantics: Any,
+    *,
+    skip_direction_validation: bool = False,
 ) -> None:
     if not dag_tensor.is_cuda:
         raise RuntimeError("dag_tensor must be on CUDA. CPU tensors are not supported.")
@@ -92,7 +94,7 @@ def _validate_cast_rays_inputs(
         dtype=_SEMANTIC_DTYPE,
         shape=(batch, rays),
     )
-    if torch.is_tensor(dirs):
+    if not skip_direction_validation and torch.is_tensor(dirs):
         _validate_direction_norms(dirs)
 
 
@@ -151,6 +153,7 @@ def cast_rays(
     bbox_min: list[float],
     bbox_max: list[float],
     resolution: int,
+    skip_direction_validation: bool = False,
 ) -> None:
     """
     Top-level API for TopoNav Sphere Tracing.
@@ -164,7 +167,10 @@ def cast_rays(
         raise RuntimeError(
             "CUDA is not available. TopoNav requires CUDA and does not support CPU fallback."
         )
-    _validate_cast_rays_inputs(dag_tensor, origins, dirs, out_distances, out_semantics)
+    _validate_cast_rays_inputs(
+        dag_tensor, origins, dirs, out_distances, out_semantics,
+        skip_direction_validation=skip_direction_validation,
+    )
     _validate_runtime_parameters(
         max_steps=max_steps,
         max_distance=max_distance,
@@ -187,4 +193,5 @@ def cast_rays(
         bbox_min,
         bbox_max,
         resolution,
+        skip_direction_validation,
     )

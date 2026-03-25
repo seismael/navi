@@ -9,8 +9,6 @@ import numpy as np
 
 from navi_contracts.models import (
     Action,
-    ActorControlRequest,
-    ActorControlResponse,
     BatchStepRequest,
     BatchStepResult,
     DistanceMatrix,
@@ -123,8 +121,6 @@ def serialize(
     model: (
         DistanceMatrix
         | Action
-        | ActorControlRequest
-        | ActorControlResponse
         | RobotPose
         | StepRequest
         | StepResult
@@ -157,22 +153,6 @@ def serialize(
         payload = {
             "_type": "Action",
             **_serialize_action(model),
-        }
-    elif isinstance(model, ActorControlRequest):
-        payload = {
-            "_type": "ActorControlRequest",
-            "command": model.command,
-            "actor_id": model.actor_id,
-            "timestamp": model.timestamp,
-        }
-    elif isinstance(model, ActorControlResponse):
-        payload = {
-            "_type": "ActorControlResponse",
-            "ok": model.ok,
-            "actor_id": model.actor_id,
-            "actor_ids": model.actor_ids,
-            "message": model.message,
-            "timestamp": model.timestamp,
         }
     elif isinstance(model, TelemetryEvent):
         payload = {
@@ -209,8 +189,6 @@ def deserialize(
 ) -> (
     DistanceMatrix
     | Action
-    | ActorControlRequest
-    | ActorControlResponse
     | RobotPose
     | StepRequest
     | StepResult
@@ -236,10 +214,6 @@ def deserialize(
         return StepResult(**raw)
     if type_tag == "Action":
         return Action(**raw)
-    if type_tag == "ActorControlRequest":
-        return ActorControlRequest(**raw)
-    if type_tag == "ActorControlResponse":
-        return ActorControlResponse(**raw)
     if type_tag == "TelemetryEvent":
         return TelemetryEvent(**raw)
     if type_tag == "BatchStepRequest":

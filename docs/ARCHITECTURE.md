@@ -157,7 +157,7 @@ cost are now at least as important as raw environment query speed.
 The auditor domain is passive by policy. It may:
 
 - subscribe to actor and environment streams
-- display a selected actor view
+- display actor 0 view
 - record and replay telemetry and matrices
 - render diagnostics from received contracts
 
@@ -397,3 +397,28 @@ upstream streams are absent.
 - `docs/AUDITOR.md`: dashboard, recorder, rewinder, and passive observer policy
 - `docs/CONTRACTS.md`: public wire models and internal tensor seam notes
 - `docs/VERIFICATION.md`: test layers and benchmark proof requirements
+
+## 13. GPU Compute Utilization
+
+On the active MX150 (`sm_61`), GPU compute utilization during training stays
+well below 100% despite full VRAM occupancy and a clean hot path with zero
+unnecessary GPU→CPU synchronization barriers. The root cause is eager PyTorch
+dispatcher overhead: each individual tensor operation dispatches a separate CUDA
+kernel through the Python runtime, and the GPU sits idle during the ~10-100μs
+Python dispatch gap between kernels. Per rollout tick, ~72-90 kernels are
+submitted; per PPO minibatch, ~165-376 kernels are submitted.
+
+The Mamba2 SSD temporal core is the largest single contributor to dispatcher
+overhead, dispatching 55-60 kernels per forward pass versus GRU's 2-4 (cuDNN
+fused). This is a deliberate trade-off: Mamba2 delivers significantly better
+learning quality at the cost of throughput.
+
+`torch.compile` (requires `sm_70+`) would fuse these small kernels and is the
+highest-ROI path to improved GPU utilization. CUDA graph capture is infeasible
+due to data-dependent control flow in the step path. `mamba-ssm` fused Triton
+kernels are not available on Windows. See `docs/PERFORMANCE.md` §4.0 for the
+full bottleneck analysis.
+
+The `rollout_overlap_groups` configuration (`ActorConfig`) enables multi-group
+pipelined rollout on GPUs with enough SMs for concurrent kernel execution.
+Default is `1` (optimal for MX150's 3 SMs).

@@ -134,14 +134,6 @@ class TestStreamEngine:
         assert engine.actor_states[0].latest_matrix.episode_id == 11
         engine.close()
 
-    def test_sync_actor_roster_prepopulates_states(self) -> None:
-        engine = StreamEngine(actor_sub="tcp://localhost:15557", selected_actor_id=0)
-
-        engine.sync_actor_roster([0, 3, 7])
-
-        assert sorted(engine.actor_states.keys()) == [0, 3, 7]
-        engine.close()
-
     def test_selected_actor_none_ingests_all_actors(self) -> None:
         engine = StreamEngine(matrix_sub="tcp://localhost:15559", selected_actor_id=None)
 

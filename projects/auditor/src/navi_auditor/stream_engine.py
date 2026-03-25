@@ -21,8 +21,6 @@ from navi_contracts import (
     TOPIC_DISTANCE_MATRIX,
     TOPIC_TELEMETRY_EVENT,
     Action,
-    ActorControlRequest,
-    ActorControlResponse,
     DistanceMatrix,
     StepRequest,
     TelemetryEvent,
@@ -196,7 +194,6 @@ class StreamEngine:
         self,
         matrix_sub: str = "",
         actor_sub: str = "",
-        actor_control_endpoint: str = "",
         step_endpoint: str = "",
         n_actors: int = 0,
         selected_actor_id: int | None = 0,
@@ -204,8 +201,8 @@ class StreamEngine:
         self._ctx: zmq.Context[zmq.Socket[bytes]] = zmq.Context()
         self._poller = zmq.Poller()
         self._actor_states: dict[int, StreamState] = {}
+        self._fleet_n_actors: int = 0
         self._selected_actor_id: int | None = selected_actor_id
-        self._actor_control_endpoint = actor_control_endpoint
 
         self._msg_total: int = 0
         self._drop_total: int = 0
@@ -254,16 +251,6 @@ class StreamEngine:
             self._sock_step.setsockopt(zmq.REQ_RELAXED, 1)
             self._sock_step.setsockopt(zmq.REQ_CORRELATE, 1)
             self._sock_step.connect(step_endpoint)
-
-        self._sock_actor_control: zmq.Socket[bytes] | None = None
-        if actor_control_endpoint:
-            self._sock_actor_control = self._ctx.socket(zmq.REQ)
-            self._sock_actor_control.setsockopt(zmq.LINGER, 0)
-            self._sock_actor_control.setsockopt(zmq.RCVTIMEO, 500)
-            self._sock_actor_control.setsockopt(zmq.SNDTIMEO, 500)
-            self._sock_actor_control.setsockopt(zmq.REQ_RELAXED, 1)
-            self._sock_actor_control.setsockopt(zmq.REQ_CORRELATE, 1)
-            self._sock_actor_control.connect(actor_control_endpoint)
 
         self._step_counter = 0
 
@@ -346,66 +333,12 @@ class StreamEngine:
         """Whether manual stepping is available."""
         return self._sock_step is not None
 
-    def set_selected_actor(self, actor_id: int | None) -> None:
-        """Set actor filter for ingestion (None = ingest all actors)."""
-        self._selected_actor_id = actor_id
-
-    def sync_actor_roster(self, actor_ids: list[int]) -> None:
-        """Pre-populate actor states from a trainer-provided roster snapshot."""
-        for actor_id in actor_ids:
-            self._resolve_state(int(actor_id))
-
-    def request_actor_snapshot(self) -> tuple[list[int], int | None]:
-        """Query the trainer for its actor roster and current selected actor."""
-        if self._sock_actor_control is None:
-            return (sorted(self._actor_states.keys()), self._selected_actor_id)
-
-        request = ActorControlRequest(command="snapshot", actor_id=-1, timestamp=time.time())
-        try:
-            self._sock_actor_control.send(serialize(request))
-            response = deserialize(self._sock_actor_control.recv())
-        except Exception as exc:
-            _LOG.debug("Actor snapshot request failed: %s", exc)
-            return (sorted(self._actor_states.keys()), self._selected_actor_id)
-
-        if not isinstance(response, ActorControlResponse):
-            return (sorted(self._actor_states.keys()), self._selected_actor_id)
-
-        actor_ids = [int(actor_id) for actor_id in response.actor_ids.tolist()]
-        self.sync_actor_roster(actor_ids)
-        self._selected_actor_id = int(response.actor_id)
-        return (actor_ids, self._selected_actor_id)
-
-    def request_selected_actor(self, actor_id: int) -> bool:
-        """Ask the trainer to retarget the selected rich stream actor."""
-        if self._sock_actor_control is None:
-            self._selected_actor_id = actor_id
-            return True
-
-        request = ActorControlRequest(command="select", actor_id=actor_id, timestamp=time.time())
-        try:
-            self._sock_actor_control.send(serialize(request))
-            response = deserialize(self._sock_actor_control.recv())
-        except Exception as exc:
-            _LOG.debug("Actor selection request failed: %s", exc)
-            return False
-
-        if not isinstance(response, ActorControlResponse) or not response.ok:
-            return False
-
-        actor_ids = [int(value) for value in response.actor_ids.tolist()]
-        self.sync_actor_roster(actor_ids)
-        self._selected_actor_id = int(response.actor_id)
-        return True
-
     def close(self) -> None:
         """Tear down all sockets."""
         if self._sock_matrix is not None:
             self._sock_matrix.close()
         if self._sock_actor is not None:
             self._sock_actor.close()
-        if self._sock_actor_control is not None:
-            self._sock_actor_control.close()
         if self._sock_step is not None:
             self._sock_step.close()
         self._ctx.term()
@@ -436,8 +369,8 @@ class StreamEngine:
 
     @property
     def n_actors(self) -> int:
-        """Number of actor streams."""
-        return len(self._actor_states)
+        """Fleet actor count reported by the trainer via perf telemetry."""
+        return self._fleet_n_actors if self._fleet_n_actors > 0 else len(self._actor_states)
 
     def _resolve_state(self, actor_id: int) -> StreamState:
         """Return the StreamState for *actor_id*, creating it if necessary."""
@@ -522,6 +455,10 @@ class StreamEngine:
             state.perf_tick_ms_history.append(float(p[5]))
             state.perf_zero_wait_history.append(float(p[6]))
             state.perf_opt_ms_history.append(float(p[7]))
+            if len(p) >= 14:
+                n = int(p[13])
+                if n > 0:
+                    self._fleet_n_actors = n
 
         elif et == "actor.training.ppo.episode" and len(p) >= 2:
             state.episode_return_history.append(float(p[0]))

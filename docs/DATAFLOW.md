@@ -65,7 +65,7 @@ Service mode is important for:
 ```text
 actor and environment PUB streams
   -> auditor StreamEngine poll
-  -> selected actor state update
+  -> actor 0 state update
   -> dashboard render at capped UI cadence
   -> optional record or replay surfaces
 ```

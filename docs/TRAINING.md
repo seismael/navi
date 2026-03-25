@@ -24,9 +24,9 @@ must not alter trainer cadence, environment semantics, or observation math.
 Detached wrapper launches now disable the actor observation stream entirely so
 no publish-row materialization or update-heartbeat observation callbacks run
 unless passive viewing is explicitly requested with `-WithDashboard`.
-When the dashboard is attached, actor discovery comes from a one-shot trainer
-roster query and selector changes are pushed back to the trainer over a dedicated
-control endpoint, so the canonical live PUB stream stays selected-actor only.
+When the dashboard is attached, it passively displays actor 0 observations
+and shows the active actor count. No control endpoint or selector mechanism
+is required.
 
 Canonical wrappers now create one structured run root per launch. Unless you
 override output directories explicitly, the default operational outputs are
@@ -74,7 +74,6 @@ introducing a second launcher surface.
 - Python `3.12`
 - CUDA-capable machine with working PyTorch CUDA runtime
 - free port `5557` for actor telemetry
-- free port `5561` for actor selector control
 
 Repository training wrappers launch the actor via `python -m navi_actor.cli`
 inside the actor project environment so canonical training does not depend on
@@ -205,17 +204,15 @@ direct actor CLI instead of the wrapper:
 ```powershell
 uv run --project .\projects\actor navi-actor train --actors 4
 uv run --project .\projects\actor navi-actor train --actors 8 --total-steps 0
-uv run --project .\projects\actor navi-actor train --actors 8 --temporal-core gru --actor-pub tcp://localhost:5565 --actor-control tcp://*:5561
-uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5565 --actor-control-endpoint tcp://localhost:5561 --passive --actor-id 0
+uv run --project .\projects\actor navi-actor train --actors 8 --temporal-core gru --actor-pub tcp://localhost:5565
+uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5565 --passive
 ```
 
 That surface is the canonical way to vary `--actors` directly for long runs.
 Attach the auditor separately when needed. If you need live observation frames,
 launch a surface that keeps observation streaming enabled instead of a detached
-wrapper run with `--no-emit-observation-stream`. The dashboard now requests the
-actor roster once at startup and updates the trainer-side selected actor when the
-operator changes the selector, so high-actor-count runs do not require continuous
-all-actor rich telemetry.
+wrapper run with `--no-emit-observation-stream`. The dashboard always displays
+actor 0 observations with zero selector overhead.
 
 If you want one command that launches both canonical training and the passive
 dashboard together on the full discovered corpus, use the wrapper with an
@@ -368,3 +365,6 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - PPO update-loss scalar materialization is diagnostic-only on the canonical hot path: the trainer still emits coarse `actor.training.ppo.update` events for mode/status detection by default, but full PPO loss fields are populated only when explicit update-loss telemetry is enabled
 - when a future temporal-core candidate proves better, re-promotion must be proven by rerunning a controlled head-to-head training comparison and bounded canonical training surfaces before the active docs and scripts are switched away from Mamba2 SSD
 - stronger hardware may move the high-resolution ceiling outward, but documentation and scripts must not imply that higher observation profiles are already production-safe on the active MX150 machine
+- `rollout_overlap_groups` (`ActorConfig`, env var `NAVI_ACTOR_ROLLOUT_OVERLAP_GROUPS`) controls multi-group pipelined rollout; default is `1` (optimal for MX150's 3 SMs); `2` is available for larger GPUs with enough SMs for concurrent kernel execution
+- on `sm_61`, GPU compute utilization during training is limited by eager PyTorch dispatcher overhead (~72-90 kernel launches per rollout tick, ~165-376 per PPO minibatch) and cannot be improved without `torch.compile` (`sm_70+` required), `mamba-ssm` fused Triton kernels (not available on Windows), or a PPO/rollout double-buffer overlap architecture; see `docs/PERFORMANCE.md` §4.0 for the full analysis
+- canonical `SdfDagBackend` hot-path `cast_rays()` calls use `skip_direction_validation=True` because yaw-rotated unit vectors are mathematically guaranteed normalized, eliminating four GPU→CPU synchronization barriers per call

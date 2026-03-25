@@ -74,6 +74,7 @@ Forbidden patterns on the canonical hot path:
 - viewer-driven observation remaps, re-normalization, or contract branching inside environment or actor hot-path code
 - dashboard-required CPU materialization or cadence checks that alter rollout math instead of staying inside passive publication seams
 - blind removal of validated `torch-sdf` leaf, void, or prefix caches without a reproduced current-branch regression and a benchmark-backed replacement
+- per-step direction-norm revalidation inside `cast_rays()` when ray directions are mathematically guaranteed normalized (e.g. yaw-rotated unit vectors); the four GPU→CPU pipeline drains this causes are eliminated by `skip_direction_validation=True` on the hot path
 
 ### 3.3 Treat PPO Update As Part Of The Hot Path
 
@@ -157,6 +158,49 @@ Human-facing tooling may consume data, but it must not shape the runtime.
 The current architecture has already removed major environment-side waste.
 The confirmed remaining bottlenecks are actor/runtime dataflow and optimizer
 wall time.
+
+### 4.0 GPU Compute Utilization Reality (March 2026)
+
+On the active MX150 (`sm_61`, 3 SMs, 384 CUDA cores), measured GPU compute
+utilization during canonical training stays well below 100% despite full VRAM
+occupancy. There are three structural causes, none of which are fixable by
+removing CPU sync barriers.
+
+**Cause 1: Eager PyTorch dispatcher overhead.** Without `torch.compile` (which
+requires `sm_70+`), every PyTorch operation dispatches a separate CUDA kernel
+through the Python runtime. The canonical rollout tick launches **~72-90
+individual kernels** and each PPO minibatch update launches **~165-376 kernels**.
+Each kernel dispatch incurs ~10-100μs of Python-side overhead where the GPU sits
+idle waiting for the next launch. This aggregates to **1-5ms of GPU idle time per
+rollout tick** and **2-18ms per PPO minibatch** purely from dispatcher gaps.
+
+**Cause 2: Mamba2 SSD kernel count.** The canonical Mamba2 SSD temporal core is
+pure-PyTorch and dispatches **55-60 separate CUDA kernels** per forward pass
+(`einsum`, `cumsum`, `exp`, segment-sum loops). By comparison, the GRU temporal
+core uses a **single fused cuDNN kernel** (2-4 dispatches). This 15x kernel-count
+difference is the largest single source of Mamba2's throughput disadvantage
+relative to GRU on `sm_61`.
+
+**Cause 3: Rollout-PPO serialization.** The rollout phase and PPO update phase
+run fully serially. During the ~1000ms PPO window, the environment GPU kernels
+are idle. During the ~6000ms rollout window, the PPO optimizer is idle. No overlap
+is possible without a double-buffer architecture that has not yet been implemented.
+
+These three structural causes explain why GPU compute utilization remains low even
+though the canonical hot path contains **zero unnecessary GPU→CPU synchronization
+barriers**. The direction-norm validation bypass (`skip_direction_validation=True`)
+removes four real pipeline drains per `cast_rays()` call, but these were ~2ms
+out of a ~45ms tick — a meaningful cleanup but not a visible utilization shift.
+
+**What would actually move the needle:**
+
+| Change | Impact | Status |
+| --- | --- | --- |
+| `torch.compile` on RayViT + reward helpers | Eliminate ~50% of dispatcher gaps | **Blocked:** requires `sm_70+` |
+| `mamba-ssm` fused Triton kernels | Eliminate 55-60 Mamba2 dispatcher gaps | **Blocked:** not available on Windows |
+| GRU temporal core | 2-4 dispatches vs 55-60 (Mamba2) | Available but lower learning quality |
+| PPO/rollout double-buffer overlap | Eliminate ~1000ms GPU idle per PPO window | **Future:** complex architecture work |
+| CUDA graph capture of step path | Replay entire step as single submission | **Infeasible:** data-dependent control flow |
 
 On the environment side, the remaining Python-adjacent cost is no longer the
 ray kernel launch itself. It is eager PyTorch dispatch around the kernel
@@ -322,11 +366,15 @@ Accepted and already integrated:
 - starvation and proximity shaping derived from existing spherical observations
 - two-group trainer-side CUDA stream overlap on the canonical PPO rollout tick, with actor subset routing and deferred episodic-memory adds so same-tick memory queries still observe the pre-add state across the full fleet
 - macro-cell empty-space caching in `projects/torch-sdf/cpp_src/kernel.cu`, where repeated samples inside the same empty DAG child cell reuse cached bounds and advance to the cell exit without a fresh root descent
+- `cast_rays()` direction-norm validation bypass (`skip_direction_validation` parameter in C++/Python/sdfdag layers), eliminating four GPU→CPU synchronization barriers per step on the hot path; probe and inspection calls retain validation
+- configurable rollout overlap group count (`rollout_overlap_groups` in `ActorConfig`), defaulting to `1` on the active MX150 hardware; `2` is available for larger GPUs with enough SMs to benefit from concurrent kernel execution
 
-Those two integrated surfaces carry explicit promotion constraints:
+Those integrated surfaces carry explicit promotion constraints:
 
 - the current grouped rollout implementation is only partial overlap until a benchmark-proven ping-pong rewrite lands; preserving per-actor ordering is mandatory
+- on MX150 (3 SMs), 2-group rollout overlap causes ~47% throughput regression (43 SPS vs 82 SPS single-group) because halved batch size underutilizes the limited SM count; overlap groups > 1 are only beneficial on GPUs with enough SMs for concurrent kernel execution
 - the current `torch-sdf` cache path is part of the validated runtime baseline and must not be removed based on imported theory alone
+- CUDA graph capture of the full environment step path is not feasible due to data-dependent control flow (`nonzero()`, `.item()`, dynamic allocation, tensor-dependent loop bounds, `.tolist()`, advanced indexing with computed indices)
 
 Benchmark-gated only:
 
@@ -358,6 +406,8 @@ These values are current reference points, not final goals.
 3. remove remaining avoidable host staging inside the rollout tick, including
 	tensor-path kinematic seams that still force previous-depth NumPy materialization
 4. preserve coarse, safe observability while keeping dashboards passive
+5. pursue `torch.compile` kernel fusion when hardware with `sm_70+` becomes available — this is the highest-ROI path to GPU compute utilization improvement
+6. keep rollout overlap infrastructure (`rollout_overlap_groups`) ready for larger GPUs where multi-group dispatch can actually benefit from concurrent SM execution
 
 ## 8. Canonical Decision Rule
 

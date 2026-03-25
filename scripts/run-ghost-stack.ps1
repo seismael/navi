@@ -40,8 +40,6 @@ param(
     [string]$PythonVersion = "3.12",
     [ValidateRange(1, 65535)]
     [int]$Actors = 4,
-    [ValidateRange(1, 65535)]
-    [int]$ActorControlPort = 5561,
     [switch]$NoPreKill,
     [switch]$NoDashboard,
     [switch]$WithDashboard,
@@ -440,7 +438,6 @@ if ($Train) {
         "--temporal-core", "$TemporalCore",
         "--total-steps", $TotalSteps,
         "--actor-pub", "tcp://localhost:$ActorTelemetryPort",
-        "--actor-control", "tcp://*:$ActorControlPort",
         "--shuffle",
         "--checkpoint-every", $CheckpointEvery,
         "--checkpoint-dir", $CheckpointDir,
@@ -495,7 +492,6 @@ if ($Train) {
         Write-Host "  Total Steps: $(if ($TotalSteps -le 0) { 'continuous until stopped' } else { $TotalSteps })"
         Write-Host "  Temporal   : $TemporalCore"
         Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
-        Write-Host "  Control    : tcp://localhost:$ActorControlPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
         if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
             Write-Host "  Resume     : $Checkpoint"
@@ -540,7 +536,7 @@ if ($Train) {
             if ($null -ne $trainProc -and -not $trainProc.HasExited) {
                 Stop-ProcessTreeById -ProcessId $trainProc.Id
             }
-            Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, $ActorControlPort, 5559, 5560)
+            Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
             exit 1
         }
         else {
@@ -557,7 +553,7 @@ if ($Train) {
                 if ($null -ne $trainProc -and -not $trainProc.HasExited) {
                     Stop-ProcessTreeById -ProcessId $trainProc.Id
                 }
-                Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, $ActorControlPort, 5559, 5560)
+                Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
                 exit 1
             }
 
@@ -567,7 +563,6 @@ if ($Train) {
                 --python $PythonVersion `
                 navi-auditor dashboard `
                 --actor-sub "tcp://localhost:$ActorTelemetryPort" `
-                --actor-control-endpoint "tcp://localhost:$ActorControlPort" `
                 --passive
         }
         else {
@@ -602,7 +597,7 @@ if ($Train) {
                 process_id = $trainProc.Id
             }) | Out-Null
         }
-        Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, $ActorControlPort, 5559, 5560)
+        Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
     }
     exit 0
 }

@@ -241,6 +241,18 @@ class MultiTrajectoryBuffer:
                 f"storage is on {self._batch_obs.device}, incoming observations are on {device}",
             )
 
+    def get_actor_step_counts(self) -> Tensor:
+        """Return per-actor step counts tensor (or zeros if not yet allocated)."""
+        if self._batched_actor_step_counts is None:
+            return torch.zeros(self._n_actors, dtype=torch.int64)
+        return self._batched_actor_step_counts
+
+    def actor_data_len(self, actor_ids: Tensor) -> int:
+        """Return total steps stored for the given actors."""
+        if self._batched_actor_step_counts is None:
+            return 0
+        return int(self._batched_actor_step_counts[actor_ids].sum().item())
+
     def _required_batched_rollout_len(self) -> int:
         if self._batched_actor_step_counts is None:
             return 0
@@ -387,6 +399,196 @@ class MultiTrajectoryBuffer:
         self._all_aux = None
         self._sequence_view_seq_len = None
         self._sequence_views = {}
+
+    # ── Per-actor operations for staggered PPO ────────────────────
+
+    def compute_returns_and_advantages_for_actors(
+        self, actor_ids: Tensor, last_values: Tensor
+    ) -> None:
+        """Compute GAE for specific actors, leaving other actors' data untouched.
+
+        Args:
+            actor_ids: 1-D int64 tensor of actor indices to process.
+            last_values: bootstrap values aligned with actor_ids (one per actor).
+        """
+        assert self._batch_rewards is not None
+        assert self._batch_values is not None
+        assert self._batch_dones is not None
+        assert self._batch_truncateds is not None
+        assert self._batched_actor_step_counts is not None
+        device = self._batch_values.device
+        self._ensure_batched_advantage_storage(device)
+        assert self._batch_advantages is not None
+        assert self._batch_returns is not None
+
+        n_ready = int(actor_ids.numel())
+        for i in range(n_ready):
+            aid = int(actor_ids[i].item())
+            rollout_len = int(self._batched_actor_step_counts[aid].item())
+            if rollout_len == 0:
+                continue
+            last_val = last_values[i].detach().to(device=device, dtype=torch.float32).reshape(())
+            rewards = self._batch_rewards[aid, :rollout_len].to(device=device, dtype=torch.float32)
+            values = self._batch_values[aid, :rollout_len].to(device=device, dtype=torch.float32)
+            done_flags = self._batch_dones[aid, :rollout_len].to(device=device)
+            truncated_flags = self._batch_truncateds[aid, :rollout_len].to(device=device)
+            continue_mask = (~done_flags & ~truncated_flags).to(dtype=torch.float32)
+            truncation_mask = (truncated_flags & ~done_flags).to(dtype=torch.float32)
+            done_mask = done_flags.to(dtype=torch.float32)
+            advantages = torch.zeros_like(rewards)
+            last_gae = torch.zeros((), dtype=torch.float32, device=device)
+            prev_value = last_val
+
+            for t in reversed(range(rollout_len)):
+                delta = rewards[t] + self._gamma * prev_value - values[t]
+                terminal_delta = rewards[t] - values[t]
+                continued_gae = delta + self._gamma * self._gae_lambda * last_gae
+                last_gae = (
+                    truncation_mask[t] * delta
+                    + done_mask[t] * terminal_delta
+                    + continue_mask[t] * continued_gae
+                )
+                advantages[t] = last_gae
+                prev_value = values[t]
+
+            raw_returns = advantages + values
+            if self._return_normalizer is not None:
+                self._return_normalizer.update(raw_returns)
+                raw_returns = self._return_normalizer.normalize(raw_returns)
+            self._batch_advantages[aid, :rollout_len].copy_(advantages)
+            self._batch_returns[aid, :rollout_len].copy_(raw_returns)
+
+        self._invalidate_views()
+
+    def clear_actors(self, actor_ids: Tensor) -> None:
+        """Clear buffer data for specific actors, preserving other actors' data."""
+        if self._batched_actor_step_counts is not None:
+            self._batched_actor_step_counts[actor_ids] = 0
+        self._invalidate_views()
+
+    def sample_minibatches_for_actors(
+        self,
+        actor_ids: Tensor,
+        batch_size: int = 64,
+        seq_len: int = 32,
+    ) -> Generator[TrajectoryBuffer.MiniBatch, None, None]:
+        """Sample minibatches from specific actors' data only.
+
+        All requested actors must have the same rollout length.
+        """
+        assert self._batched_actor_step_counts is not None
+
+        actor_steps = self._batched_actor_step_counts[actor_ids]
+        min_steps = int(actor_steps.min().item())
+        max_steps = int(actor_steps.max().item())
+        if min_steps != max_steps:
+            raise RuntimeError(
+                f"sample_minibatches_for_actors requires equal step counts; "
+                f"got min={min_steps} max={max_steps}"
+            )
+        rollout_len = min_steps
+        if rollout_len == 0:
+            return
+
+        assert self._batch_obs is not None
+        assert self._batch_actions is not None
+        assert self._batch_log_probs is not None
+        assert self._batch_values is not None
+        assert self._batch_advantages is not None
+        assert self._batch_returns is not None
+        assert self._batch_dones is not None
+
+        n_actors_sub = int(actor_ids.numel())
+        device = self._batch_obs.device
+
+        all_obs = self._batch_obs[actor_ids, :rollout_len]
+        all_acts = self._batch_actions[actor_ids, :rollout_len]
+        all_lps = self._batch_log_probs[actor_ids, :rollout_len]
+        all_vals = self._batch_values[actor_ids, :rollout_len]
+        all_advs = _normalize_advantages_once(self._batch_advantages[actor_ids, :rollout_len])
+        all_rets = self._batch_returns[actor_ids, :rollout_len]
+        all_aux = (
+            self._batch_aux[actor_ids, :rollout_len]
+            if self._has_aux_for_rollout and self._batch_aux is not None
+            else None
+        )
+
+        if seq_len > 0:
+            n_seqs_per_actor = rollout_len // seq_len
+            if n_seqs_per_actor == 0:
+                return
+            usable_steps = n_seqs_per_actor * seq_len
+            total_seqs = n_actors_sub * n_seqs_per_actor
+
+            obs_seqs = all_obs[:, :usable_steps].reshape(
+                total_seqs, seq_len, *all_obs.shape[2:]
+            )
+            acts_seqs = all_acts[:, :usable_steps].reshape(total_seqs, seq_len, -1)
+            lps_seqs = all_lps[:, :usable_steps].reshape(total_seqs, seq_len)
+            vals_seqs = all_vals[:, :usable_steps].reshape(total_seqs, seq_len)
+            advs_seqs = all_advs[:, :usable_steps].reshape(total_seqs, seq_len)
+            rets_seqs = all_rets[:, :usable_steps].reshape(total_seqs, seq_len)
+            aux_seqs = (
+                all_aux[:, :usable_steps].reshape(total_seqs, seq_len, -1)
+                if all_aux is not None
+                else None
+            )
+
+            perm = torch.randperm(total_seqs, device=device)
+            obs_seqs = obs_seqs.index_select(0, perm)
+            acts_seqs = acts_seqs.index_select(0, perm)
+            lps_seqs = lps_seqs.index_select(0, perm)
+            vals_seqs = vals_seqs.index_select(0, perm)
+            advs_seqs = advs_seqs.index_select(0, perm)
+            rets_seqs = rets_seqs.index_select(0, perm)
+            if aux_seqs is not None:
+                aux_seqs = aux_seqs.index_select(0, perm)
+
+            seqs_per_minibatch = max(1, batch_size // seq_len)
+            for i in range(0, total_seqs, seqs_per_minibatch):
+                batch_slice = slice(i, i + seqs_per_minibatch)
+                mb_obs = obs_seqs[batch_slice]
+                mb_acts = acts_seqs[batch_slice]
+                mb_lps = lps_seqs[batch_slice]
+                mb_vals = vals_seqs[batch_slice]
+                mb_advs = advs_seqs[batch_slice]
+                mb_rets = rets_seqs[batch_slice]
+                mb_aux = aux_seqs[batch_slice] if aux_seqs is not None else None
+                yield TrajectoryBuffer.MiniBatch(
+                    observations=mb_obs.flatten(0, 1),
+                    actions=mb_acts.flatten(0, 1),
+                    old_log_probs=mb_lps.flatten(),
+                    old_values=mb_vals.flatten(),
+                    advantages=mb_advs.flatten(),
+                    returns=mb_rets.flatten(),
+                    aux_tensors=mb_aux.flatten(0, 1) if mb_aux is not None else None,
+                    sequence_observations=mb_obs,
+                    sequence_actions=mb_acts,
+                    sequence_aux_tensors=mb_aux,
+                )
+        else:
+            flat_size = n_actors_sub * rollout_len
+            flat_indices = torch.randperm(flat_size, device=device)
+            obs_flat = all_obs.reshape(-1, *all_obs.shape[2:])
+            acts_flat = all_acts.reshape(-1, all_acts.shape[-1])
+            lps_flat = all_lps.flatten()
+            vals_flat = all_vals.flatten()
+            advs_flat = all_advs.flatten()
+            rets_flat = all_rets.flatten()
+            aux_flat = (
+                all_aux.reshape(-1, all_aux.shape[-1]) if all_aux is not None else None
+            )
+            for i in range(0, len(flat_indices), batch_size):
+                idx = flat_indices[i : i + batch_size]
+                yield TrajectoryBuffer.MiniBatch(
+                    observations=obs_flat[idx],
+                    actions=acts_flat[idx],
+                    old_log_probs=lps_flat[idx],
+                    old_values=vals_flat[idx],
+                    advantages=advs_flat[idx],
+                    returns=rets_flat[idx],
+                    aux_tensors=aux_flat[idx] if aux_flat is not None else None,
+                )
 
     def _ensure_batch_cache(self) -> None:
         """Build stacked actor tensors once per PPO update and reuse them across epochs."""

@@ -276,11 +276,18 @@ class PpoLearner:
         ppo_epochs: int = 4,
         minibatch_size: int = 64,
         seq_len: int = 32,
+        actor_ids: Tensor | None = None,
         rnd: RNDModule | None = None,
         progress_callback: Callable[[], None] | None = None,
         materialize_summary_scalars: bool = True,
     ) -> PpoMetrics:
-        """Run multiple PPO mini-batch updates on a filled trajectory buffer."""
+        """Run multiple PPO mini-batch updates on a filled trajectory buffer.
+
+        Args:
+            actor_ids: Optional 1-D int64 tensor of actor indices to train on.
+                When provided with a MultiTrajectoryBuffer, only the given actors'
+                data is sampled (staggered per-actor PPO mode).
+        """
         epoch_total_start = time.perf_counter()
         setup_start = time.perf_counter()
         optimizer_start = time.perf_counter()
@@ -298,9 +305,18 @@ class PpoLearner:
         policy.train()
         policy_train_mode_ms = (time.perf_counter() - train_mode_start) * 1000
 
+        _use_actor_subset = (
+            actor_ids is not None
+            and hasattr(buffer, "sample_minibatches_for_actors")
+        )
+        _sample_count = (
+            buffer.actor_data_len(actor_ids)  # type: ignore[union-attr]
+            if _use_actor_subset and actor_ids is not None
+            else len(buffer)
+        )
         _LOGGER.debug(
             "Starting PPO epoch with %d samples (epochs=%d, batch=%d)",
-            len(buffer),
+            _sample_count,
             ppo_epochs,
             minibatch_size,
         )
@@ -358,7 +374,14 @@ class PpoLearner:
 
         for _epoch in range(ppo_epochs):
             iterator_setup_start = time.perf_counter()
-            minibatch_iter = iter(buffer.sample_minibatches(minibatch_size, seq_len))
+            if _use_actor_subset and actor_ids is not None:
+                minibatch_iter = iter(
+                    buffer.sample_minibatches_for_actors(  # type: ignore[union-attr]
+                        actor_ids, minibatch_size, seq_len
+                    )
+                )
+            else:
+                minibatch_iter = iter(buffer.sample_minibatches(minibatch_size, seq_len))
             iterator_setup_ms_acc += (time.perf_counter() - iterator_setup_start) * 1000
             _kl_early_stop = False
             while True:

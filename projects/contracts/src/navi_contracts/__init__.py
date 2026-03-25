@@ -8,8 +8,6 @@ from typing import Any
 from navi_contracts.logging import setup_logging
 from navi_contracts.models import (
     Action,
-    ActorControlRequest,
-    ActorControlResponse,
     BatchStepRequest,
     BatchStepResult,
     DistanceMatrix,
@@ -62,8 +60,6 @@ __all__: list[str] = [
     "TOPIC_STEP_RESULT",
     "TOPIC_TELEMETRY_EVENT",
     "Action",
-    "ActorControlRequest",
-    "ActorControlResponse",
     "BatchStepRequest",
     "BatchStepResult",
     "build_phase_metrics_payload",

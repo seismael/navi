@@ -20,7 +20,6 @@ from navi_auditor.config import AuditorConfig as RealAuditorConfig
 class _StubConfig:
     matrix_sub_address: str = "tcp://env-pub:5559"
     actor_sub_address: str = "tcp://actor-pub:5557"
-    actor_control_address: str = "tcp://actor-control:5561"
     step_endpoint: str = "tcp://env-rep:5560"
     output_path: str = "session.zarr"
     pub_address: str = "tcp://*:5558"
@@ -84,10 +83,7 @@ def test_dashboard_passive_mode_disables_environment_sockets(monkeypatch: Any) -
     assert _ViewerSpy.last_kwargs == {
         "matrix_sub": "",
         "actor_sub": "tcp://actor-pub:5557",
-        "actor_control_endpoint": "tcp://actor-control:5561",
         "step_endpoint": "",
-        "actor_id": 0,
-        "enable_actor_selector": True,
         "hz": 30.0,
         "linear_speed": 1.5,
         "yaw_rate": 1.5,
@@ -113,9 +109,6 @@ def test_dashboard_passive_mode_ignores_explicit_environment_endpoints(monkeypat
             "tcp://override-env-rep:6001",
             "--actor-sub",
             "tcp://override-actor-pub:6002",
-            "--enable-actor-selector",
-            "--actor-id",
-            "3",
         ],
     )
 
@@ -125,9 +118,6 @@ def test_dashboard_passive_mode_ignores_explicit_environment_endpoints(monkeypat
     assert _ViewerSpy.last_kwargs["matrix_sub"] == ""
     assert _ViewerSpy.last_kwargs["step_endpoint"] == ""
     assert _ViewerSpy.last_kwargs["actor_sub"] == "tcp://override-actor-pub:6002"
-    assert _ViewerSpy.last_kwargs["actor_control_endpoint"] == "tcp://actor-control:5561"
-    assert _ViewerSpy.last_kwargs["enable_actor_selector"] is True
-    assert _ViewerSpy.last_kwargs["actor_id"] == 3
     assert _ViewerSpy.last_kwargs["max_distance_m"] == 30.0
 
 
@@ -144,31 +134,8 @@ def test_dashboard_default_mode_uses_configured_environment_wiring(monkeypatch: 
     assert _ViewerSpy.last_kwargs is not None
     assert _ViewerSpy.last_kwargs["matrix_sub"] == "tcp://env-pub:5559"
     assert _ViewerSpy.last_kwargs["actor_sub"] == "tcp://actor-pub:5557"
-    assert _ViewerSpy.last_kwargs["actor_control_endpoint"] == "tcp://actor-control:5561"
     assert _ViewerSpy.last_kwargs["step_endpoint"] == "tcp://env-rep:5560"
-    assert _ViewerSpy.last_kwargs["enable_actor_selector"] is True
-    assert _ViewerSpy.last_kwargs["actor_id"] == 0
     assert _ViewerSpy.last_kwargs["max_distance_m"] == 30.0
-
-
-def test_dashboard_accepts_explicit_actor_control_endpoint(monkeypatch: Any) -> None:
-    _reset_spy()
-    monkeypatch.setattr(cli, "setup_logging", lambda *_args: None)
-    monkeypatch.setattr(cli, "AuditorConfig", _StubConfig)
-    monkeypatch.setattr(cli, "MatrixViewer", _ViewerSpy)
-
-    result = runner.invoke(
-        cli.app,
-        [
-            "dashboard",
-            "--actor-control-endpoint",
-            "tcp://override-actor-control:6003",
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert _ViewerSpy.last_kwargs is not None
-    assert _ViewerSpy.last_kwargs["actor_control_endpoint"] == "tcp://override-actor-control:6003"
 
 
 def test_dashboard_attach_check_emits_json_summary(monkeypatch: Any) -> None:

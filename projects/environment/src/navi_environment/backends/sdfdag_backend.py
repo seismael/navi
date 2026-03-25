@@ -1286,6 +1286,7 @@ class SdfDagBackend(SimulatorBackend):
                 self._bbox_min,
                 self._bbox_max,
                 self._require_asset().resolution,
+                skip_direction_validation=True,
             )
 
             (
@@ -2205,6 +2206,7 @@ class SdfDagBackend(SimulatorBackend):
             self._bbox_min,
             self._bbox_max,
             self._require_asset().resolution,
+            skip_direction_validation=True,
         )
 
         depth_2d, semantic_2d, valid_2d, _min_d, _sr, _pr, _sbr, _fsr, clamped_metric = (
@@ -2250,6 +2252,7 @@ class SdfDagBackend(SimulatorBackend):
             self._bbox_min,
             self._bbox_max,
             self._require_asset().resolution,
+            skip_direction_validation=True,
         )
 
         depth_2d, semantic_2d, valid_2d, _min_d, _sr, _pr, _sbr, _fsr, clamped_metric = (

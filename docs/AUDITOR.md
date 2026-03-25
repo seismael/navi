@@ -13,7 +13,7 @@ observer first. Navi now documents that idea against the current codebase.
 
 | Component | Current Role |
 | --- | --- |
-| `StreamEngine` | multi-stream ZMQ ingestion and selected-actor state |
+| `StreamEngine` | multi-stream ZMQ ingestion and actor 0 state |
 | `GhostMatrixDashboard` | primary PyQtGraph operator UI |
 | `LiveDashboard` | legacy OpenCV live matrix dashboard surface |
 | `Recorder` | persistent capture of stream data |
@@ -26,8 +26,8 @@ The primary operator UI is `GhostMatrixDashboard`.
 Current implementation characteristics include:
 
 - PyQtGraph and PyQt-based desktop UI
-- selected-actor view with actor `0` as the default throughput-safe choice
-- optional actor selector for diagnostics
+- hardcoded actor `0` view for maximum throughput
+- actor count display in status bar
 - passive status-line telemetry
 - forward-FOV extraction from the spherical observation convention
 - capped ZMQ ingestion per tick for UI responsiveness

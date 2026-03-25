@@ -183,10 +183,8 @@ def test_publish_observation_emits_distance_matrix_topic() -> None:
 
 
 def test_publish_dashboard_observations_emits_selected_frames() -> None:
-    """Dashboard observation publication should emit only the provided actor frames."""
+    """Dashboard observation publication should emit only actor 0 frames."""
     trainer = _make_trainer()
-    trainer._config.telemetry_all_actors = False
-    trainer._config.telemetry_actor_id = 0
 
     trainer._telemetry_queue = queue.Queue()
 
@@ -340,17 +338,15 @@ def test_selected_episode_telemetry_actor_indices_skip_when_training_telemetry_d
 
 
 def test_selected_episode_telemetry_actor_indices_filter_to_selected_actor() -> None:
-    """Default sparse episode telemetry should only materialize the selected actor."""
+    """Default sparse episode telemetry should only materialize actor 0."""
     trainer = _make_trainer()
     trainer._config.emit_training_telemetry = True
-    trainer._config.telemetry_all_actors = False
-    trainer._config.telemetry_actor_id = 2
     trainer._pub_socket = object()  # type: ignore[assignment]
     done_indices = torch.tensor([0, 2, 3], dtype=torch.int64, device=trainer._device)
 
     selected = trainer._selected_episode_telemetry_actor_indices(done_indices)
 
-    assert torch.equal(selected, torch.tensor([2], dtype=torch.int64, device=trainer._device))
+    assert torch.equal(selected, torch.tensor([0], dtype=torch.int64, device=trainer._device))
 
 
 def test_selected_step_telemetry_actor_indices_skip_when_training_telemetry_disabled() -> None:
@@ -364,15 +360,13 @@ def test_selected_step_telemetry_actor_indices_skip_when_training_telemetry_disa
 
 
 def test_selected_step_telemetry_actor_indices_filter_to_selected_actor() -> None:
-    """Default sparse step telemetry should mirror only the selected actor."""
+    """Default sparse step telemetry should mirror only actor 0."""
     trainer = _make_trainer()
     trainer._config.emit_training_telemetry = True
-    trainer._config.telemetry_all_actors = False
-    trainer._config.telemetry_actor_id = 3
 
     selected = trainer._selected_step_telemetry_actor_indices()
 
-    assert torch.equal(selected, torch.tensor([3], dtype=torch.int64, device=trainer._device))
+    assert torch.equal(selected, torch.tensor([0], dtype=torch.int64, device=trainer._device))
 
 
 def test_extract_host_rollout_scalars_uses_selected_actor_subset() -> None:
@@ -880,19 +874,14 @@ def test_load_initial_observation_batch_uses_tensor_reset_seam() -> None:
 
 
 def test_observation_publish_actor_ids_defaults_to_selected_actor_only() -> None:
-    """Canonical trainer should default observation publication to the selected actor."""
+    """Canonical trainer should default observation publication to actor 0."""
     trainer = _make_trainer()
     trainer._n_actors = 4
     trainer._config.emit_observation_stream = False
     assert trainer._observation_publish_actor_ids() == ()
 
     trainer._config.emit_observation_stream = True
-    trainer._config.telemetry_all_actors = False
-    trainer._config.telemetry_actor_id = 2
-    assert trainer._observation_publish_actor_ids() == (2,)
-
-    trainer._config.telemetry_all_actors = True
-    assert trainer._observation_publish_actor_ids() == (0, 1, 2, 3)
+    assert trainer._observation_publish_actor_ids() == (0,)
 
 
 def test_load_initial_observation_batch_skips_materialization_when_stream_disabled() -> None:
@@ -1205,6 +1194,8 @@ def test_train_stops_after_requested_bounded_actor_steps(monkeypatch: pytest.Mon
         emit_observation_stream=False,
         emit_training_telemetry=False,
         emit_perf_telemetry=False,
+        rollout_overlap_groups=1,
+        stagger_ppo=False,
     )
     trainer = PpoTrainer(cfg)
 
@@ -1356,6 +1347,7 @@ def test_train_records_coarse_resource_metrics(
         emit_observation_stream=False,
         emit_training_telemetry=False,
         emit_perf_telemetry=True,
+        stagger_ppo=False,
     )
     trainer = PpoTrainer(cfg)
 

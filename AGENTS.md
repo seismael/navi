@@ -25,7 +25,6 @@ Navi is a modular ecosystem of isolated projects. Each project is a sovereign en
   - `NAVI_ENV_PUB_ADDRESS=tcp://localhost:5559`
   - `NAVI_ENV_REP_ADDRESS=tcp://localhost:5560`
   - `NAVI_ACTOR_PUB_ADDRESS=tcp://localhost:5557`
-  - `NAVI_ACTOR_CONTROL_ADDRESS=tcp://localhost:5561`
 - **Resolution Defaults:**
   - `NAVI_AZIMUTH_BINS=256`
   - `NAVI_ELEVATION_BINS=48` (High-fidelity navigation)
@@ -39,9 +38,8 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 
 ### 2.3 Fleet Size Standard
 - **Standard Fleet:** Training scripts and backends default to **4 parallel actors** for optimal hardware utilization.
-- **Dashboard Throughput Default:** The Auditor Dashboard defaults to **actor 0** ingestion/rendering for maximum throughput.
-- **Dynamic Discovery Mode:** Optional selector mode MAY enable dynamic actor discovery/switching for diagnostics.
-- **Selected-Actor Viewer Rule:** Dashboard actor discovery SHOULD come from a lightweight roster query or explicit selector-control surface rather than continuous rich all-actor observation publication. Live dashboard-grade observations and per-actor training detail MUST stay scoped to the selected actor on the canonical path.
+- **Dashboard Throughput Default:** The Auditor Dashboard always displays **actor 0** observations with zero selector overhead and shows the active actor count in the status bar.
+- **Actor Display Rule:** The dashboard hardcodes actor 0 display. No selector mechanism, control endpoint, or roster query is required. Live dashboard-grade observations MUST stay scoped to actor 0 on the canonical path.
 - **Canonical Training Corpus Default:** When the user does not explicitly request a scene, manifest, or subset, canonical training MUST use the full discovered dataset corpus rather than a single sample scene.
 - **Canonical Bootstrap Dataset Default:** When bootstrap downloads are requested without an explicit dataset override, the canonical source refresh MUST fetch both the public Habitat test scenes and the public ReplicaCAD stage set so default training is not limited to the 3-scene test bundle.
 - **Canonical Observation Default:** All production-facing CLI commands, wrappers, benchmarks, and training surfaces MUST default to the full-resolution `256x48` observation contract. Retired `128x24` defaults are forbidden.
@@ -162,8 +160,17 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - Canonical `torch-sdf` ray inputs use contiguous CUDA `float32` tensors shaped `[batch, rays, 3]`; canonical outputs use preallocated CUDA tensors shaped `[batch, rays]`.
 - Long-running CUDA extension calls MUST release the Python GIL while the kernel is executing.
 - Canonical environment and actor runtimes MUST keep tensor-native observation and action seams available so Python `DistanceMatrix` and `Action` materialization is optional for diagnostics, telemetry, and passive viewers only.
+- Canonical hot-path `cast_rays()` calls MUST use `skip_direction_validation=True` when ray directions are mathematically guaranteed normalized (e.g. yaw-rotated unit vectors) to eliminate GPU→CPU synchronization barriers; probe and inspection calls MUST retain full validation.
 - Low-level `torch-sdf` cache removals or redesigns MUST be justified by reproduced current-branch evidence and benchmarked against the canonical trainer or `bench-sdfdag` surface before promotion.
 - Low-level DAG layout, leaf payload packing, cache assumptions, and related storage changes MAY be documented, but they do not become stable architectural guarantees until end-to-end benchmark wins are proven on the canonical trainer.
+
+### 3.1.2 GPU Compute Utilization Standard (Mar 2026)
+- On the active MX150 (`sm_61`), GPU compute utilization is structurally limited by eager PyTorch dispatcher overhead; each tensor operation dispatches a separate CUDA kernel with ~10-100μs Python-side idle gap between launches.
+- `torch.compile` (requires `sm_70+`) is the highest-ROI path to GPU utilization improvement; it fuses multiple PyTorch operations into single kernels, eliminating dispatcher gaps.
+- CUDA graph capture of the full environment step path is NOT FEASIBLE due to data-dependent control flow (`nonzero()`, `.item()`, dynamic allocation, tensor-dependent loop bounds, advanced indexing).
+- The Mamba2 SSD temporal core dispatches ~55-60 CUDA kernels per forward pass versus GRU's 2-4 (cuDNN fused); this is the largest single contributor to Mamba2's throughput disadvantage and cannot be fixed without hardware-fused `mamba-ssm` Triton kernels (not available on Windows).
+- PPO/rollout double-buffer overlap (running environment steps during PPO backward passes) would eliminate ~1000ms of GPU idle per PPO window but requires complex architecture work not yet implemented.
+- `rollout_overlap_groups` (`ActorConfig`) enables multi-group pipelined rollout for larger GPUs; default `1` is optimal for MX150's 3 SMs. 2-group overlap causes ~47% throughput regression on MX150 due to SM starvation.
 
 ### 3.2 Vision Transformer Optimization
 - `RayViTEncoder` MUST cache fixed spherical positional encodings.
@@ -227,8 +234,7 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - During canonical training, the Dashboard MUST run in passive actor-only mode: subscribe to the actor PUB stream only and MUST NOT open environment REP/manual-step control paths or depend on environment PUB availability.
 - Dashboard heartbeats during optimizer windows MUST reuse the same passive observation cadence policy as live observation publication instead of falling back to a slower hidden rate.
 - Observer-side slicing, half-sphere extraction, palette choice, labels, or other presentation transforms MUST remain inside the Auditor domain and MUST NOT be implemented by changing environment or actor contracts.
-- **Default Selector:** UI defaults to selector-enabled actor discovery so operators can switch the observed actor without relaunching the dashboard.
-- **Initial Focus:** The dashboard MAY still start focused on actor `0`, but live operator switching MUST be available by default.
+- **Actor 0 Display:** The dashboard always displays actor 0 observations and shows the active actor count in the status bar.
 - **Actor View Geometry:** The primary actor panel MUST render a direct centered `180` degree half-sphere slice from the canonical `256x48` spherical observation, which is an exact `128x48` forward hemisphere before viewport scaling.
 - **No Dashboard Range Cap:** The primary actor panel MUST colorize the published distance matrix directly and MUST NOT overlay dashboard-specific range caps such as fixed `RANGE`, `CTR`, or `HFOV` meter labels.
 - **Heading Guides:** The actor heading remains the center column; LEFT and RIGHT labels MUST sit on the horizontal midline of the actor panel rather than the bottom edge.
