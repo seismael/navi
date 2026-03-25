@@ -42,10 +42,10 @@ _COLLISION_PENALTY: float = -2.0
 _MAX_STEPS_PER_EPISODE: int = 2_000
 _SCENE_EPISODES_PER_SCENE: int = 16
 _OBSTACLE_CLEARANCE_REWARD_SCALE: float = 0.6
-_OBSTACLE_CLEARANCE_WINDOW: float = 1.5
+_OBSTACLE_CLEARANCE_WINDOW: float = 3.0
 _STARVATION_RATIO_THRESHOLD: float = 0.8
 _STARVATION_PENALTY_SCALE: float = 1.5
-_PROXIMITY_DISTANCE_THRESHOLD: float = 1.0
+_PROXIMITY_DISTANCE_THRESHOLD: float = 2.0
 _PROXIMITY_PENALTY_SCALE: float = 0.8
 _STRUCTURE_BAND_MIN_DISTANCE: float = 1.5
 _STRUCTURE_BAND_MAX_DISTANCE: float = 30.0
@@ -488,6 +488,8 @@ def _reward_components_tensor(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     progress_rewards = torch.linalg.vector_norm(current_positions - previous_positions, dim=-1)
     progress_rewards = progress_rewards * progress_reward_scale
+    # Discount progress near obstacles: approaching walls yields diminishing reward.
+    progress_rewards = progress_rewards * (1.0 - proximity_ratios.clamp(min=0.0, max=1.0))
     clearance_rewards = torch.zeros_like(current_clearances)
     if obstacle_clearance_window > 0.0:
         within_window_mask = (previous_clearances <= obstacle_clearance_window) | (
@@ -520,7 +522,9 @@ def _reward_components_tensor(
     inspection_rewards = (activation >= inspection_activation_threshold).float()
     inspection_rewards = inspection_rewards * gain_deltas.clamp(min=-1.0, max=1.0)
     inspection_rewards = inspection_rewards * inspection_reward_scale
-    collision_penalties = collisions.float() * collision_penalty
+    # Velocity-scale collision penalty: fast crashes hurt more than gentle grazing.
+    speed_norm = progress_rewards / max(progress_reward_scale, 1e-6)
+    collision_penalties = collisions.float() * collision_penalty * (1.0 + speed_norm)
     components = torch.stack(
         [
             exploration_rewards,
@@ -795,7 +799,7 @@ class SdfDagBackend(SimulatorBackend):
         self._prev_angular_vels = self._torch.zeros(
             (self._n_actors, 3), device=self._device, dtype=self._torch.float32
         )
-        self._smoothing = 0.3
+        self._smoothing = 0.15
         self._dt = config.physics_dt
         self._speed_fwd = config.drone_max_speed
         self._speed_vert = config.drone_climb_rate
@@ -1959,6 +1963,9 @@ class SdfDagBackend(SimulatorBackend):
         # Normalize: 0-6 unvisited neighbors → 0-1 range
         frontier_bonus = (neighbor_unvisited / 6.0) * _FRONTIER_BONUS_SCALE
         exploration_rewards = exploration_rewards + frontier_bonus
+        # Clearance-gate exploration: exploring into tight spaces yields less reward.
+        clearance_gate = current_clearances.clamp(min=0.0, max=1.0)
+        exploration_rewards = exploration_rewards * clearance_gate
         prev_struct = self._prev_structure_band_ratios[actor_indices]
         prev_fwd = self._prev_forward_structure_ratios[actor_indices]
         impl = getattr(self, "_reward_components_compiled", _reward_components_tensor)

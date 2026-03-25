@@ -357,6 +357,59 @@ That split is intentional:
 - environment owns geometry-derived shaping directly tied to observations
 - actor owns latent novelty and memory-derived shaping
 
+### 12.1 Environment-Side Components (9 terms)
+
+The environment reward engine computes nine tensor components per step:
+
+1. **Exploration reward** — decays with spatial visit count; includes heading
+   novelty and frontier adjacency bonuses.
+2. **Progress reward** — proportional to displacement, discounted by proximity
+   ratio so approaching walls yields diminishing credit.
+3. **Clearance-delta reward** — positive when the actor increases free space
+   while within the obstacle clearance window (`3.0 m`).
+4. **Starvation penalty** — fires when horizon-saturated rays dominate the
+   spherical observation.
+5. **Proximity penalty** — scales with the fraction of near-field valid hits
+   below the proximity threshold (`2.0 m`).
+6. **Structure-band reward** — rewards stable mid-range geometry visibility.
+7. **Forward-structure reward** — rewards informative geometry in the forward
+   sector.
+8. **Inspection reward** — rewards orientation changes that gain structure
+   information.
+9. **Collision penalty** — velocity-scaled: `penalty * (1 + speed_norm)` so
+   fast crashes are punished more severely than gentle grazing.
+
+All terms are batched CUDA tensors derived from the existing spherical
+observation. They do not require a second sensing pipeline.
+
+Exploration rewards are additionally clearance-gated: rewards are multiplied by
+`clamp(current_clearance, 0, 1)` so exploring into tight spaces yields
+diminishing exploration credit.
+
+### 12.2 Actor-Side Components (5 terms)
+
+The actor's `RewardShaper` adds:
+
+1. **Existential tax** — constant per-step cost (`-0.02`).
+2. **Velocity reward** — disabled by default (`weight=0.0`) to remove forward
+   approach bias near obstacles.
+3. **Intrinsic novelty** — RND prediction-error signal, annealed over training.
+4. **Loop penalty** — cosine-similarity detection against episodic memory.
+5. **Loop temporal decay** — exponential half-life weighting on loop detection.
+
+### 12.3 Action Space
+
+The actor reasons in 4-DOF continuous form:
+
+- `forward` — forward/backward translation
+- `vertical` — up/down translation
+- `lateral` — left/right strafe
+- `yaw` — horizontal rotation
+
+This covers all six movement directions (forward, backward, up, down, left,
+right) plus heading control through yaw. Pitch and roll are intentionally
+excluded to keep the action space simple and the observation contract stable.
+
 ## 13. Canonical PPO Runtime
 
 **Module:** `training/ppo_trainer.py`

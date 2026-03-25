@@ -311,7 +311,7 @@ def train(
     # Reward shaping
     collision_penalty: float = typer.Option(0.0, help="Collision termination penalty"),
     existential_tax: float = typer.Option(-0.02, help="Per-step existence cost"),
-    velocity_weight: float = typer.Option(0.1, help="Forward-velocity heuristic weight"),
+    velocity_weight: float = typer.Option(0.0, help="Forward-velocity heuristic weight"),
     # RND curiosity
     intrinsic_coeff_init: float = typer.Option(1.0, help="Initial RND intrinsic coefficient"),
     intrinsic_coeff_final: float = typer.Option(0.01, help="Final RND intrinsic coefficient"),

@@ -50,7 +50,7 @@ def test_obstacle_clearance_reward_is_positive_when_moving_away_near_geometry() 
     reward = _obstacle_clearance_reward(
         0.2,
         0.8,
-        proximity_window=1.5,
+        proximity_window=3.0,
         reward_scale=0.6,
     )
 
@@ -59,9 +59,9 @@ def test_obstacle_clearance_reward_is_positive_when_moving_away_near_geometry() 
 
 def test_obstacle_clearance_reward_is_zero_when_both_clearances_are_far() -> None:
     reward = _obstacle_clearance_reward(
-        2.0,
-        2.4,
-        proximity_window=1.5,
+        4.0,
+        4.4,
+        proximity_window=3.0,
         reward_scale=0.6,
     )
 

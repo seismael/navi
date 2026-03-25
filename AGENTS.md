@@ -209,6 +209,11 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **No Collision Death:** Simulation backends MUST NOT trigger `done=True` on collision during training.
 - **Continuous Learning:** Agents must learn to "escape" or "fly away" from geometry through continuous per-step negative rewards.
 - **Escape Incentive:** Canonical environment reward MUST provide a positive shaping signal when an actor increases obstacle clearance while near geometry so recovery behavior is learned in-scene instead of via reset churn.
+- **Proximity-Discounted Progress:** Progress reward MUST be discounted by proximity ratio so approaching walls yields diminishing forward credit instead of rewarding unsafe approaches.
+- **Velocity-Scaled Collision:** Collision penalty MUST scale with movement speed so fast crashes are punished more severely than gentle grazing, creating a natural speed-awareness incentive.
+- **Clearance-Gated Exploration:** Exploration rewards MUST be gated by current clearance so pushing into tight geometry yields diminishing exploration credit instead of rewarding wall-hugging.
+- **Forward Velocity Bias Elimination:** Actor-side forward velocity reward weight MUST default to `0.0` so reward shaping does not create an inherent approach bias toward obstacles.
+- **Conservative Speed Default:** Drone max speed MUST default to `5.0 m/s` or less so the proximity speed limiter has adequate reaction time before geometry contact.
 - **Information Foraging Incentive:** Canonical environment reward MUST penalize overly blind horizon-saturated views and near-field wall-hugging using starvation/proximity ratios derived from the already-produced spherical observation.
 - **Structure Seeking Incentive:** Canonical environment reward MUST positively value stable mid-range structure visibility and reorientation toward informative geometry so agents prefer navigable interiors over empty void-facing views.
 - **Inspection Incentive:** Canonical reward MAY positively score controlled look-around only when the spherical observation gains structure information; blind spinning in empty space MUST NOT become rewarding.

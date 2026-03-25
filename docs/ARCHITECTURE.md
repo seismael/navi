@@ -222,8 +222,18 @@ Architectural consequence:
 Canonical training is not reset-first. It is persistence-first.
 
 - collisions do not end training episodes
-- invalid motion is reverted and penalized
-- actors remain in scene and are encouraged to recover
+- invalid motion is reverted and penalized with a velocity-scaled collision
+  penalty (fast crashes hurt more than gentle grazing)
+- progress reward is proximity-discounted so approaching walls yields
+  diminishing forward credit
+- exploration rewards are clearance-gated so pushing into tight spaces yields
+  diminishing exploration credit
+- actors remain in scene and are encouraged to recover through positive
+  clearance-delta reward
+- actor-side forward velocity bonus is disabled by default to prevent approach
+  bias near obstacles
+- drone max speed defaults to `5.0 m/s` with responsive velocity smoothing
+  so the proximity speed limiter has adequate reaction time
 - scene rotation is coarse and throughput-aware, not trigger-happy
 
 This is one of the most important behavioral architecture choices in the repo.

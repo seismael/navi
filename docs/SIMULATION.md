@@ -144,20 +144,62 @@ Canonical training keeps actors in-scene and learning:
 - invalid motion is reverted and penalized
 - hard truncation defaults to `2000` steps
 - scene rotation defaults to `16` completed episodes per scene across the fleet
+- maximum drone speed defaults to `5.0 m/s` so the proximity speed limiter
+  has enough reaction time before geometry contact
+- velocity smoothing defaults to `0.15` (fast-tracking) for responsive
+  obstacle avoidance maneuvers
 
 ### 5.4 Shaping Policy
 
-The environment reward seam now includes:
+The environment reward engine combines nine tensor-computed components per step.
+All terms are derived from already-produced batched depth and validity data and
+do not require a second sensing pipeline.
 
-- positive clearance-delta reward when an actor increases free space near geometry
+**Navigation and progress:**
+
+- spatial exploration reward decaying with visit count, heading novelty, and
+  frontier adjacency bonuses
+- proximity-discounted progress reward: forward displacement is scaled by
+  `(1 - proximity_ratio)` so approaching walls yields diminishing progress
+  credit instead of a flat distance reward
+
+**Collision avoidance (March 2026 revision):**
+
+- velocity-scaled collision penalty: fast crashes incur `penalty * (1 + speed)`
+  so high-speed wall contact is punished more severely than gentle grazing
+- positive clearance-delta reward when an actor increases free space while
+  within the obstacle clearance window (default `3.0 m`)
+- proximity penalty scaling with the fraction of near-field valid hits below
+  the proximity threshold (default `2.0 m`)
+- clearance-gated exploration: exploration rewards are multiplied by
+  `clamp(current_clearance, 0, 1)` so pushing into tight geometry yields
+  diminishing exploration credit
+
+**Observation-quality shaping:**
+
 - starvation penalty when horizon-saturated observations dominate the sphere
-- proximity penalty when very near valid hits dominate the sphere
 - positive structure-band reward when stable mid-range geometry stays visible
-- positive forward-structure reward when informative geometry remains in the forward sector
-- inspection reward when turning or repositioning reveals more usable structure instead of less
+- positive forward-structure reward when informative geometry remains in the
+  forward sector
+- inspection reward when turning or repositioning reveals more usable structure
+  instead of less
 
-These terms are derived from already-produced batched depth and validity data.
-They do not require a second sensing pipeline.
+### 5.5 Canonical Shaping Parameters (March 2026)
+
+| Parameter | Default | Env Var | Purpose |
+|---|---|---|---|
+| `proximity_distance_threshold` | `2.0` m | `NAVI_PROXIMITY_DISTANCE_THRESHOLD` | Near-field classification radius |
+| `obstacle_clearance_window` | `3.0` m | `NAVI_OBSTACLE_CLEARANCE_WINDOW` | Escape incentive activation radius |
+| `drone_max_speed` | `5.0` m/s | — | Maximum translation speed |
+| `collision_penalty` | `-2.0` | — | Base collision penalty (velocity-scaled) |
+| `progress_reward_scale` | `0.8` | — | Displacement reward scale (proximity-discounted) |
+| `exploration_reward` | `0.3` | — | Base cell-visit exploration reward |
+| `starvation_penalty_scale` | `1.5` | `NAVI_STARVATION_PENALTY_SCALE` | Horizon saturation penalty scale |
+| `proximity_penalty_scale` | `0.8` | `NAVI_PROXIMITY_PENALTY_SCALE` | Near-field penalty scale |
+| `structure_band_reward_scale` | `0.35` | — | Mid-range geometry visibility reward |
+| `forward_structure_reward_scale` | `0.2` | — | Forward-sector geometry reward |
+| `inspection_reward_scale` | `0.25` | — | Structure-gaining look-around reward |
+| `obstacle_clearance_reward_scale` | `0.6` | `NAVI_OBSTACLE_CLEARANCE_REWARD_SCALE` | Clearance delta reward scale |
 
 ## 6. External Data Boundary
 

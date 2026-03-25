@@ -90,7 +90,7 @@ class ActorConfig(BaseSettings):
     memory_exclusion_window: int = 50
     collision_penalty: float = 0.0
     existential_tax: float = -0.02
-    velocity_weight: float = 0.1
+    velocity_weight: float = 0.0
     intrinsic_coeff_init: float = 1.0
     intrinsic_coeff_final: float = 0.01
     intrinsic_anneal_steps: int = 500_000

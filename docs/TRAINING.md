@@ -339,9 +339,25 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - `refresh-scene-corpus.ps1` stages downloads and removes transient source assets after a successful corpus promotion
 - the promoted live `gmdag_manifest.json` is compiled-only metadata: `source_path` is rewritten to the live `.gmdag` asset path after transient source cleanup
 - canonical scene-pool training keeps actors on each scene for multiple completed episodes before rotation; the default budget is `16` completed episodes per scene across the fleet
-- collision remains non-terminal in canonical training, with negative collision reward plus positive reward for increasing obstacle clearance after near-contact
-- canonical environment shaping also penalizes starvation-heavy views and persistent near-field wall-hugging using ratios derived from the current spherical observation
-- canonical geometry-foraging shaping positively values mid-range structure visibility, forward-sector structure reacquisition, and controlled inspection turns that reveal more geometry instead of less
+- collision remains non-terminal in canonical training; collision penalty is
+  velocity-scaled (`penalty * (1 + speed)`) so fast crashes are punished more
+  severely than gentle grazing, plus positive clearance-delta reward for
+  increasing obstacle clearance after near-contact
+- progress reward is proximity-discounted: forward displacement is scaled by
+  `(1 - proximity_ratio)` so approaching walls yields diminishing credit
+- exploration rewards are clearance-gated: multiplied by
+  `clamp(clearance, 0, 1)` so exploring into tight spaces yields less credit
+- actor-side forward velocity bonus is disabled by default (`velocity_weight=0.0`)
+  to remove approach bias near obstacles
+- canonical environment shaping also penalizes starvation-heavy views and
+  persistent near-field wall-hugging using ratios derived from the current
+  spherical observation
+- canonical geometry-foraging shaping positively values mid-range structure
+  visibility, forward-sector structure reacquisition, and controlled inspection
+  turns that reveal more geometry instead of less
+- canonical drone max speed defaults to `5.0 m/s` with velocity smoothing `0.15`
+  for responsive avoidance; proximity speed limiter engages within `2.0 m` and
+  clearance escape incentive extends to `3.0 m`
 - use explicit overrides only for deliberate experiments; temporal-core comparisons should change only `TemporalCore` or `--temporal-core` while holding all other canonical settings fixed
 - resolution-scaling comparisons should change only `AzimuthxElevation` while holding actor count, temporal core, rollout length, minibatch size, and PPO epochs fixed
 - dashboard mode detection stays on low-volume telemetry to avoid rollout stalls

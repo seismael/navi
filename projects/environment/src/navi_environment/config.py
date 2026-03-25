@@ -93,7 +93,7 @@ class EnvironmentConfig(BaseSettings):
     )
     physics_dt: float = Field(default=0.02, gt=0.0)
     steps_per_decision: int = Field(default=1, gt=0)
-    drone_max_speed: float = Field(default=10.0, gt=0.0)
+    drone_max_speed: float = Field(default=5.0, gt=0.0)
     drone_climb_rate: float = Field(default=2.0, gt=0.0)
     drone_strafe_speed: float = Field(default=3.0, gt=0.0)
     drone_yaw_rate: float = Field(default=3.0, gt=0.0)
@@ -120,7 +120,7 @@ class EnvironmentConfig(BaseSettings):
         validation_alias="NAVI_OBSTACLE_CLEARANCE_REWARD_SCALE",
     )
     obstacle_clearance_window: float = Field(
-        default=1.5,
+        default=3.0,
         validation_alias="NAVI_OBSTACLE_CLEARANCE_WINDOW",
         gt=0.0,
     )
@@ -133,7 +133,7 @@ class EnvironmentConfig(BaseSettings):
         validation_alias="NAVI_STARVATION_PENALTY_SCALE",
     )
     proximity_distance_threshold: float = Field(
-        default=1.0,
+        default=2.0,
         validation_alias="NAVI_PROXIMITY_DISTANCE_THRESHOLD",
         gt=0.0,
     )
