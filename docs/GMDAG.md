@@ -5,6 +5,23 @@
 
 ## 1. The Paradigm Shift: Why `.gmdag`?
 
+### 1.1 Architectural Philosophy
+
+The `.gmdag` format does not invent new spatial mathematics.  Signed Distance
+Fields, Sparse Voxel Octrees, and bitwise logic are well-established
+techniques.  What `.gmdag` achieves is a **novel architectural alignment** of
+these existing algorithms — perfectly moulding them to the physical execution
+model of NVIDIA CUDA hardware (SIMT warps, scalar integer ALUs,
+`__shared__`/L2 cache hierarchy) and to the ingestion requirements of modern
+sequence models (Mamba-2 SSD, GRU) and Vision Transformers (RayViT).
+
+The result is a format that is not merely fast, but **hardware-native**: every
+bit of the 64-bit node word maps to a single-cycle GPU instruction, and the
+kernel output writes directly into a PyTorch CUDA tensor with zero intermediate
+representation.
+
+### 1.2 The Problem With Legacy Formats
+
 In standard Deep Reinforcement Learning (RL) and embodied AI research, spatial
 environments are represented using legacy formats borrowed from the video game
 and VFX industries: **polygon meshes (.obj, .gltf)**, **dense voxel grids**, or
@@ -13,32 +30,43 @@ and VFX industries: **polygon meshes (.obj, .gltf)**, **dense voxel grids**, or
 These formats are structurally hostile to modern GPU hardware when scaled to
 thousands of concurrent agents:
 
-* **Meshes + BVH (e.g. Habitat, MuJoCo):** Raycasting requires testing
-  intersections against thousands of floating-point triangles.  This causes
-  severe **CUDA warp divergence** (threads within a warp branching in different
-  directions) and extreme VRAM bandwidth starvation.
+* **Meshes + BVH (e.g. Habitat, MuJoCo):** Physics engines wrap polygonal
+  meshes in Bounding Volume Hierarchies.  Raycasting requires floating-point
+  line-plane intersection tests against thousands of triangles.  Because RL
+  agents cast rays spherically in 360°, neighbouring threads within a 32-thread
+  CUDA **warp** hit different polygons at wildly different depths, forcing the
+  Streaming Multiprocessor (SM) to serialise divergent floating-point paths.
+  The GPU sits mostly idle while divergent threads complete complex math —
+  classic **CUDA warp divergence**.
 * **Dense Voxel Grids:** Provide $O(1)$ lookup time, but memory scales cubically
-  $O(N^3)$.  A high-resolution $1024^3$ grid consumes gigabytes of VRAM for a
-  single room, making multi-environment or massive-scale memory pinning
-  impossible.
-* **Standard Octrees:** Save memory, but require "pointer chasing."  A ray must
-  navigate down pointers, fetching memory unpredictably, which destroys the
-  GPU's L1/L2 cache hit rate.
+  $O(N^3)$.  A high-resolution $1024^3$ grid requires roughly **4 GB of VRAM**
+  for a single room.  Loading 10 diverse training scenes would consume 40 GB
+  just for maps, leaving no room for actors, replay buffers, or the neural
+  network — a **VRAM explosion** that makes multi-scene corpus training
+  impossible on consumer hardware.
+* **Standard Octrees:** Save memory, but require "pointer chasing" and lack
+  deduplication.  A flat wall generates thousands of identical sub-trees.  When
+  millions of rays traverse the tree, unpredictable memory jumps destroy the
+  GPU's L1/L2 cache hit rate and the recursive traversal stack spills into
+  slow, thread-local VRAM.
 
-### The `.gmdag` Solution
+### 1.3 The `.gmdag` Solution
 
 The `.gmdag` format is a **hardware-aligned, bit-packed Directed Acyclic
 Graph**.  It is not a visual format; it is a *mathematical spatial index* built
-explicitly for CUDA integer ALU and bitwise operations.  It achieves the memory
-efficiency of a sparse tree, the near-$O(1)$ lookup speed of a dense grid, and
-completely eliminates physics engine CPU overhead.
+explicitly for CUDA scalar integer ALU and bitwise operations.  It achieves the
+memory efficiency of a sparse tree, the near-$O(1)$ lookup speed of a dense
+grid, and completely eliminates physics engine CPU overhead.
 
 The entire 3D world is collapsed into a single contiguous array of 64-bit
-integers — no structs, no pointers, no floating-point vertex coordinates at
-runtime.  The GPU decodes spatial relationships using single-cycle bitwise
-shifts and the hardware population-count instruction.  This design means the
-simulation is bounded **only by GPU memory bandwidth**, not CPU throughput or
-polygon complexity.
+integers — no padded structs, no heap pointers, no floating-point vertex
+coordinates at runtime.  This enforces perfectly coalesced VRAM reads: every
+thread in a warp fetches a naturally aligned 8-byte word, saturating the memory
+bus with zero wasted bandwidth.  The GPU decodes spatial relationships using
+single-cycle bitwise shifts and the hardware population-count instruction.
+
+This design means the simulation is bounded **only by GPU memory bandwidth**,
+not CPU throughput or polygon complexity.
 
 ---
 
@@ -464,9 +492,13 @@ branches.
 **The `.gmdag` advantage.** `.gmdag` contains zero polygons and zero
 floating-point intersection math at runtime.  Geometry is pre-calculated into a
 spatial SDF grid at compile time.  The GPU uses single-cycle integer bitwise
-operations (`__popc()`, bit-shifting) to step through space.  A bitwise shift
-executes in one GPU clock cycle; a floating-point polygon intersection takes
-dozens of cycles with unpredictable branching.
+operations (`__popc()`, bit-shifting) to step through space.  Integer bitwise
+shifts execute in 1–2 clock cycles with **deterministic latency** — there is no
+data-dependent branching, so all 32 threads in a warp retire together.  A
+floating-point polygon intersection, by contrast, takes dozens of cycles with
+unpredictable branching that serialises the warp.  By eliminating FP intersection
+math entirely, `.gmdag` converts what was a divergence-dominated workload into a
+uniform, throughput-optimal SIMT pattern.
 
 #### 9.2.2 `.gmdag` vs. Dense Voxel Grids (3D Tensors)
 
@@ -551,13 +583,30 @@ Combined with the void cache (§7.3) that remembers the last empty octant
 bounding box, consecutive queries inside the same void region return instantly
 without even entering the DAG traversal.
 
-### 9.4 Complete CPU Decoupling
+### 9.4 Complete CPU Decoupling & The Zero-Copy Tensor Boundary
 
 Traditional simulators require a Python API to query a C++ physics engine for
-collisions, triggering a PCIe data transfer that stalls the pipeline.  `.gmdag`
-resides entirely in PyTorch's `cuda` memory space.  The neural network and the
-physics engine execute on the GPU asynchronously; the CPU is needed only for
-orchestration, never for geometry.
+collisions, copying data back and forth across the PCIe bus and halting the CPU
+pipeline at every step.
+
+The `.gmdag` runtime severs this dependency entirely.  The DAG resides in
+PyTorch's `cuda` memory space from load time onward.  The stackless CUDA kernel
+(`torch-sdf`) writes raycast distances directly into a preallocated PyTorch
+tensor — the `DistanceMatrix` observation contract — in VRAM.  No Python
+callback, no host-device copy, no serialisation.
+
+This creates a **zero-copy pipeline** from physics to policy:
+
+```
+.gmdag (VRAM) → sphere_trace_kernel → DistanceMatrix tensor (VRAM)
+    → RayViTEncoder → TemporalCore (Mamba-2/GRU) → ActorCriticHeads
+```
+
+The output of the physics engine is mathematically native to the input layer of
+the Vision Transformer.  The CPU is needed only for orchestration (step
+counting, episode management), never for geometry or observation transport.  The
+neural network and the physics engine execute asynchronously on the GPU,
+sharing the same CUDA stream.
 
 ---
 
