@@ -167,13 +167,18 @@ def _explained_learner_device_stage_ms_total(metrics: PpoMetrics) -> float:
 
 
 def _enqueue_telemetry(
-    telemetry_queue: queue.Queue[tuple[str, bytes, str] | None] | None,
+    telemetry_queue: queue.Queue[tuple[str, bytes | Callable[[], bytes], str] | None] | None,
     *,
     topic: str,
-    payload: bytes,
+    payload: bytes | Callable[[], bytes],
     label: str,
 ) -> None:
-    """Best-effort async telemetry enqueue."""
+    """Best-effort async telemetry enqueue.
+
+    *payload* may be pre-serialized ``bytes`` or a zero-arg callable that produces
+    bytes.  Callables are resolved lazily by the telemetry worker thread so
+    serialization cost does not block the training hot path.
+    """
     if telemetry_queue is None:
         return
     try:
@@ -193,6 +198,23 @@ def _should_save_checkpoint(
     boundaries do not align exactly with ``checkpoint_every``.
     """
     return checkpoint_every > 0 and (step_id - last_checkpoint_step) >= checkpoint_every
+
+
+def _cpu_state_dict(state: dict[str, Any]) -> dict[str, Any]:
+    """Recursively move all tensors in an optimizer state dict to CPU."""
+    out: dict[str, Any] = {}
+    for k, v in state.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v.cpu()
+        elif isinstance(v, dict):
+            out[k] = _cpu_state_dict(v)
+        elif isinstance(v, list):
+            out[k] = [
+                x.cpu() if isinstance(x, torch.Tensor) else x for x in v
+            ]
+        else:
+            out[k] = v
+    return out
 
 
 @dataclass(frozen=True)
@@ -493,10 +515,13 @@ class PpoTrainer:
         self._last_opt_metrics: PpoMetrics | None = None
 
         # Phase 11: Async Telemetry
-        self._telemetry_queue: queue.Queue[tuple[str, bytes, str] | None] = queue.Queue(
+        self._telemetry_queue: queue.Queue[
+            tuple[str, bytes | Callable[[], bytes], str] | None
+        ] = queue.Queue(
             maxsize=1024
         )
         self._telemetry_thread: threading.Thread | None = None
+        self._checkpoint_thread: threading.Thread | None = None
         self._rollout_group_count = max(1, min(self._config.rollout_overlap_groups, self._n_actors))
         self._rollout_group_indices = tuple(
             group.contiguous()
@@ -556,9 +581,9 @@ class PpoTrainer:
 
             topic, payload, label = item
             try:
-                # Use NOBLOCK to ensure we never stall the queue consumer
-                # (though here the consumer IS the thread, so we're protecting the queue)
-                pub.send_multipart([topic.encode("utf-8"), payload], flags=zmq.NOBLOCK)
+                # Resolve lazy serialization callables
+                raw = payload() if callable(payload) else payload
+                pub.send_multipart([topic.encode("utf-8"), raw], flags=zmq.NOBLOCK)
             except Exception as exc:
                 _LOGGER.warning("Telemetry send failure (%s): %s", label, exc)
             finally:
@@ -939,6 +964,10 @@ class PpoTrainer:
     def stop(self) -> None:
         """Close trainer transport resources."""
         started_at = time.perf_counter()
+        # Wait for any pending async checkpoint
+        if self._checkpoint_thread is not None:
+            self._checkpoint_thread.join(timeout=10.0)
+            self._checkpoint_thread = None
         # Stop telemetry thread first
         if self._telemetry_thread:
             self._telemetry_queue.put(None)
@@ -970,38 +999,71 @@ class PpoTrainer:
             self._metrics_sink.close()
 
     def save_training_state(self, path: str | Path) -> None:
-        """Save complete training state."""
+        """Save complete training state asynchronously.
+
+        Copies state dicts to CPU on the main thread (fast), then writes
+        to disk in a background thread to avoid blocking the training loop.
+        """
         started_at = time.perf_counter()
         save_path = Path(path)
         _LOGGER.info("Saving training checkpoint to %s", save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        state = {
+
+        # Wait for any previous async checkpoint to complete
+        if self._checkpoint_thread is not None:
+            self._checkpoint_thread.join()
+            self._checkpoint_thread = None
+
+        # Snapshot state to CPU-resident dicts (fast H2D copy)
+        state: dict[str, Any] = {
             "version": 2,
             "run_id": self._run_context.run_id,
-            "policy_state_dict": self._learner_policy.state_dict(),
-            "rnd_state_dict": self._rnd.state_dict(),
+            "policy_state_dict": {
+                k: v.cpu() for k, v in self._learner_policy.state_dict().items()
+            },
+            "rnd_state_dict": {k: v.cpu() for k, v in self._rnd.state_dict().items()},
             "reward_shaper_step": self._reward_shaper._global_step,
         }
         if self._learner._optimizer:
-            state["optimizer_state_dict"] = self._learner._optimizer.state_dict()
+            state["optimizer_state_dict"] = _cpu_state_dict(
+                self._learner._optimizer.state_dict()
+            )
         if self._learner._rnd_optimizer:
-            state["rnd_optimizer_state_dict"] = self._learner._rnd_optimizer.state_dict()
-        torch.save(state, save_path)
-        self._emit_metrics_record(
-            "checkpoint",
-            build_phase_metrics_payload(
-                "checkpoint_save",
-                started_at=started_at,
-                step_id=self._total_sim_steps,
-                cuda_device=self._device,
-                include_resources=self._config.attach_resource_snapshots,
-                metadata={
-                    "event": "saved",
-                    "path": str(save_path),
-                    "reward_shaper_step": self._reward_shaper._global_step,
-                },
-            ),
-        )
+            state["rnd_optimizer_state_dict"] = _cpu_state_dict(
+                self._learner._rnd_optimizer.state_dict()
+            )
+        snapshot_ms = (time.perf_counter() - started_at) * 1000
+
+        # Write to disk in background thread
+        def _write() -> None:
+            write_start = time.perf_counter()
+            torch.save(state, save_path)
+            total_ms = (time.perf_counter() - started_at) * 1000
+            write_ms = (time.perf_counter() - write_start) * 1000
+            _LOGGER.info(
+                "Checkpoint written (snapshot=%.1fms write=%.1fms total=%.1fms): %s",
+                snapshot_ms, write_ms, total_ms, save_path,
+            )
+            self._emit_metrics_record(
+                "checkpoint",
+                build_phase_metrics_payload(
+                    "checkpoint_save",
+                    started_at=started_at,
+                    step_id=self._total_sim_steps,
+                    cuda_device=self._device,
+                    include_resources=self._config.attach_resource_snapshots,
+                    metadata={
+                        "event": "saved",
+                        "path": str(save_path),
+                        "reward_shaper_step": self._reward_shaper._global_step,
+                        "snapshot_ms": round(snapshot_ms, 1),
+                        "write_ms": round(write_ms, 1),
+                    },
+                ),
+            )
+
+        self._checkpoint_thread = threading.Thread(target=_write, daemon=True)
+        self._checkpoint_thread.start()
 
     def load_training_state(self, path: str | Path) -> None:
         """Restore training state."""
@@ -1386,10 +1448,11 @@ class PpoTrainer:
             return
         self._last_dashboard_observation = observation
         self._last_dashboard_heartbeat_at = time.perf_counter()
+        # Defer serialize() to the telemetry worker thread
         _enqueue_telemetry(
             self._telemetry_queue,
             topic=TOPIC_DISTANCE_MATRIX,
-            payload=serialize(observation),
+            payload=lambda obs=observation: serialize(obs),  # type: ignore[misc]
             label="observation",
         )
 
@@ -1431,7 +1494,7 @@ class PpoTrainer:
         _enqueue_telemetry(
             self._telemetry_queue,
             topic=TOPIC_DISTANCE_MATRIX,
-            payload=serialize(heartbeat),
+            payload=lambda obs=heartbeat: serialize(obs),  # type: ignore[misc]
             label="dashboard heartbeat",
         )
 

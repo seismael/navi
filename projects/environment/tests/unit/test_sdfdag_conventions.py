@@ -46,6 +46,58 @@ def test_build_spherical_ray_directions_span_up_and_down() -> None:
     np.testing.assert_allclose(down, np.array([0.0, -1.0, 0.0], dtype=np.float32), atol=1e-6)
 
 
+def test_kinematics_forward_matches_ray_forward_at_all_yaws() -> None:
+    """Contract: movement forward and view forward must point the same direction.
+
+    The yaw rotation R_y(θ) applied to local az=0 direction (0, 0, -1) gives
+    world forward (-sin(θ), 0, -cos(θ)).  The kinematics must move the agent
+    in this same direction when the forward action is applied.
+    """
+    for yaw_val in [0.0, math.pi / 4, math.pi / 2, math.pi, 3 * math.pi / 2]:
+        yaw = torch.tensor([yaw_val])
+        # Compute view forward from ray rotation: R_y(yaw) * (0, 0, -1)
+        view_fwd_x = -math.sin(yaw_val)
+        view_fwd_z = -math.cos(yaw_val)
+
+        # Compute kinematic forward by stepping with a pure forward action
+        depth = torch.full((1, 8, 3), 1.0)
+        pos = torch.zeros(1, 3)
+        new_pos, _, _, _ = torch.zeros(1, 3), torch.zeros(1), torch.zeros(1, 3), torch.zeros(1, 3)
+        # Use the same function as the backend
+        from navi_environment.backends.sdfdag_backend import _step_kinematics_tensor
+
+        new_pos, _, _, _ = _step_kinematics_tensor(
+            depth,
+            actions_linear=torch.tensor([[1.0, 0.0, 0.0]]),
+            actions_angular=torch.tensor([[0.0, 0.0, 0.0]]),
+            previous_linear=torch.zeros(1, 3),
+            previous_angular=torch.zeros(1, 3),
+            positions=pos,
+            yaws=yaw,
+            max_distance=30.0,
+            speed_fwd=1.0,
+            speed_vert=0.5,
+            speed_lat=0.5,
+            speed_yaw=1.0,
+            smoothing=0.0,
+            dt=1.0,
+        )
+        kin_fwd_x = float(new_pos[0, 0])
+        kin_fwd_z = float(new_pos[0, 2])
+        kin_norm = math.hypot(kin_fwd_x, kin_fwd_z)
+        if kin_norm < 1e-9:
+            continue
+        kin_fwd_x /= kin_norm
+        kin_fwd_z /= kin_norm
+
+        np.testing.assert_allclose(
+            [kin_fwd_x, kin_fwd_z],
+            [view_fwd_x, view_fwd_z],
+            atol=1e-5,
+            err_msg=f"Kinematics/view mismatch at yaw={yaw_val:.3f}",
+        )
+
+
 def test_obstacle_clearance_reward_is_positive_when_moving_away_near_geometry() -> None:
     reward = _obstacle_clearance_reward(
         0.2,
@@ -70,18 +122,20 @@ def test_obstacle_clearance_reward_is_zero_when_both_clearances_are_far() -> Non
 
 def test_observation_profile_tracks_starvation_and_near_geometry() -> None:
     metric_depth = np.array([[30.0, 0.6], [3.0, 15.0]], dtype=np.float32)
-    valid = np.array([[False, True], [True, True]], dtype=np.bool_)
+    valid = np.array([[True, True], [True, True]], dtype=np.bool_)
 
     starvation_ratio, proximity_ratio, structure_band_ratio, forward_structure_ratio = (
         _observation_profile(
             metric_depth,
             valid,
+            max_distance=20.0,
             proximity_distance_threshold=1.0,
             structure_band_min_distance=1.5,
             structure_band_max_distance=10.0,
         )
     )
 
+    # 30.0 >= 20.0 - 1e-3 → saturated (1 of 4 pixels starved)
     assert math.isclose(starvation_ratio, 0.25)
     assert math.isclose(proximity_ratio, 0.25)
     assert math.isclose(structure_band_ratio, 0.25)
@@ -101,10 +155,13 @@ def test_select_spawn_yaw_rotates_structure_into_forward_sector() -> None:
         structure_band_max_distance=10.0,
     )
 
+    # The yaw rotation maps local az `a` to world az `a - yaw`.
+    # Equivalently, world az `w` appears at local az `w + yaw`.
+    # Rolling the world observation by +shift simulates what the agent sees.
     azimuth_bins = metric_depth.shape[0]
     shift = round((yaw / (2.0 * math.pi)) * azimuth_bins) % azimuth_bins
-    rotated_depth = np.roll(metric_depth, -shift, axis=0)
-    rotated_valid = np.roll(valid, -shift, axis=0)
+    rotated_depth = np.roll(metric_depth, shift, axis=0)
+    rotated_valid = np.roll(valid, shift, axis=0)
     before_forward = _observation_profile(
         metric_depth,
         valid,
@@ -135,6 +192,7 @@ def test_spawn_candidate_score_prefers_structure_over_empty_space() -> None:
     structured_score = _spawn_candidate_score(
         structured_depth,
         structured_valid,
+        max_distance=15.0,
         proximity_distance_threshold=1.0,
         structure_band_min_distance=1.5,
         structure_band_max_distance=10.0,
@@ -142,6 +200,7 @@ def test_spawn_candidate_score_prefers_structure_over_empty_space() -> None:
     empty_score = _spawn_candidate_score(
         empty_depth,
         empty_valid,
+        max_distance=15.0,
         proximity_distance_threshold=1.0,
         structure_band_min_distance=1.5,
         structure_band_max_distance=10.0,
@@ -497,7 +556,7 @@ def test_cast_actor_batch_tensors_passes_environment_horizon() -> None:
         def __init__(self) -> None:
             self.args: tuple[object, ...] | None = None
 
-        def cast_rays(self, *args: object) -> None:
+        def cast_rays(self, *args: object, **kwargs: object) -> None:
             self.args = args
             out_distances = cast("torch.Tensor", args[3])
             out_semantics = cast("torch.Tensor", args[4])
@@ -538,7 +597,7 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
     backend = object.__new__(SdfDagBackend)
 
     class _FakeSdf:
-        def cast_rays(self, *args: object) -> None:
+        def cast_rays(self, *args: object, **kwargs: object) -> None:
             out_distances = cast("torch.Tensor", args[3])
             out_semantics = cast("torch.Tensor", args[4])
             out_distances.copy_(torch.tensor([[5.0, 25.0]], dtype=torch.float32))
@@ -576,14 +635,17 @@ def test_cast_actor_batch_tensors_clamps_and_marks_values_beyond_fixed_horizon()
         [math.log1p(5.0) / math.log1p(10.0), 1.0], dtype=torch.float32
     )
     assert torch.allclose(depth_2d[0, :, 0], expected_depth)
-    assert torch.equal(valid_2d[0, :, 0], torch.tensor([True, False]))
+    # With sensor-validity semantics: both rays are finite → both valid.
+    # The beyond-horizon ray (25.0) is clamped to max_distance (depth=1.0)
+    # but still valid since it is a finite reading.
+    assert torch.equal(valid_2d[0, :, 0], torch.tensor([True, True]))
 
 
 def test_cast_actor_batch_tensors_treats_exact_horizon_as_valid() -> None:
     backend = object.__new__(SdfDagBackend)
 
     class _FakeSdf:
-        def cast_rays(self, *args: object) -> None:
+        def cast_rays(self, *args: object, **kwargs: object) -> None:
             out_distances = cast("torch.Tensor", args[3])
             out_semantics = cast("torch.Tensor", args[4])
             out_distances.copy_(torch.tensor([[10.0]], dtype=torch.float32))
@@ -623,7 +685,7 @@ def test_cast_actor_batch_tensors_clamps_negative_inside_solid_distances_to_zero
     backend = object.__new__(SdfDagBackend)
 
     class _FakeSdf:
-        def cast_rays(self, *args: object) -> None:
+        def cast_rays(self, *args: object, **kwargs: object) -> None:
             out_distances = cast("torch.Tensor", args[3])
             out_semantics = cast("torch.Tensor", args[4])
             out_distances.copy_(torch.tensor([[-0.25]], dtype=torch.float32))
@@ -716,16 +778,20 @@ def test_postprocess_cast_outputs_preserves_oracle_house_profile() -> None:
         )
     )
 
+    # All metric values are finite, so all rays are valid under the sensor-
+    # validity semantics (finite = valid, regardless of distance).
     expected_depth = np.where(
         oracle.valid,
         np.log1p(oracle.depth * 10.0) / np.log1p(10.0),
-        1.0,
+        np.log1p(backend._max_distance) / np.log1p(backend._max_distance),
     ).astype(np.float32)
     np.testing.assert_allclose(depth_batch[0].numpy(), expected_depth, atol=1e-6)
     np.testing.assert_array_equal(semantic_batch[0].numpy(), oracle.semantic)
-    np.testing.assert_array_equal(valid_batch[0].numpy(), oracle.valid)
+    # valid_batch = all True since every ray distance is finite.
+    assert valid_batch[0].all().item()
     assert min_distances.shape == (1,)
-    assert min_distances[0].item() == pytest.approx(float(np.min(metric[oracle.valid])))
+    # min_distances considers all clamped ray distances (min across the grid).
+    assert min_distances[0].item() == pytest.approx(float(np.min(np.clip(metric, 0.0, backend._max_distance))))
 
 
 def test_materialize_step_result_rows_preserves_non_monotonic_env_order() -> None:

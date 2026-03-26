@@ -335,7 +335,11 @@ class MultiTrajectoryBuffer:
         self._invalidate_views()
 
     def compute_returns_and_advantages(self, last_values: Tensor) -> None:
-        """Compute GAE for all buffers using per-actor bootstrap values."""
+        """Compute GAE for all buffers using per-actor bootstrap values.
+
+        Uses vectorized delta computation followed by a minimal-op reverse scan
+        (~2 ops/step instead of ~13) to reduce kernel launch overhead.
+        """
         assert self._batch_rewards is not None
         assert self._batch_values is not None
         assert self._batch_dones is not None
@@ -349,28 +353,30 @@ class MultiTrajectoryBuffer:
         values = self._batch_values[:, :rollout_len].to(device=device, dtype=torch.float32)
         done_flags = self._batch_dones[:, :rollout_len].to(device=device)
         truncated_flags = self._batch_truncateds[:, :rollout_len].to(device=device)
-        advantages = torch.zeros_like(rewards)
-        last_gae = torch.zeros((self._n_actors,), dtype=torch.float32, device=device)
-        prev_value = (
+
+        bootstrap = (
             last_values.detach().to(device=device, dtype=torch.float32).reshape(self._n_actors)
         )
+        not_done = (~done_flags).to(dtype=torch.float32)
         continue_mask = (~done_flags & ~truncated_flags).to(dtype=torch.float32)
-        truncation_mask = (truncated_flags & ~done_flags).to(dtype=torch.float32)
-        done_mask = done_flags.to(dtype=torch.float32)
 
+        # Vectorized next-value construction: [values[:, 1:], bootstrap]
+        next_values = torch.cat(
+            [values[:, 1:], bootstrap.unsqueeze(1)], dim=1
+        )  # (n_actors, rollout_len)
+
+        # Vectorized delta: for done steps next_value contribution is zero
+        deltas = rewards + self._gamma * not_done * next_values - values
+
+        # GAE decay factor: only "continue" steps propagate the advantage
+        decay = continue_mask * (self._gamma * self._gae_lambda)
+
+        # Reverse scan with 2 ops per step (mul + add)
+        advantages = torch.zeros_like(rewards)
+        last_gae = torch.zeros((self._n_actors,), dtype=torch.float32, device=device)
         for t in reversed(range(rollout_len)):
-            reward_t = rewards[:, t]
-            value_t = values[:, t]
-            delta = reward_t + self._gamma * prev_value - value_t
-            terminal_delta = reward_t - value_t
-            continued_gae = delta + self._gamma * self._gae_lambda * last_gae
-            last_gae = (
-                truncation_mask[:, t] * delta
-                + done_mask[:, t] * terminal_delta
-                + continue_mask[:, t] * continued_gae
-            )
+            last_gae = deltas[:, t] + decay[:, t] * last_gae
             advantages[:, t] = last_gae
-            prev_value = value_t
 
         self._ensure_batched_advantage_storage(device)
         assert self._batch_advantages is not None
@@ -432,24 +438,19 @@ class MultiTrajectoryBuffer:
             values = self._batch_values[aid, :rollout_len].to(device=device, dtype=torch.float32)
             done_flags = self._batch_dones[aid, :rollout_len].to(device=device)
             truncated_flags = self._batch_truncateds[aid, :rollout_len].to(device=device)
+            not_done = (~done_flags).to(dtype=torch.float32)
             continue_mask = (~done_flags & ~truncated_flags).to(dtype=torch.float32)
-            truncation_mask = (truncated_flags & ~done_flags).to(dtype=torch.float32)
-            done_mask = done_flags.to(dtype=torch.float32)
+
+            # Vectorized next-value and delta computation
+            next_values = torch.cat([values[1:], last_val.unsqueeze(0)])
+            deltas = rewards + self._gamma * not_done * next_values - values
+            decay = continue_mask * (self._gamma * self._gae_lambda)
+
             advantages = torch.zeros_like(rewards)
             last_gae = torch.zeros((), dtype=torch.float32, device=device)
-            prev_value = last_val
-
             for t in reversed(range(rollout_len)):
-                delta = rewards[t] + self._gamma * prev_value - values[t]
-                terminal_delta = rewards[t] - values[t]
-                continued_gae = delta + self._gamma * self._gae_lambda * last_gae
-                last_gae = (
-                    truncation_mask[t] * delta
-                    + done_mask[t] * terminal_delta
-                    + continue_mask[t] * continued_gae
-                )
+                last_gae = deltas[t] + decay[t] * last_gae
                 advantages[t] = last_gae
-                prev_value = values[t]
 
             raw_returns = advantages + values
             if self._return_normalizer is not None:

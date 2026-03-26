@@ -63,12 +63,6 @@ class StreamState:
     latest_features: np.ndarray | None = None
 
     # Universal metric histories (available in all policy modes)
-    episode_return_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
-    episode_length_history: deque[float] = field(
-        default_factory=lambda: deque(maxlen=_RING_LEN),
-    )
     front_depth_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
@@ -78,9 +72,6 @@ class StreamState:
     near_fraction_history: deque[float] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
-
-    # Episode length tracking
-    _episode_step_counter: int = 0
 
     # PPO per-step telemetry
     ppo_raw_reward_history: deque[float] = field(
@@ -460,10 +451,6 @@ class StreamEngine:
                 if n > 0:
                     self._fleet_n_actors = n
 
-        elif et == "actor.training.ppo.episode" and len(p) >= 2:
-            state.episode_return_history.append(float(p[0]))
-            state.episode_length_history.append(float(p[1]))
-
         elif et == "environment.sdfdag.perf" and len(p) >= 5:
             state.env_perf_sps_history.append(float(p[0]))
             state.env_perf_batch_ms_history.append(float(p[3]))
@@ -483,17 +470,9 @@ class StreamEngine:
             done_val = float(p[2])
             truncated_val = float(p[3])
             state.collision_history.append(done_val)
-            state.episode_return_history.append(float(p[1]))
             state.ppo_raw_reward_history.append(float(p[0]))
             state.ppo_shaped_reward_history.append(float(p[0]))
             state.ppo_done_history.append(done_val + truncated_val)
-            # Track episode length
-            state._episode_step_counter += 1
-            if done_val > 0.5 or truncated_val > 0.5:
-                state.episode_length_history.append(
-                    float(state._episode_step_counter),
-                )
-                state._episode_step_counter = 0
 
         elif et == "actor.action_published" and len(p) >= 4:
             # Action published: [fwd, lateral, vertical, yaw]

@@ -14,6 +14,7 @@ def test_build_status_metrics_line_waiting_state() -> None:
     assert "SPS=--" in text
     assert "Env=--" in text
     assert "Step=--" in text
+    assert "Ep=" not in text
 
 
 def test_build_status_metrics_line_training_values() -> None:
@@ -21,7 +22,6 @@ def test_build_status_metrics_line_training_values() -> None:
     state.last_rx_time = 100.0
     state.perf_sps_history.append(22.5)
     state.ppo_reward_ema_history.append(-0.734)
-    state.episode_return_history.append(1.2)
     state.perf_opt_ms_history.append(145.0)
     state.perf_zero_wait_history.append(0.03)
     state.telemetry_buffer.append(
@@ -40,7 +40,7 @@ def test_build_status_metrics_line_training_values() -> None:
     assert "SPS=22.5" in text
     assert "Env=--" in text
     assert "EMA=-0.734" in text
-    assert "Ep=1" in text
+    assert "Ep=" not in text
     assert "Step=6400" in text
     assert "Opt=145ms" in text
     assert "ZW=3%" in text
@@ -82,14 +82,13 @@ def test_build_status_metrics_line_uses_shared_fallback_metrics() -> None:
     fallback.ppo_reward_ema_history.append(1.234)
     fallback.perf_opt_ms_history.append(91.0)
     fallback.perf_zero_wait_history.append(0.02)
-    fallback.episode_return_history.append(3.0)
 
     text = build_status_metrics_line(state, now=75.2, fallback_state=fallback)
 
     assert "SPS=58.4" in text
     assert "Env=--" in text
     assert "EMA=1.234" in text
-    assert "Ep=1" in text
     assert "Step=912" in text
     assert "Opt=91ms" in text
     assert "ZW=2%" in text
+    assert "Ep=" not in text

@@ -208,7 +208,7 @@ class StatusBar(QtWidgets.QFrame):
 
         # Metrics
         self._metrics_label = QtWidgets.QLabel(
-            "SPS=-- | Env=-- | EMA=-- | Ep=0 | Step=--"
+            "SPS=-- | Env=-- | EMA=-- | Step=--"
         )
         self._metrics_label.setStyleSheet(
             "color: #d5dde8; font-weight: 600; font-size: 13px; padding: 2px 4px;"

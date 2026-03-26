@@ -159,13 +159,16 @@ def _observation_profile(
     metric_depth: np.ndarray,
     valid_2d: np.ndarray,
     *,
+    max_distance: float = 100.0,
     proximity_distance_threshold: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
 ) -> tuple[float, float, float, float]:
     """Compute observation ratios from metric distances (in meters)."""
-    valid_ratio = float(np.mean(valid_2d, dtype=np.float32))
-    starvation_ratio = max(0.0, min(1.0, 1.0 - valid_ratio))
+    # Starvation: fraction of rays at max distance (informational void) rather
+    # than fraction of invalid rays — matches the tensor-path semantics.
+    saturated = metric_depth >= max_distance - 1e-3
+    starvation_ratio = float(np.mean(saturated.astype(np.float32)))
     structure_band_ratio = 0.0
     forward_structure_ratio = 0.0
     if structure_band_max_distance > structure_band_min_distance:
@@ -252,13 +255,16 @@ def _select_spawn_yaw_from_observation(
         if score > best_score:
             best_score = score
             best_shift = shift
-    return float((2.0 * math.pi * best_shift) / azimuth_bins)
+    # Yaw rotation maps local az=0 to world az=-yaw; to point forward at
+    # the structure found at azimuth (2π * shift / bins), use yaw = -shift_angle.
+    return float(-(2.0 * math.pi * best_shift) / azimuth_bins) % (2.0 * math.pi)
 
 
 def _spawn_candidate_score(
     metric_depth: np.ndarray,
     valid_2d: np.ndarray,
     *,
+    max_distance: float,
     proximity_distance_threshold: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
@@ -267,6 +273,7 @@ def _spawn_candidate_score(
         _observation_profile(
             metric_depth,
             valid_2d,
+            max_distance=max_distance,
             proximity_distance_threshold=proximity_distance_threshold,
             structure_band_min_distance=structure_band_min_distance,
             structure_band_max_distance=structure_band_max_distance,
@@ -356,12 +363,16 @@ def _compute_observation_ratios_tensor(
     clamped_metric: torch.Tensor,
     valid_batch: torch.Tensor,
     *,
+    max_distance: float,
     structure_band_min_distance: float,
     structure_band_max_distance: float,
     proximity_distance_threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    valid_f = valid_batch.to(dtype=torch.float32)
-    starvation_ratios = 1.0 - valid_f.mean(dim=(1, 2))
+    # Starvation: fraction of rays at max distance (informational void) rather
+    # than fraction of invalid rays — every finite ray is now a valid sensor
+    # reading so starvation must be distance-threshold based.
+    saturated = clamped_metric >= max_distance - 1e-3
+    starvation_ratios = saturated.to(dtype=torch.float32).mean(dim=(1, 2))
     structure_band_ratios = torch.zeros_like(starvation_ratios)
     forward_structure_ratios = torch.zeros_like(starvation_ratios)
     if structure_band_max_distance > structure_band_min_distance:
@@ -414,18 +425,15 @@ def _postprocess_cast_outputs_tensor(
     actor_count = int(out_distances.shape[0])
     metric_distances = out_distances.reshape(actor_count, az_bins, el_bins)
     semantic_batch = out_semantics.reshape(actor_count, az_bins, el_bins).to(dtype=torch.int32)
-    # Valid = finite distance within range.  Non-converged rays (semantic=0,
-    # exhausted max_steps) still carry useful approximate depth from the
-    # SDF-guided march and must remain valid — excluding them via a
-    # semantic!=0 gate creates excessive fog-of-war, especially at large
-    # max_distance where more rays exhaust their step budget.
+    # Valid = every finite ray reading.  Rays that escape the bounding box or
+    # exhaust max_steps still carry useful information ("nothing in that
+    # direction") and must remain valid sensor readings — the old
+    # distance<=max_distance gate created excessive fog-of-war holes on floors,
+    # ceilings, and open areas.  Far-away rays are clamped to max_distance and
+    # render as faint gray instead of absent hatching.
     if max_distance > 0.0:
-        valid_batch = torch.isfinite(metric_distances) & (metric_distances <= max_distance)
-        clamped_metric = torch.where(
-            valid_batch,
-            metric_distances,
-            torch.full_like(metric_distances, max_distance),
-        )
+        valid_batch = torch.isfinite(metric_distances)
+        clamped_metric = metric_distances.clamp(min=0.0, max=max_distance)
         # Logarithmic normalization: preserves near-field detail while
         # compressing far-field distances into a usable gradient range.
         # log1p is numerically stable and maps [0, max_distance] → [0, 1].
@@ -442,6 +450,7 @@ def _postprocess_cast_outputs_tensor(
         _compute_observation_ratios_tensor(
             clamped_metric,
             valid_batch,
+            max_distance=max_distance,
             structure_band_min_distance=structure_band_min_distance,
             structure_band_max_distance=structure_band_max_distance,
             proximity_distance_threshold=proximity_distance_threshold,
@@ -586,8 +595,10 @@ def _step_kinematics_tensor(
     sin_yaw = torch.sin(yaws)
     fwd = smooth_linear[:, 0]
     lat = smooth_linear[:, 2]
-    dx = fwd * cos_yaw - lat * sin_yaw
-    dz = fwd * sin_yaw + lat * cos_yaw
+    # Coordinate convention: yaw=0 faces -Z (matching ray direction az=0).
+    # Forward = (-sin(yaw), 0, -cos(yaw)),  Right = (cos(yaw), 0, -sin(yaw))
+    dx = -fwd * sin_yaw + lat * cos_yaw
+    dz = -fwd * cos_yaw - lat * sin_yaw
 
     updated_positions = positions.clone()
     updated_positions[:, 0] += dx * dt
@@ -905,6 +916,7 @@ class SdfDagBackend(SimulatorBackend):
             _observation_profile(
                 metric_cpu,
                 valid_batch[0].detach().cpu().numpy().astype(np.bool_, copy=False),
+                max_distance=self._max_distance,
                 proximity_distance_threshold=self._proximity_distance_threshold,
                 structure_band_min_distance=self._structure_band_min_distance,
                 structure_band_max_distance=self._structure_band_max_distance,
@@ -1099,6 +1111,7 @@ class SdfDagBackend(SimulatorBackend):
                 ) = _observation_profile(
                     metric_2d,
                     valid_2d,
+                    max_distance=self._max_distance,
                     proximity_distance_threshold=self._proximity_distance_threshold,
                     structure_band_min_distance=self._structure_band_min_distance,
                     structure_band_max_distance=self._structure_band_max_distance,
@@ -1440,6 +1453,7 @@ class SdfDagBackend(SimulatorBackend):
         return _compute_observation_ratios_tensor(
             clamped_metric,
             valid_batch,
+            max_distance=float(self._max_distance),
             structure_band_min_distance=float(
                 getattr(self, "_structure_band_min_distance", _STRUCTURE_BAND_MIN_DISTANCE)
             ),
@@ -2569,10 +2583,8 @@ class SdfDagBackend(SimulatorBackend):
         metric_distances = metric_distances.reshape(
             candidates.shape[0], probe_azimuth_bins, probe_elevation_bins
         )
-        valid = np.logical_and(
-            np.isfinite(metric_distances), metric_distances <= self._max_distance
-        )
-        clamped_metric = np.where(valid, metric_distances, self._max_distance)
+        valid = np.isfinite(metric_distances)
+        clamped_metric = np.clip(metric_distances, 0.0, self._max_distance)
         scores: list[tuple[float, tuple[float, float, float, float]]] = []
         for idx, candidate in enumerate(candidates):
             metric_2d = clamped_metric[idx]
@@ -2580,6 +2592,7 @@ class SdfDagBackend(SimulatorBackend):
             score = _spawn_candidate_score(
                 metric_2d,
                 valid_2d,
+                max_distance=self._max_distance,
                 proximity_distance_threshold=self._proximity_distance_threshold,
                 structure_band_min_distance=self._structure_band_min_distance,
                 structure_band_max_distance=self._structure_band_max_distance,

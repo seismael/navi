@@ -56,8 +56,10 @@ def _step_kinematics_tensor(
     sin_yaw = torch.sin(yaws)
     fwd = smooth_linear[:, 0]
     lat = smooth_linear[:, 2]
-    dx = fwd * cos_yaw - lat * sin_yaw
-    dz = fwd * sin_yaw + lat * cos_yaw
+    # Coordinate convention: yaw=0 faces -Z (matching ray direction az=0).
+    # Forward = (-sin(yaw), 0, -cos(yaw)),  Right = (cos(yaw), 0, -sin(yaw))
+    dx = -fwd * sin_yaw + lat * cos_yaw
+    dz = -fwd * cos_yaw - lat * sin_yaw
 
     updated_positions = positions.clone()
     updated_positions[:, 0] += dx * dt
@@ -95,15 +97,15 @@ def _near_depth(normalized: float = 0.02) -> torch.Tensor:
 class TestForwardMotionAtYawZero:
     """Pure forward translation at yaw=0.
 
-    Kinematics convention (from sdfdag_backend._step_kinematics_tensor):
-        dx = fwd * cos(yaw) - lat * sin(yaw)
-        dz = fwd * sin(yaw) + lat * cos(yaw)
+    Kinematics convention (yaw=0 faces -Z, matching ray az=0):
+        dx = -fwd * sin(yaw) + lat * cos(yaw)
+        dz = -fwd * cos(yaw) - lat * sin(yaw)
 
-    At yaw=0: cos(0)=1, sin(0)=0 → dx = fwd, dz = 0.
-    Forward motion at yaw=0 increases position.x.
+    At yaw=0: sin(0)=0, cos(0)=1 → dx = 0, dz = -fwd.
+    Forward motion at yaw=0 decreases position.z.
     """
 
-    def test_position_changes_in_x(self) -> None:
+    def test_position_changes_in_z(self) -> None:
         pos = torch.tensor([[0.0, 1.0, 0.0]])
         yaw = torch.tensor([0.0])
 
@@ -123,11 +125,11 @@ class TestForwardMotionAtYawZero:
             smoothing=_SMOOTHING,
             dt=_DT,
         )
-        # Expected: pos.x += fwd * speed_fwd * speed_factor * dt
-        expected_dx = 1.0 * _SPEED_FWD * 1.0 * _DT
-        assert abs(float(new_pos[0, 0]) - expected_dx) < 1e-6
+        # Expected: pos.z -= fwd * speed_fwd * speed_factor * dt
+        expected_dz = -(1.0 * _SPEED_FWD * 1.0 * _DT)
+        assert abs(float(new_pos[0, 0])) < 1e-6, "X should not change at yaw=0"
         assert abs(float(new_pos[0, 1]) - 1.0) < 1e-6, "Y should not change"
-        assert abs(float(new_pos[0, 2])) < 1e-6, "Z should not change"
+        assert abs(float(new_pos[0, 2]) - expected_dz) < 1e-6
 
     def test_yaw_unchanged(self) -> None:
         pos = torch.tensor([[0.0, 1.0, 0.0]])
@@ -216,12 +218,12 @@ class TestSpeedScalingNearGeometry:
             smoothing=_SMOOTHING, dt=_DT,
         )
 
-        dx_far = float(new_far[0, 0])
-        dx_near = float(new_near[0, 0])
-        assert dx_near < dx_far, (
-            f"Near-geometry movement ({dx_near:.6f}) should be less than far ({dx_far:.6f})"
+        dx_far = float(new_far[0, 2])   # At yaw=0, forward motion is in -Z
+        dx_near = float(new_near[0, 2])
+        assert dx_near > dx_far, (  # More negative = larger motion in -Z
+            f"Near-geometry movement ({dx_near:.6f}) should be less in magnitude than far ({dx_far:.6f})"
         )
-        assert dx_near > 0.0, "Movement should still be positive (clamped ≥ 0.05)"
+        assert dx_near < 0.0, "Movement in -Z should be negative (clamped ≥ 0.05 speed factor)"
 
 
 class TestSmoothingEffect:

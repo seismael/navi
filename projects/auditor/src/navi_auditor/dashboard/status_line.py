@@ -40,7 +40,7 @@ def build_status_metrics_line(
 ) -> str:
     """Build a compact one-line telemetry summary for the dashboard top bar."""
     if state is None:
-        return "SPS=-- | Env=-- | EMA=-- | Ep=0 | Step=-- | Opt=--"
+        return "SPS=-- | Env=-- | EMA=-- | Step=-- | Opt=--"
 
     now_ts = time.time() if now is None else now
     stall_s = None
@@ -75,10 +75,6 @@ def build_status_metrics_line(
     if zero_wait is None and fallback_state is not None:
         zero_wait = _last_value(fallback_state.perf_zero_wait_history)
 
-    episodes = len(state.episode_return_history)
-    if episodes == 0 and fallback_state is not None:
-        episodes = len(fallback_state.episode_return_history)
-
     step_id: int | None = None
     if len(state.telemetry_buffer) > 0:
         step_id = int(state.telemetry_buffer[-1].step_id)
@@ -91,7 +87,6 @@ def build_status_metrics_line(
     parts.append(f"SPS={_fmt_number(sps, 1)}")
     parts.append(f"Env={_fmt_number(env_sps, 1)}")
     parts.append(f"EMA={_fmt_number(reward_ema, 3)}")
-    parts.append(f"Ep={episodes}")
     parts.append(f"Step={step_id if step_id is not None else '--'}")
     parts.append(f"Opt={_fmt_number(opt_ms, 0)}ms")
     if zero_wait is not None:

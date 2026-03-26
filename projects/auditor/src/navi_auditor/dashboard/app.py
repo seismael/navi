@@ -112,7 +112,6 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
                 or len(actor_state.env_perf_sps_history) > 0
                 or len(actor_state.ppo_reward_ema_history) > 0
                 or len(actor_state.reward_history) > 0
-                or len(actor_state.episode_return_history) > 0
             ):
                 return actor_state
         return None

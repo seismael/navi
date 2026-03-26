@@ -177,7 +177,8 @@ def test_publish_observation_emits_distance_matrix_topic() -> None:
     topic, payload, label = trainer._telemetry_queue.get_nowait()
     assert topic == TOPIC_DISTANCE_MATRIX
     assert label == "observation"
-    restored = deserialize(payload)
+    raw = payload() if callable(payload) else payload
+    restored = deserialize(raw)
     assert isinstance(restored, DistanceMatrix)
     assert restored.step_id == 7
 
@@ -212,7 +213,8 @@ def test_publish_dashboard_observations_emits_selected_frames() -> None:
         topic, payload, label = trainer._telemetry_queue.get_nowait()
         assert topic == TOPIC_DISTANCE_MATRIX
         assert label == "observation"
-        restored = deserialize(payload)
+        raw = payload() if callable(payload) else payload
+        restored = deserialize(raw)
         assert isinstance(restored, DistanceMatrix)
         restored_env_ids.append(int(restored.env_ids[0]))
     assert restored_env_ids == [0, 1, 2]
