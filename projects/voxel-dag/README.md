@@ -1,128 +1,134 @@
-# voxel-dag: The TopoNav Offline Mesh Compiler
+# voxel-dag
 
-`voxel-dag` (Domain II) is an enterprise-grade, framework-agnostic geometric compiler. It is responsible for bridging the gap between discrete polygon meshes (`.obj`, `.glb`) and the continuous mathematical domain of TopoNav. 
+Offline mesh-to-`.gmdag` compiler for the Navi ecosystem. Transforms 3D scene
+meshes into compressed Signed Distance Fields stored as a Directed Acyclic Graph
+(DAG) with Sparse Voxel Octree hierarchy.
 
-The compiler transforms 3D environments into **Signed Distance Fields (SDF)** using the **Fast Sweeping Method (FSM)** and compresses them into a high-performance **Directed Acyclic Graph (DAG)** utilizing a Sparse Voxel Octree (SVO) hierarchy.
-
----
-
-## 1. Architectural Mandates
-
-This component strictly adheres to the following agnostic design principles:
-
-*   **Mathematical Cubicity:** The compiler dynamically centers the mesh and pads the world into a perfect cube. This ensures a uniform voxel size ($h$) across all axes, eliminating spatial distortion in downstream bounded sphere-tracing kernels.
-*   **Power-of-2 Alignment:** Input resolutions are automatically adjusted to the next power of 2 ($2^n$). This is a hardware-optimization mandate, ensuring spatial subdivisions align perfectly with GPU bit-shifting logic.
-*   **Zero-Copy Memory Specification:** The output `.gmdag` binary follows the 64-bit node architecture defined in `docs/MEMORY_LAYOUT_AND_DAG_SPEC.md`, optimized for GPU L1/L2 cache residency.
+**Format specification:** [docs/GMDAG.md](../../docs/GMDAG.md)  
+**Compiler internals:** [docs/COMPILER.md](../../docs/COMPILER.md)  
+**Implementation policy:** [AGENTS.md](../../AGENTS.md)
 
 ---
 
-## 2. Key Features
+## Overview
 
-*   **High-Performance FSM Solver:** Multi-threaded (via `numba` or C++) Eikonal solver reaching throughputs of **~0.16 MVoxels/s**.
-*   **Intelligent Initialization:** Robust triangle-to-voxel seeding that guarantees mathematical convergence even for non-manifold or zero-thickness geometry.
-*   **Canonical Dedup Contract:** Candidate grouping uses deterministic MurmurHash3 with fixed seed `0`, and structural equality remains the correctness authority before any merge in both the Python verification surface and the native C++ compiler.
-*   **Dual-Language Strategy:** Provides a lightweight Python verification compiler for monorepo tests and a full C++17 source tree for native deployment, both aligned to the same `.gmdag` node contract.
-*   **Repository Test Surface:** Exposes a `voxel_dag.compiler` Python package so monorepo tests can validate compiler/runtime integration without shelling out to the native CLI.
+The compiler bridges discrete polygon meshes (`.glb`, `.obj`, and any Assimp-
+supported format) to the continuous mathematical domain required by Navi's CUDA
+sphere-tracing runtime. The output `.gmdag` binary is the canonical compiled
+asset consumed by `torch-sdf` at training time.
+
+Pipeline: **Mesh Ingestion → SDF Generation (FSM) → DAG Compression → `.gmdag` Output**
 
 ---
 
-## 3. Installation & Requirements
+## Key Features
 
-### Python Environment (High-Performance Backend)
-*   Python 3.10+
-*   Dependencies: `numpy`, `numba`, `pytest`
+- **Fast Sweeping Method (FSM)** — multi-threaded Eikonal solver (~0.16 MVoxels/s)
+- **Deterministic deduplication** — MurmurHash3 candidate grouping with
+  structural equality as the correctness authority
+- **Mathematical cubicity** — auto-centers and pads the mesh into a perfect cube
+  with uniform voxel size across all axes
+- **Power-of-2 alignment** — resolutions adjusted to $2^n$ for GPU bit-shift
+  compatibility
+- **Dual-language strategy** — Python verification compiler for monorepo tests
+  plus a C++17 native compiler for production throughput
 
-The repository-local Python package exposes:
+---
+
+## Installation
+
+### Python Package
+
+```bash
+cd projects/voxel-dag
+uv sync  # or: pip install -e .
+```
+
+Exposes:
 
 ```python
 from voxel_dag.compiler import MeshIngestor, compute_dense_sdf, compress_to_dag, write_gmdag
 ```
 
-This surface is used by `projects/voxel-dag` verification tests and by
-`projects/torch-sdf` integration tests.
+### C++ Build
 
 ```bash
-pip install numpy numba pytest
-```
-
-### C++ Build Environment
-*   CMake 3.18+
-*   C++17 compliant compiler (GCC 9+, Clang 10+, or MSVC 2019+)
-*   Dependencies: `assimp` (automatically fetched via CMake)
-
----
-
-## 4. Build & Usage
-
-### Building the C++ Compiler
-```bash
-cd voxel-dag
+cd projects/voxel-dag
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
 ```
 
-PowerShell equivalent:
-```powershell
-cd voxel-dag
-if (-not (Test-Path build)) { New-Item -ItemType Directory build | Out-Null }
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release
-```
+Requires: CMake 3.18+, C++17 compiler. Assimp is fetched automatically via CMake.
 
-**Windows Note:** The executable `voxel-dag.exe` will be located in `build/Release/`. Ensure that the `assimp-vc143-mt.dll` (typically found in `build/_deps/assimp-build/bin/Release/`) is copied to the same directory as the executable before running it.
+**Windows note:** copy `assimp-vc143-mt.dll` from
+`build/_deps/assimp-build/bin/Release/` next to the `voxel-dag.exe` executable.
 
-### Compiling a Mesh (CLI)
+---
+
+## Usage
+
+### CLI (C++ Compiler)
+
 ```bash
-# Run the compiler directly
-./build/Release/voxel-dag --input my_mesh.glb --output my_mesh.gmdag --resolution 128
+./build/Release/voxel-dag --input scene.glb --output scene.gmdag --resolution 512
 ```
 
-PowerShell:
+### Via Environment CLI
+
+```bash
+uv run --project ../environment navi-environment compile-gmdag \
+    --source ../../data/scenes/hssd/102343992.glb \
+    --output ../../artifacts/gmdag/corpus/hssd/102343992.gmdag \
+    --resolution 512
+```
+
+### Via Corpus Refresh
+
 ```powershell
-.\build\Release\voxel-dag.exe --input my_mesh.glb --output my_mesh.gmdag --resolution 128
+./scripts/refresh-scene-corpus.ps1
 ```
 
 ---
 
-## 5. Testing & Verification
+## Testing
 
-The integrity of the compiler is guarded by two intensive test suites:
-
-### Functional & Scale Suite (`tests/test_suite.py`)
-Asserts mathematical accuracy against analytical spheres/planes and verifies $O(N^3)$ scaling.
 ```bash
+# Functional + mathematical accuracy (analytical spheres/planes)
 python tests/test_suite.py
-```
 
-### Intensive Integrity & Stress Suite (`tests/test_integrity.py`)
-Stress-tests the compiler using "Swiss Cheese" geometry (50+ internal holes and thin walls) to ensure topological stability and native-level performance.
-```bash
+# Intensive integrity + stress (Swiss Cheese geometry, 50+ edge cases)
 python tests/test_integrity.py
 ```
 
 ---
 
-## 6. Performance Benchmarks (Verified)
+## Output Format
 
-| Metric | Target Resolution | Performance |
-| :--- | :--- | :--- |
-| **FSM Throughput** | $128^3$ (2.1M Voxels) | **0.158 MVoxels/s** |
-| **Deduplication Rate** | Uniform Space | **>5,400x** |
-| **Topological Stability** | Complex Geometry | **Pass** (50+ Edge Cases) |
-| **Memory Footprint** | $128^3$ DAG | **~300k Nodes** |
+The generated `.gmdag` files contain:
 
----
+1. **32-byte header** — resolution, cubic bounding box, voxel size
+2. **Contiguous node array** — flattened 64-bit `uint64` nodes bit-packed with
+   type flags, child masks, and `float16` distance payloads
 
-## 7. Deployment & Artifacts
-
-The generated `.gmdag` files are the "Source of Truth" for the `torch-sdf` (Domain I) runtime engine. These files contain:
-1.  **32-byte Header:** Metadata including resolution, cubic bounding box, and voxel size ($h$).
-2.  **Contiguous Node Array:** Flattened 64-bit `uint64` nodes bit-packed with Type Flags, Child Masks, and `float16` distance payloads.
+See [docs/GMDAG.md](../../docs/GMDAG.md) for the complete binary specification.
 
 ---
 
-## 8. Development Standards
+## Performance
 
-All contributors must adhere to the [**AGENTS.md**](../AGENTS.md) operating manual. The `docs/` directory remains the immutable reference for all memory layouts and API contracts.
+| Metric | Value |
+|--------|-------|
+| FSM throughput ($128^3$) | ~0.158 MVoxels/s |
+| Deduplication rate (uniform space) | >5,400× |
+| Memory footprint ($128^3$ DAG) | ~300k nodes |
+
+---
+
+## Validation
+
+```bash
+uv run ruff check .
+uv run mypy src/
+uv run pytest tests/
+```

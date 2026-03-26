@@ -1,232 +1,291 @@
 # Navi — Ghost-Matrix Throughput RL System
 
-Navi is a headless-first reinforcement learning stack built around one canonical
-runtime path:
+Navi is a headless-first reinforcement-learning system for autonomous drone
+navigation. Source scene meshes are compiled into compressed `.gmdag` signed
+distance fields, traced at batch scale on the GPU by a CUDA sphere-tracing
+kernel, and consumed by a sacred cognitive actor engine (RayViTEncoder →
+Mamba-2 SSD → EpisodicMemory → PPO) that trains directly on the compiled
+corpus with no intermediate graphics pipeline.
 
-- transient source-scene staging during corpus refresh
-- staged overwrite-first corpus refresh into compiled `.gmdag` assets
-- batched CUDA `sdfdag` environment execution
-- one sacred actor training engine with a selectable temporal core
-- passive auditor observability
+The canonical runtime path:
 
-Canonical training and inference now assume a precompiled actor temporal-core
-path that works on the active Windows hardware with no extra extension build.
-The environment hot path is already sufficiently optimized that unfused Python
-temporal implementations simply move the bottleneck into host-side PPO sequence
-execution. The pure-PyTorch Mamba-2 SSD path is the default canonical
-production path, proven by a 25K-step head-to-head comparison to deliver
-significantly better learning quality (final reward_ema -0.88 vs GRU's -1.48)
-with only a modest throughput trade-off (~72 SPS vs ~100 SPS). `gru` and
-`mambapy` remain available as explicit comparison backends on the same trainer
-and serve surfaces.
+1. **Compile** — offline mesh → `.gmdag` via `voxel-dag` (SDF + DAG deduplication)
+2. **Trace** — batched CUDA sphere tracing via `torch-sdf`, results written
+   directly into PyTorch CUDA tensors
+3. **Train** — unified in-process PPO trainer with GPU-resident rollout storage,
+   selectable temporal core (`mamba2` default, `gru` and `mambapy` comparison)
+4. **Observe** — passive auditor dashboard subscribes to the actor telemetry
+   stream without gating throughput
 
-On the active MX150 (`sm_61`), GPU compute utilization during training is
-structurally limited by eager PyTorch dispatcher overhead — each tensor operation
-dispatches a separate CUDA kernel launch with ~10-100μs of idle gap between
-launches. `torch.compile` (which fuses kernels) requires `sm_70+`. The canonical
-hot path contains no unnecessary GPU→CPU synchronization barriers; the remaining
-GPU idle time is a hardware limitation. See `docs/PERFORMANCE.md` §4.0 for the
-full analysis.
+---
 
-Current benchmark interpretation is now split clearly by layer:
-
-- the environment CUDA path scales materially better with observation
-	resolution than the full trainer
-- end-to-end trainer scaling is currently limited by RayViT patch-token
-	self-attention and PPO update cost, not by the CUDA ray marcher alone
-- on the active MX150 `sm_61` machine, `512x96` remains runnable but is much
-	slower than the canonical contract, while `768x144` remains viable on the
-	environment-only benchmark surface and fails on the full trainer during
-	actor-side attention allocation
-
-## Canonical Workflow
+## Quick Start
 
 ```powershell
-# 1. Refresh source scenes and compiled corpus
+# 1. Install all project dependencies
+make sync-all
+
+# 2. Refresh the public scene corpus (download + compile to .gmdag)
 ./scripts/refresh-scene-corpus.ps1
 
-# 2. Start canonical continuous training
+# 3. Start canonical continuous training on the full corpus
 ./scripts/train.ps1
 
-# 2b. Compare the same run with GRU on the same trainer surface
-./scripts/train.ps1 -TemporalCore gru
-
-# 2c. Run a bounded side-by-side comparison for mamba2 and gru
-./scripts/run-temporal-compare.ps1
-
-# 2d. Run a bounded observation-resolution sweep on the canonical trainer
-./scripts/run-resolution-compare.ps1
-
-# 3. Or launch the full training stack
-./scripts/run-ghost-stack.ps1 -Train
-
-# 4. If actor telemetry 5557 is occupied later, move it explicitly
-./scripts/train.ps1 -ActorTelemetryPort 5565
+# 4. (Optional) Attach a live dashboard to the running trainer
+uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5557 --passive
 ```
 
-When no scene, manifest, or step limit is supplied, Navi now:
-
-- uses the full discovered dataset corpus by default
-- recompiles corpus assets when explicitly requested
-- removes transient source downloads after a successful staged refresh
-- trains continuously until stopped
-- defaults the actor temporal core to `mamba2`, with `gru` and `mambapy` available through explicit selectors on the same canonical surface
+---
 
 ## Project Layout
 
-| Project | Layer | Description |
-|---------|-------|-------------|
-| [`projects/contracts`](projects/contracts) | Shared | Wire-format models, serialization, ZMQ topics |
-| [`projects/environment`](projects/environment) | Environment | Canonical `sdfdag` runtime, corpus prep, `.gmdag` compiler orchestration |
-| [`projects/actor`](projects/actor) | Brain | Sacred cognitive engine, PPO training, policies |
-| [`projects/auditor`](projects/auditor) | Gallery | Recording, replay, live dashboard |
-| [`projects/voxel-dag`](projects/voxel-dag) | Compiler | Offline mesh-to-`.gmdag` compiler |
-| [`projects/torch-sdf`](projects/torch-sdf) | Runtime | CUDA sphere-tracing execution engine |
+| Project | Layer | Purpose |
+|---------|-------|---------|
+| [`projects/contracts`](projects/contracts) | Shared | Wire-format models (`DistanceMatrix`, `Action`, `StepResult`), serialization, ZMQ topics |
+| [`projects/environment`](projects/environment) | Simulation | Headless `sdfdag` stepping, corpus preparation, `.gmdag` compiler orchestration |
+| [`projects/actor`](projects/actor) | Brain | Sacred cognitive engine, PPO trainer, policy checkpointing |
+| [`projects/auditor`](projects/auditor) | Gallery | Live PyQtGraph dashboard, Zarr recording, session replay |
+| [`projects/voxel-dag`](projects/voxel-dag) | Compiler | Offline mesh-to-`.gmdag` compiler (FSM SDF + DAG deduplication) |
+| [`projects/torch-sdf`](projects/torch-sdf) | Runtime | CUDA sphere-tracing kernel with zero-copy PyTorch tensor I/O |
 
-## Manual Services
+Each project is a sovereign package with its own `pyproject.toml`, virtual
+environment, and test suite. Cross-project imports only occur at CLI
+orchestration boundaries.
 
-```bash
-# Environment
-cd projects/environment
-uv sync
-uv run environment
-
-# Actor
-cd ../actor
-uv sync
-uv run brain
-
-# Auditor dashboard
-cd ../auditor
-uv sync
-uv run dashboard
-```
-
-## Windows Launchers
-
-```powershell
-# Canonical environment service
-./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
-
-# Canonical actor service
-./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
-
-# Canonical actor service with GRU selected explicitly
-./scripts/run-brain.ps1 -TemporalCore gru --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
-
-# Canonical full inference stack
-./scripts/run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
-
-# Canonical full training stack
-./scripts/run-ghost-stack.ps1 -Train
-
-# Canonical full training stack with GRU selected explicitly
-./scripts/run-ghost-stack.ps1 -Train -TemporalCore gru
-```
-
-## Corpus Tooling
-
-```powershell
-# Download source scenes directly when you explicitly want raw assets retained
-./scripts/download-habitat-data.ps1
-
-# Full staged overwrite-first source + compiled corpus refresh
-./scripts/refresh-scene-corpus.ps1
-
-# Explicit environment-layer corpus prep
-uv run --project .\projects\environment navi-environment prepare-corpus --force-recompile
-
-# Validate and benchmark the compiled runtime
-uv run --project .\projects\environment navi-environment check-sdfdag --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
-uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag --actors 4 --steps 200
-```
+---
 
 ## Training
 
 ```powershell
-# Canonical continuous training on the full corpus
+# Canonical continuous training (full corpus, mamba2 default)
 ./scripts/train.ps1
 
-# Canonical long-duration training wrapper
+# Long-duration overnight wrapper
 ./scripts/train-all-night.ps1
 
-# Canonical continuous training with an alternate actor telemetry port
-./scripts/train.ps1 -ActorTelemetryPort 5565
+# Full ghost stack with passive dashboard
+./scripts/run-ghost-stack.ps1 -Train -WithDashboard
 
-# Canonical full-corpus training with 8 actors and passive dashboard attach
+# Explicit fleet size
 ./scripts/run-ghost-stack.ps1 -Train -Actors 8 -WithDashboard
 
-# Durable direct trainer surface with explicit fleet size
+# Alternate temporal core on the same trainer surface
+./scripts/train.ps1 -TemporalCore gru
+
+# Dataset filtering
+./scripts/run-ghost-stack.ps1 -Train -Datasets replicacad
+./scripts/run-ghost-stack.ps1 -Train -ExcludeDatasets hssd
+
+# Override to a single scene
+./scripts/train.ps1 -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag -TotalSteps 500000
+
+# Alternate telemetry port when 5557 is occupied
+./scripts/train.ps1 -ActorTelemetryPort 5565
+
+# Direct trainer CLI
 uv run --project .\projects\actor navi-actor train --actors 4
-uv run --project .\projects\actor navi-actor train --actors 8 --total-steps 0
+```
 
-# Separate passive dashboard attach for the direct trainer surface
-uv run --project .\projects\auditor navi-auditor dashboard --actor-sub tcp://localhost:5557 --passive
+When no scene, manifest, or step limit is supplied, training uses the full
+discovered dataset corpus and runs continuously until stopped.
 
-# Bounded observation-resolution sweep on the canonical trainer surface
+---
+
+## Corpus Tooling
+
+```powershell
+# Full staged overwrite-first corpus refresh (download + compile)
+./scripts/refresh-scene-corpus.ps1
+
+# Download source scenes only (raw assets retained locally)
+./scripts/download-habitat-data.ps1
+
+# Expand the ReplicaCAD corpus with baked-lighting scenes from HuggingFace
+./scripts/expand-replicacad-corpus.ps1
+
+# Explicit environment-layer corpus prep
+uv run --project .\projects\environment navi-environment prepare-corpus --force-recompile
+
+# Compile a single asset
+uv run --project .\projects\environment navi-environment compile-gmdag --source .\data\scenes\hssd\102343992.glb --output .\artifacts\gmdag\corpus\hssd\102343992.gmdag --resolution 512
+
+# Validate and benchmark a compiled asset
+uv run --project .\projects\environment navi-environment check-sdfdag --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
+uv run --project .\projects\environment navi-environment bench-sdfdag --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag --actors 4 --steps 200
+```
+
+---
+
+## Services (Manual Launch)
+
+Each service can be started independently for debugging or inference workflows.
+
+```powershell
+# Environment
+uv run --project .\projects\environment environment
+
+# Actor (brain)
+uv run --project .\projects\actor brain
+
+# Dashboard
+uv run --project .\projects\auditor dashboard
+```
+
+### Windows Wrapper Scripts
+
+```powershell
+# Environment service
+./scripts/run-environment.ps1 --mode step --pub tcp://*:5559 --rep tcp://*:5560 --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
+
+# Actor service
+./scripts/run-brain.ps1 --sub tcp://localhost:5559 --pub tcp://*:5557 --mode step --step-endpoint tcp://localhost:5560
+
+# Full inference stack
+./scripts/run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
+
+# Full training stack
+./scripts/run-ghost-stack.ps1 -Train
+
+# Dashboard
+./scripts/run-dashboard.ps1
+```
+
+---
+
+## Benchmarking & Comparison
+
+```powershell
+# Bounded temporal-core comparison (mamba2 vs gru)
+./scripts/run-temporal-compare.ps1
+
+# Temporal-core microbenchmark (writes JSON artifact)
+./scripts/run-temporal-bakeoff.ps1
+
+# Observation-resolution sweep on the canonical trainer
 ./scripts/run-resolution-compare.ps1
 ./scripts/run-resolution-compare.ps1 -Profiles @('256x48','384x72','512x96') -Repeats 2 -TotalSteps 512
 
-# Refresh the default public bootstrap corpus (Habitat test scenes + ReplicaCAD stages)
-./scripts/refresh-scene-corpus.ps1
+# Actor-scaling test
+./scripts/run-actor-scaling-test.ps1
 
-# Explicit narrowing override
-./scripts/train.ps1 -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag -TotalSteps 500000
+# Nightly end-to-end validation
+./scripts/run-nightly-validation.ps1
+
+# Qualification suite
+./scripts/qualify-canonical-stack.ps1
 ```
 
-## Wire Topics
+---
 
-| Topic | Direction |
-|-------|-----------|
-| `distance_matrix_v2` | Environment → Brain, Gallery |
-| `action_v2` | Brain → Environment, Gallery |
-| `step_request_v2` | Brain → Environment |
-| `step_result_v2` | Environment → Brain |
-| `telemetry_event_v2` | Any → Gallery |
+## Scripts Reference
+
+| Script | Purpose |
+|--------|---------|
+| `train.ps1` | Canonical continuous training wrapper |
+| `train-all-night.ps1` | Durable overnight training |
+| `run-ghost-stack.ps1` | Orchestrated multi-service launcher (train / inference) |
+| `refresh-scene-corpus.ps1` | Staged overwrite-first corpus refresh |
+| `download-habitat-data.ps1` | Source scene download only |
+| `expand-replicacad-corpus.ps1` | Incremental ReplicaCAD baked-lighting expansion |
+| `run-environment.ps1` | Environment service wrapper |
+| `run-brain.ps1` | Actor service wrapper |
+| `run-dashboard.ps1` | Dashboard wrapper |
+| `run-temporal-compare.ps1` | Bounded end-to-end temporal-core comparison |
+| `run-temporal-bakeoff.ps1` | Temporal-core microbenchmark |
+| `run-resolution-compare.ps1` | Observation-resolution trainer sweep |
+| `run-actor-scaling-test.ps1` | Fleet-size scaling benchmark |
+| `run-nightly-validation.ps1` | End-to-end nightly validation suite |
+| `qualify-canonical-stack.ps1` | Canonical stack qualification |
+| `run-attribution-matrix.ps1` | Throughput attribution diagnostics |
+| `setup-actor-cuda.ps1` | CUDA wheel installation for actor env |
+| `check_gpu.py` | GPU availability check |
+| `summarize-bounded-train-log.ps1` | Post-run log summarizer |
+
+---
+
+## Wire Protocol
+
+All inter-service communication uses ZMQ with MessagePack serialization.
+
+| Topic | Direction | Transport |
+|-------|-----------|-----------|
+| `distance_matrix_v2` | Environment → Brain, Gallery | PUB/SUB |
+| `action_v2` | Brain → Environment, Gallery | PUB/SUB |
+| `step_request_v2` | Brain → Environment | REQ/REP |
+| `step_result_v2` | Environment → Brain | REQ/REP |
+| `telemetry_event_v2` | Any → Gallery | PUB/SUB |
+
+### Default Ports
+
+| Port | Service | Role |
+|------|---------|------|
+| `5559` | Environment | PUB (`distance_matrix_v2`) |
+| `5560` | Environment | REP (`step_request_v2` / `step_result_v2`) |
+| `5557` | Actor | PUB (`action_v2`, `telemetry_event_v2`) |
+
+---
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Canonical system architecture and runtime boundaries |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture and runtime boundaries |
+| [docs/GMDAG.md](docs/GMDAG.md) | `.gmdag` binary format specification |
 | [docs/ACTOR.md](docs/ACTOR.md) | Sacred actor engine specification |
-| [docs/TRAINING.md](docs/TRAINING.md) | Canonical corpus refresh, training, resume, and recovery flow |
-| [docs/SIMULATION.md](docs/SIMULATION.md) | Canonical environment runtime and corpus preparation |
-| [docs/CONTRACTS.md](docs/CONTRACTS.md) | Canonical wire contracts |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Throughput targets and performance notes |
-| [docs/RESOLUTION_BENCHMARKS.md](docs/RESOLUTION_BENCHMARKS.md) | One-page appendix for the March 2026 observation-resolution sweep |
+| [docs/TRAINING.md](docs/TRAINING.md) | Corpus refresh, training, resume, and recovery |
+| [docs/SIMULATION.md](docs/SIMULATION.md) | Environment runtime and corpus preparation |
+| [docs/SDFDAG_RUNTIME.md](docs/SDFDAG_RUNTIME.md) | SDF/DAG backend runtime details |
+| [docs/COMPILER.md](docs/COMPILER.md) | Voxel-DAG compiler internals |
+| [docs/CONTRACTS.md](docs/CONTRACTS.md) | Wire-format contract specification |
+| [docs/DATAFLOW.md](docs/DATAFLOW.md) | End-to-end data flow |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Throughput targets and analysis |
+| [docs/RESOLUTION_BENCHMARKS.md](docs/RESOLUTION_BENCHMARKS.md) | Observation-resolution sweep results |
+| [docs/AUDITOR.md](docs/AUDITOR.md) | Auditor layer specification |
+| [docs/NIGHTLY_VALIDATION.md](docs/NIGHTLY_VALIDATION.md) | Nightly validation pipeline |
+| [docs/VERIFICATION.md](docs/VERIFICATION.md) | SDF/DAG validation standard |
+| [docs/PARALLEL.md](docs/PARALLEL.md) | Parallel architecture notes |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | Temporal-core comparison results |
+| [docs/TSDF.md](docs/TSDF.md) | Legacy TSDF reference |
 | [AGENTS.md](AGENTS.md) | Implementation policy and non-negotiables |
 
-## Resolution Scaling Notes
+---
 
-Current repository evidence says the canonical `256x48` contract is still the
-production default for good reason.
+## Performance
 
-- `artifacts/benchmarks/resolution-compare/resolution-compare-20260317-003916/`
-	shows the 4-actor GRU trainer at about `49.6 SPS` on `256x48`, about
-	`49.3 SPS` on `384x72`, and about `44.0 SPS` on `512x96`, while
-	`ppo_update_ms` rises from about `1.0 s` to about `17.7 s`
-- `artifacts/benchmarks/resolution-compare/resolution-compare-20260317-004714/`
-	plus `artifacts/benchmarks/resolution-compare/gpu-sample-512x96-20260317.csv`
-	show `512x96` saturating the active MX150 near `2 GB` VRAM and pushing GPU
-	utilization to `100%` during the PPO update window
-- `artifacts/benchmarks/resolution-compare/resolution-compare-20260317-002948/768x144/repeat-01/train.log`
-	shows the current trainer failing at `768x144` in
-	`torch.nn.functional.multi_head_attention_forward`, which confirms that the
-	active limit is actor-side attention memory rather than a `torch-sdf`
-	runtime failure
+| Metric | Target | Status |
+|--------|--------|--------|
+| Rollout throughput (current hardware) | ~1,000 SPS | In progress |
+| Rollout throughput (advanced hardware) | 10,000 SPS | Planned |
+| Inference latency (CPU) | ≤ 15 ms/actor | Achieved |
+| Environment latency (4 actors) | ≤ 25 ms | Achieved |
 
-This means stronger hardware can move the ceiling outward, but true
-high-resolution end-to-end scaling will also require actor-side perception work
-in addition to any future temporal-core promotion.
+The canonical `256×48` observation contract remains the production default.
+Higher profiles (`384×72`, `512×96`) are viable but increasingly limited by
+RayViT self-attention and PPO update cost rather than the CUDA ray marcher.
+See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) and
+[docs/RESOLUTION_BENCHMARKS.md](docs/RESOLUTION_BENCHMARKS.md) for the full
+analysis.
+
+---
 
 ## Repository Commands
 
 ```bash
-make sync-all
-make test-all
-make lint-all
-make typecheck-all
-make check-all
-make clean-all
+make help            # Show all available targets
+make sync-all        # Install dependencies in all sub-projects
+make test-all        # Run pytest in all sub-projects
+make lint-all        # Run ruff check + format check
+make format-all      # Run ruff format
+make typecheck-all   # Run mypy --strict
+make check-all       # lint + typecheck + tests (CI gate)
+make clean-all       # Remove .venv, caches, build artifacts
+make bench-temporal  # Run temporal-core bake-off
 ```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). You are free to use,
+modify, and distribute this software, provided the original copyright notice and
+license text are included in all copies or substantial portions of the software.

@@ -1,124 +1,88 @@
-# torch-sdf: Domain I
+# torch-sdf
 
-The CUDA sphere-tracing extension for Navi's canonical `.gmdag` runtime. This
-module exposes bounded batched sphere tracing directly to PyTorch through
-zero-copy bindings implemented with PyBind11 and LibTorch.
+CUDA sphere-tracing runtime for the Navi ecosystem. Executes bounded batched
+sphere tracing against compiled `.gmdag` assets and writes results directly into
+preallocated PyTorch CUDA tensors through zero-copy PyBind11/LibTorch bindings.
 
----
-
-## 1. Executive Summary
-
-`torch-sdf` is the low-level compute core for Navi's canonical compiled-scene
-path. It bypasses graphics pipelines by executing mathematical sphere tracing
-against `.gmdag` assets and writing results directly into preallocated PyTorch
-CUDA tensors.
-
-The important production guarantee is bounded batched execution with explicit
-runtime limits, not a claim of literal constant-time cost per ray.
+**Format specification:** [docs/GMDAG.md](../../docs/GMDAG.md)  
+**Runtime details:** [docs/SDFDAG_RUNTIME.md](../../docs/SDFDAG_RUNTIME.md)  
+**Implementation policy:** [AGENTS.md](../../AGENTS.md)
 
 ---
 
-## 2. Key Features
+## Key Features
 
-*   **Bounded Stackless Traversal**: Iterative DAG descent with explicit
-	`max_steps`, horizon, and hit-epsilon semantics.
-*   **Macro-Cell Void Cache**: Reuses the last empty child-cell bounds so
-	repeated samples in the same void region can advance to the cell boundary
-	without another root DAG traversal.
-*   **Zero-Copy Execution**: Directly reads/writes PyTorch CUDA tensors using
-	raw pointers, avoiding avoidable CPU staging.
-*   **Strict CUDA Backend**: Fail-fast validation for CUDA placement, dtype,
-	shape, contiguity, and runtime parameters.
-*   **Explicit Spatial Bounds**: Bounding boxes and resolution are validated at
-	the binding boundary before kernel launch.
+- **Bounded stackless traversal** — iterative DAG descent with explicit
+  `max_steps`, horizon, and hit-epsilon semantics
+- **Macro-cell void cache** — reuses empty child-cell bounds so repeated
+  samples in the same void region skip redundant root traversals
+- **Zero-copy execution** — reads/writes PyTorch CUDA tensors via raw pointers
+  with no CPU staging
+- **Strict CUDA backend** — fail-fast validation for device, dtype, shape,
+  contiguity, and runtime parameters
 
 ---
 
-## 3. Runtime Contract
-
-Canonical inputs and outputs:
-
-* `origins`: contiguous CUDA `float32`, shape `[batch, rays, 3]`
-* `dirs`: contiguous CUDA `float32`, shape `[batch, rays, 3]`
-* `out_distances`: contiguous CUDA `float32`, shape `[batch, rays]`
-* `out_semantics`: contiguous CUDA `int32`, shape `[batch, rays]`
-
-Explicit runtime rules:
-
-* `max_steps` must be a positive integer
-* `max_distance` must be finite and positive
-* `resolution` must be a positive integer
-* `bbox_min` and `bbox_max` must each contain three finite floats
-* every `bbox_min[i]` must be strictly less than `bbox_max[i]`
-
-Current kernel semantics:
-
-* a hit is accepted when local clearance falls below the internal hit epsilon
-* repeated samples inside one cached empty child cell advance to that cell's
-	exit boundary without a fresh DAG descent
-* rays that leave the compiled domain or exceed the configured horizon return a
-	miss semantic (`0`)
-* misses are bounded by the configured iteration limit and horizon rather than a
-	promise of globally correct analytic continuation outside the compiled asset
-
----
-
-## 4. Installation & Setup
-
-### Local Deployment
-The project relies on being installed into the primary `toponav-env` virtual environment.
+## Installation
 
 ```bash
-cd torch-sdf
-# Ensure your environment variables point to your CUDA installation
-# Windows example: $env:CUDA_HOME="C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+cd projects/torch-sdf
 pip install -e .
 ```
 
-PowerShell (explicit):
+Requires CUDA Toolkit 11.8+ and PyTorch 2.0+ with CUDA support.
+
+**Windows:** set `CUDA_HOME` / `CUDA_PATH` before building so the extension
+can locate CUDA libraries at runtime.
+
 ```powershell
-$env:CUDA_HOME="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4"
-$env:CUDA_PATH=$env:CUDA_HOME
+$env:CUDA_HOME = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4"
 pip install -e .
 ```
 
-### Build Requirements
-*   **Python**: 3.10+
-*   **PyTorch**: 2.0+ (CUDA 12.1+ recommended for GPU path)
-*   **CUDA Toolkit**: 11.8+ (Required for Native GPU acceleration)
+---
+
+## Runtime Contract
+
+### Inputs
+
+| Tensor | dtype | Shape | Requirements |
+|--------|-------|-------|-------------|
+| `origins` | `float32` | `[batch, rays, 3]` | Contiguous CUDA |
+| `dirs` | `float32` | `[batch, rays, 3]` | Contiguous CUDA, unit-length |
+| `out_distances` | `float32` | `[batch, rays]` | Contiguous CUDA, preallocated |
+| `out_semantics` | `int32` | `[batch, rays]` | Contiguous CUDA, preallocated |
+
+### Parameters
+
+- `max_steps` — positive integer (iteration limit)
+- `max_distance` — finite positive float (horizon)
+- `resolution` — positive integer (matches compiled asset)
+- `bbox_min`, `bbox_max` — three finite floats each, strictly ordered
+
+### Semantics
+
+- Hit: local clearance < internal hit epsilon
+- Miss: ray exits domain or exceeds horizon → semantic `0`
+- Cached void: rays in same empty child cell advance to cell exit without fresh
+  DAG descent
 
 ---
 
-## 5. Enabling Native CUDA Acceleration
-
-If your system reports a CUDA-compatible GPU but runtime startup fails, ensure the **NVIDIA CUDA Toolkit** is installed and the `torch_sdf_backend` extension is built correctly.
-
-**Windows Specific Notes:**
-1. Python 3.8+ does not automatically search the system `PATH` for DLLs.
-2. The package will attempt to read the `CUDA_HOME` or `CUDA_PATH` environment variable to automatically locate and load CUDA dependencies at runtime via `os.add_dll_directory()`.
-3. If you encounter an `ImportError: DLL load failed` when importing the backend, ensure `CUDA_PATH` is correctly set to your toolkit installation (e.g., `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4`).
-
----
-
-## 6. Testing & Verification
-
-The integrity of the kernel is validated via `tests/test_full_pipeline.py`.
-
-*   **Hallway Integrity**: Confirms accurate distance detection in complex long-range environments.
-*   **Throughput Benchmark**: Stress-tests the engine to verify SPS performance.
+## Testing
 
 ```bash
-# Run the focused wrapper and full-pipeline tests
+# Full pipeline: hallway integrity + throughput benchmark
 python tests/test_full_pipeline.py
-```
 
-Focused wrapper validation lives in `tests/test_sphere_tracing.py`.
+# Focused wrapper validation
+python tests/test_sphere_tracing.py
+```
 
 ---
 
-## 7. Architectural Compliance
+## Architectural Compliance
 
-This component follows the repository-level contracts in `docs/`. Any changes to
-bit packing, hit semantics, or tensor-boundary validation must be mirrored in
-the `voxel-dag` compiler, the environment integration layer, and their tests in
-the same change.
+Any changes to bit packing, hit semantics, or tensor-boundary validation must
+be mirrored in the `voxel-dag` compiler, the environment integration layer, and
+their tests in the same change.
