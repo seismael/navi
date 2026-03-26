@@ -23,6 +23,12 @@
 
     # Resume from an explicit prior run checkpoint
     .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint ".\artifacts\runs\<run_id>\checkpoints\policy_step_0010000.pt"
+
+    # Train on only the best dataset (ReplicaCAD baked lighting)
+    .\run-ghost-stack.ps1 -Train -Datasets "ai-habitat_ReplicaCAD_baked_lighting" -WithDashboard
+
+    # Train on everything except HSSD (incomplete shells)
+    .\run-ghost-stack.ps1 -Train -ExcludeDatasets "hssd_hssd-hab"
 #>
 param(
     # ── Mode ──
@@ -46,6 +52,8 @@ param(
 
     # ── Training params ──
     [string]$Manifest = "",
+    [string]$Datasets = "",
+    [string]$ExcludeDatasets = "",
     [int]$TotalSteps = 0,
     [int]$CheckpointEvery = 25000,
     [string]$CheckpointDir = "checkpoints",
@@ -472,6 +480,13 @@ if ($Train) {
         $trainArgs += "--force-corpus-refresh"
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($Datasets)) {
+        $trainArgs += @("--datasets", $Datasets)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExcludeDatasets)) {
+        $trainArgs += @("--exclude-datasets", $ExcludeDatasets)
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
         $trainArgs += @("--checkpoint", $Checkpoint)
     }
@@ -491,6 +506,12 @@ if ($Train) {
         Write-Host "  Actors     : $NumActors (Standard Fleet)"
         Write-Host "  Total Steps: $(if ($TotalSteps -le 0) { 'continuous until stopped' } else { $TotalSteps })"
         Write-Host "  Temporal   : $TemporalCore"
+        if (-not [string]::IsNullOrWhiteSpace($Datasets)) {
+            Write-Host "  Datasets   : $Datasets"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExcludeDatasets)) {
+            Write-Host "  Exclude DS : $ExcludeDatasets"
+        }
         Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
         Write-Host "  Checkpoints: every $CheckpointEvery -> $CheckpointDir"
         if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {

@@ -387,6 +387,14 @@ def train(
         "--reward-shaping-torch-compile/--no-reward-shaping-torch-compile",
         help="Compile tensor-only actor reward shaping helper graphs with torch.compile when supported.",
     ),
+    datasets: str = typer.Option(
+        "",
+        help="Comma-separated dataset name filter (e.g. 'ai-habitat_ReplicaCAD_baked_lighting'). Empty = all datasets.",
+    ),
+    exclude_datasets: str = typer.Option(
+        "",
+        help="Comma-separated dataset names to exclude from training corpus.",
+    ),
     actor_pub: str = typer.Option(None, help="Actor PUB bind address"),
 ) -> None:
     """Single canonical PPO training surface with direct in-process sdfdag stepping."""
@@ -482,7 +490,20 @@ def train(
             min_scene_bytes=min_scene_bytes,
             force_corpus_refresh=force_corpus_refresh,
         )
-        scenes = [str(entry.compiled_path) for entry in corpus.scene_entries]
+        entries = list(corpus.scene_entries)
+        if datasets:
+            allowed = {d.strip() for d in datasets.split(",") if d.strip()}
+            entries = [e for e in entries if e.dataset in allowed]
+            if not entries:
+                typer.echo(f"No scenes matched --datasets filter: {datasets}", err=True)
+                raise typer.Exit(1)
+        if exclude_datasets:
+            excluded = {d.strip() for d in exclude_datasets.split(",") if d.strip()}
+            entries = [e for e in entries if e.dataset not in excluded]
+            if not entries:
+                typer.echo(f"All scenes excluded by --exclude-datasets: {exclude_datasets}", err=True)
+                raise typer.Exit(1)
+        scenes = [str(entry.compiled_path) for entry in entries]
         _emit_command_phase_metric(
             command_metrics_sink,
             operation="corpus_prepare",
