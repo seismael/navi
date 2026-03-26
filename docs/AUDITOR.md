@@ -27,7 +27,7 @@ Current implementation characteristics include:
 
 - PyQtGraph and PyQt-based desktop UI
 - hardcoded actor `0` view for maximum throughput
-- actor count display in status bar
+- actor count and active scene name display in status bar
 - passive status-line telemetry
 - forward-FOV extraction from the spherical observation convention
 - capped ZMQ ingestion per tick for UI responsiveness
@@ -46,7 +46,12 @@ It uses:
 
 - pure NumPy renderers for portability and testability
 - OpenCV utilities for resize and overlays
-- Viridis and Turbo-style depth colormaps
+- direct log-encoded depth visualization: the environment publishes depth as
+  `log1p(d)/log1p(100)` in `[0,1]`, and the renderers work on these values
+  directly, preserving logarithmic near-field detail (~52% of the color range
+  maps to 0-10 m)
+- percentile-based dynamic contrast stretch (p2-p98) adapts per-scene so both
+  tight indoor spaces and open outdoor vistas use the full palette
 - forward-centered spherical slicing for actor view panels
 - orientation guides and semantic coloring for diagnostic readability
 
@@ -56,7 +61,8 @@ Canonical primary actor-panel rule:
 - for the canonical `256x48` observation contract this means an exact forward `128x48` slice before viewport scaling
 - the panel must not add its own `30m` range cap, `CTR`, or `HFOV` meter overlays
 - LEFT and RIGHT labels belong on the horizontal midline because the center column is the actor heading
-- the actor-view palette should stay muted: collision-near bins may use restrained red, most ordinary structure should read as light green/grey, and farther surroundings should fade toward light blue rather than a saturated rainbow
+- the observer palette runs yellow-green (near) → teal → blue → gray (far),
+  keeping ordinary structure readable and avoiding saturated rainbow extremes
 - these are observer-side rendering rules only; they do not change the environment, actor, or contract layers
 
 This matters because rendering logic remains testable without requiring the full
@@ -81,6 +87,8 @@ The auditor layer must obey strict throughput rules:
 - it must never become a required dependency for canonical training
 - it may drop frames rather than backpressure producers
 - its ingestion must be capped per UI tick
+- the actor telemetry PUB socket uses `SNDHWM=50` so unsent frames are dropped
+  rather than accumulating unbounded memory on slow or absent consumers
 - actor-stream-only passive operation must remain supported during training
 - any crop, roll, half-sphere extraction, or display-only reinterpretation must happen in the auditor after receipt of the published contract
 

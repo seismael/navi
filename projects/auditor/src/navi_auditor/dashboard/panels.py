@@ -200,6 +200,13 @@ class StatusBar(QtWidgets.QFrame):
         )
         layout.addWidget(self._actor_count_label)
 
+        # Scene name indicator
+        self._scene_label = QtWidgets.QLabel("")
+        self._scene_label.setStyleSheet(
+            "color: #7aa2d6; font-weight: 600; font-size: 12px; padding: 2px 6px;"
+        )
+        layout.addWidget(self._scene_label)
+
         # Separator
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
@@ -238,3 +245,10 @@ class StatusBar(QtWidgets.QFrame):
         """Update the discovered actor count display."""
         text = f"Actors: {n}" if n > 0 else "Actors: --"
         self._actor_count_label.setText(text)
+
+    def set_scene_name(self, name: str) -> None:
+        """Update the current scene name display."""
+        if name:
+            self._scene_label.setText(f"Scene: {name}")
+        else:
+            self._scene_label.setText("")

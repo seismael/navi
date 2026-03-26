@@ -174,19 +174,16 @@ def _apply_fog_of_war(img: np.ndarray, invalid_mask: np.ndarray) -> None:
 def depth_to_viridis(
     depth: np.ndarray,
     valid: np.ndarray | None = None,
-    *,
-    max_distance: float = 30.0,
 ) -> np.ndarray:
-    """Convert 2-D float32 depth to Viridis-coloured BGR with fog-of-war.
+    """Convert 2-D log-normalized depth to Viridis-coloured BGR with fog-of-war.
 
-    Uses percentile-based contrast stretch so close-range indoor scenes
-    still show clear depth variation instead of a single-colour heatmap.
+    Input depth is already log-normalized by the environment as
+    ``log1p(d) / log1p(max_distance)`` which inherently allocates ~52 %
+    of the [0, 1] range to the 0–10 m near field.  Working directly on
+    these values preserves logarithmic near-field detail.  Percentile-based
+    contrast stretch adapts dynamically to each scene's depth distribution.
     """
-    # Linearize log-normalized depth for visualization (see observer palette).
-    vis_log_denom = np.float32(np.log1p(max_distance))
-    depth = np.expm1(np.clip(depth, 0.0, 1.0).astype(np.float32) * vis_log_denom) / np.float32(
-        max_distance
-    )
+    depth = np.clip(depth, 0.0, 1.0).astype(np.float32)
 
     if valid is not None and np.any(valid):
         valid_vals = depth[valid]
@@ -212,24 +209,22 @@ def depth_to_observer_palette(
     valid: np.ndarray | None = None,
     *,
     fog_of_war: bool = True,
-    max_distance: float = 30.0,
 ) -> np.ndarray:
-    """Convert depth to a structure-revealing observer palette.
+    """Convert log-normalized depth to a structure-revealing observer palette.
 
-    Near surfaces render as warm yellow-green so walls, furniture, and
-    doorframes stand out.  Mid-range structure transitions through teal
-    into light and darker blues.  The far end fades to neutral gray so
-    horizon / void regions recede visually instead of competing with
-    structure detail.  Contrast is stretched dynamically from the valid
-    depth distribution so indoor scenes keep clear separation.
+    Input depth is already log-normalized by the environment as
+    ``log1p(d) / log1p(max_distance)`` which inherently allocates ~52 %
+    of the [0, 1] range to the 0–10 m near field — giving rich colour
+    differentiation for nearby walls, furniture, and doorframes while
+    compressing the far horizon into a narrow band.
+
+    Near surfaces render as warm yellow-green.  Mid-range structure
+    transitions through teal into light and darker blues.  The far end
+    fades to neutral gray so horizon / void regions recede visually.
+    Percentile-based contrast stretch adapts dynamically to each scene's
+    depth distribution so indoor and outdoor scenes stay readable.
     """
-    # The observation depth channel is log-normalized: log1p(d)/log1p(max_distance).
-    # Invert to recover metric-proportional depth for visualization so
-    # the perceptual near=warm / far=cool gradient stays familiar.
-    vis_log_denom = np.float32(np.log1p(max_distance))
-    depth = np.expm1(np.clip(depth, 0.0, 1.0).astype(np.float32) * vis_log_denom) / np.float32(
-        max_distance
-    )
+    depth = np.clip(depth, 0.0, 1.0).astype(np.float32)
 
     if valid is not None and np.any(valid):
         valid_vals = depth[valid]

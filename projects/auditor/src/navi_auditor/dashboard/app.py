@@ -123,11 +123,19 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Ingest capped ZMQ burst (Standard: UI Throughput)
         _msgs_processed = self._engine.poll(max_messages=100)
 
-        # Update actor count display
+        # Update actor count and scene name displays
         n_actors = self._engine.n_actors
         self._status_bar.set_actor_count(n_actors)
 
         state = self._engine.actor_states.get(0)
+
+        # Scene name from any actor state that has it
+        scene_name = ""
+        for s in self._engine.actor_states.values():
+            if s.current_scene_name:
+                scene_name = s.current_scene_name
+                break
+        self._status_bar.set_scene_name(scene_name)
         if state is None:
             self._status_bar.set_mode("WAITING")
             self._status_bar.set_metrics_text(build_status_metrics_line(None))

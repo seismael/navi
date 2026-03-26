@@ -570,6 +570,7 @@ class PpoTrainer:
         # Create a dedicated context and socket for this thread
         ctx = zmq.Context()
         pub = ctx.socket(zmq.PUB)
+        pub.setsockopt(zmq.SNDHWM, 50)
         pub.bind(self._config.pub_address)
 
         _LOGGER.info("Async telemetry worker started on %s", self._config.pub_address)
@@ -1646,6 +1647,32 @@ class PpoTrainer:
             ),
         )
 
+    def _publish_scene_telemetry(self, *, step_id: int) -> None:
+        """Publish current scene name so the dashboard can display it."""
+        if not self._config.emit_perf_telemetry:
+            return
+        runtime = self._runtime
+        scene_name: str = ""
+        if runtime is not None:
+            scene_name = getattr(runtime, "current_scene_name", "")
+        if not scene_name:
+            return
+        payload = np.array([float(ord(c)) for c in scene_name], dtype=np.float32)
+        event = TelemetryEvent(
+            event_type="actor.training.ppo.scene",
+            episode_id=0,
+            env_id=0,
+            step_id=step_id,
+            payload=payload,
+            timestamp=time.time(),
+        )
+        _enqueue_telemetry(
+            self._telemetry_queue,
+            topic=TOPIC_TELEMETRY_EVENT,
+            payload=serialize(event),
+            label="scene telemetry",
+        )
+
     def _publish_runtime_perf(self, *, step_id: int) -> None:
         """Publish coarse runtime perf from the canonical sdfdag backend."""
         if not self._config.emit_perf_telemetry:
@@ -2353,6 +2380,7 @@ class PpoTrainer:
                         n_actors=float(self._n_actors),
                     )
                     self._publish_runtime_perf(step_id=step_id)
+                    self._publish_scene_telemetry(step_id=step_id)
                     if sps < _SOFT_WARN_MIN_SPS:
                         _LOGGER.warning(
                             "Soft stall monitor: SPS below target (%.1f < %.1f) at step=%d",

@@ -1851,7 +1851,13 @@ class SdfDagBackend(SimulatorBackend):
             raise RuntimeError(msg)
         return dag_tensor
 
+    @property
+    def current_scene_name(self) -> str:
+        """Return the human-readable name of the currently loaded scene."""
+        return self._current_scene_name
+
     def _load_scene(self, scene_path: str) -> list[tuple[float, float, float]]:
+        self._current_scene_name = Path(scene_path).stem
         asset = load_gmdag_asset(Path(scene_path), validate_layout=False)
         dag_tensor = self._torch.from_numpy(asset.nodes.view(np.int64)).to(
             device=self._device,

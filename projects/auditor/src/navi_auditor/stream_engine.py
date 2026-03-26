@@ -163,6 +163,9 @@ class StreamState:
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
 
+    # Current scene name (updated by actor.training.ppo.scene events)
+    current_scene_name: str = ""
+
     # Telemetry ring (raw events)
     telemetry_buffer: deque[TelemetryEvent] = field(
         default_factory=lambda: deque(maxlen=_RING_LEN),
@@ -450,6 +453,11 @@ class StreamEngine:
                 n = int(p[13])
                 if n > 0:
                     self._fleet_n_actors = n
+
+        elif et == "actor.training.ppo.scene" and len(p) >= 1:
+            # Scene name encoded as char ordinals in float32 payload
+            scene_name = "".join(chr(max(0, min(0x10FFFF, int(c)))) for c in p if int(c) > 0)
+            state.current_scene_name = scene_name
 
         elif et == "environment.sdfdag.perf" and len(p) >= 5:
             state.env_perf_sps_history.append(float(p[0]))
