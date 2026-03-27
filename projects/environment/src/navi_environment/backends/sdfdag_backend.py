@@ -57,8 +57,10 @@ _HEADING_NOVELTY_SCALE: float = 0.05
 _HEADING_SECTORS: int = 16
 _FRONTIER_BONUS_SCALE: float = 0.1
 _STARVATION_DEAD_ZONE: float = 0.2
-_SPAWN_CANDIDATES_PER_AXIS: int = 3
-_SPAWN_HEIGHT_SAMPLES: int = 5
+_VOID_STARVATION_THRESHOLD: float = 0.85
+_SPAWN_MAX_STARVATION: float = 0.70
+_SPAWN_CANDIDATES_PER_AXIS: int = 5
+_SPAWN_HEIGHT_SAMPLES: int = 7
 _SPAWN_PROBE_AZIMUTH_BINS: int = 48
 _SPAWN_PROBE_ELEVATION_BINS: int = 12
 _PERF_EMA_ALPHA: float = 0.1
@@ -94,7 +96,8 @@ def _starvation_penalty(
     # Dead zone: starvation below _STARVATION_DEAD_ZONE is free (normal viewing).
     effective = max(0.0, starvation_ratio - _STARVATION_DEAD_ZONE)
     baseline = 0.35 * effective
-    overflow = max(0.0, effective - max(0.0, ratio_threshold))
+    # Overflow accelerates penalty above the raw-ratio threshold.
+    overflow = max(0.0, starvation_ratio - max(0.0, ratio_threshold))
     return -penalty_scale * float(min(baseline + overflow, 1.0))
 
 
@@ -513,7 +516,8 @@ def _reward_components_tensor(
     # Dead zone: starvation below _STARVATION_DEAD_ZONE is free (normal viewing).
     effective_starvation = (starvation_ratios - _STARVATION_DEAD_ZONE).clamp(min=0.0)
     starvation_baselines = 0.35 * effective_starvation
-    starvation_overflows = (effective_starvation - starvation_ratio_threshold).clamp(min=0.0)
+    # Overflow accelerates penalty above the raw-ratio threshold.
+    starvation_overflows = (starvation_ratios - starvation_ratio_threshold).clamp(min=0.0)
     starvation_penalties = -(starvation_baselines + starvation_overflows).clamp(max=1.0)
     starvation_penalties = starvation_penalties * starvation_penalty_scale
     proximity_penalties = -proximity_ratios.clamp(max=1.0) * proximity_penalty_scale
@@ -604,7 +608,7 @@ def _step_kinematics_tensor(
     updated_positions[:, 0] += dx * dt
     updated_positions[:, 1] += smooth_linear[:, 1] * dt
     updated_positions[:, 2] += dz * dt
-    updated_yaws = yaws + (smooth_angular[:, 2] * dt)
+    updated_yaws = (yaws + smooth_angular[:, 2] * dt) % (2.0 * math.pi)
     return updated_positions, updated_yaws, smooth_linear, smooth_angular
 
 
@@ -1128,6 +1132,9 @@ class SdfDagBackend(SimulatorBackend):
 
                 self._actor_steps[actor_id] += 1
                 truncated = bool(self._actor_steps[actor_id] >= self._max_steps_per_episode)
+                # Void-detection: force early truncation for lost actors.
+                if starvation_ratio >= _VOID_STARVATION_THRESHOLD:
+                    truncated = True
                 reward, _reward_components = self._compute_reward(
                     actor_id=actor_id,
                     previous_pose=previous_pose,
@@ -1346,6 +1353,10 @@ class SdfDagBackend(SimulatorBackend):
 
             next_steps_t = self._actor_steps.index_select(0, actor_indices_t) + 1
             truncated_mask_t = next_steps_t >= self._max_steps_per_episode
+            # Void-detection: force early truncation when the actor is lost in
+            # empty space and wasting training steps.
+            void_mask = starvation_ratios_t >= _VOID_STARVATION_THRESHOLD
+            truncated_mask_t = truncated_mask_t | void_mask
             self._actor_steps[actor_indices_t] = next_steps_t
             self._needs_reset_mask[actor_indices_t] = truncated_mask_t
             self._episode_returns[actor_indices_t] = (
@@ -2591,10 +2602,18 @@ class SdfDagBackend(SimulatorBackend):
         )
         valid = np.isfinite(metric_distances)
         clamped_metric = np.clip(metric_distances, 0.0, self._max_distance)
-        scores: list[tuple[float, tuple[float, float, float, float]]] = []
+        scored: list[tuple[float, float, tuple[float, float, float, float]]] = []
         for idx, candidate in enumerate(candidates):
             metric_2d = clamped_metric[idx]
             valid_2d = valid[idx]
+            starvation_ratio, _prox, _struct, _fwd = _observation_profile(
+                metric_2d,
+                valid_2d,
+                max_distance=self._max_distance,
+                proximity_distance_threshold=self._proximity_distance_threshold,
+                structure_band_min_distance=self._structure_band_min_distance,
+                structure_band_max_distance=self._structure_band_max_distance,
+            )
             score = _spawn_candidate_score(
                 metric_2d,
                 valid_2d,
@@ -2609,15 +2628,45 @@ class SdfDagBackend(SimulatorBackend):
                 structure_band_min_distance=self._structure_band_min_distance,
                 structure_band_max_distance=self._structure_band_max_distance,
             )
-            scores.append(
-                (score, (float(candidate[0]), float(candidate[1]), float(candidate[2]), best_yaw))
+            scored.append(
+                (score, starvation_ratio, (float(candidate[0]), float(candidate[1]), float(candidate[2]), best_yaw))
             )
 
-        scores.sort(key=lambda item: item[0], reverse=True)
-        if not scores:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if not scored:
             center = 0.5 * (bmin + bmax)
             return [(float(center[0]), float(center[1]), float(center[2]), 0.0)]
 
-        selected = [spawn for _, spawn in scores[: max(count, 1)]]
-        _LOG.info("Selected %d spawn candidates for sdfdag backend", len(selected))
+        # Quality gate: reject candidates with excessive starvation (void)
+        viable = [
+            (sc, starv, sp) for sc, starv, sp in scored
+            if starv < _SPAWN_MAX_STARVATION
+        ]
+        if len(viable) >= count:
+            selected = [sp for _, _, sp in viable[:count]]
+        elif viable:
+            # Not enough viable candidates — fill remaining slots with the best
+            selected = [sp for _, _, sp in viable]
+            best_spawn = viable[0][2]
+            while len(selected) < count:
+                selected.append(best_spawn)
+            _LOG.warning(
+                "Only %d/%d spawn candidates pass quality gate (starvation < %.0f%%); "
+                "duplicating best candidate",
+                len(viable), count, _SPAWN_MAX_STARVATION * 100,
+            )
+        else:
+            # All candidates are in void — use top N by score as fallback
+            selected = [sp for _, _, sp in scored[:max(count, 1)]]
+            best_starv = scored[0][1]
+            _LOG.warning(
+                "No spawn candidates pass quality gate (best starvation=%.1f%%); "
+                "scene AABB may be much larger than actual geometry",
+                best_starv * 100,
+            )
+
+        _LOG.info(
+            "Selected %d spawn candidates (viable=%d/%d, best_score=%.2f, best_starvation=%.1f%%)",
+            len(selected), len(viable), len(scored), scored[0][0], scored[0][1] * 100,
+        )
         return selected
