@@ -33,6 +33,7 @@ class ImagePanel(pg.GraphicsLayoutWidget):
     def __init__(self, title: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent=parent)
         self._title = title
+        self._cached_bgr: np.ndarray | None = None
 
         self._view = self.addViewBox(row=0, col=0)
         self._view.setAspectLocked(False)
@@ -52,6 +53,7 @@ class ImagePanel(pg.GraphicsLayoutWidget):
 
     def set_image(self, bgr: np.ndarray) -> None:
         """Update displayed image from BGR uint8 array (H, W, 3)."""
+        self._cached_bgr = bgr.copy()
         # pyqtgraph ImageItem expects (W, H, 3) RGB
         rgb = bgr[:, :, ::-1]  # BGR → RGB
         transposed = np.ascontiguousarray(rgb.transpose(1, 0, 2))
@@ -71,6 +73,10 @@ class ImagePanel(pg.GraphicsLayoutWidget):
     def get_arrow(self) -> ActionArrow | None:
         """Return the attached arrow, if any."""
         return self._arrow
+
+    def get_cached_image(self) -> np.ndarray | None:
+        """Return the last BGR image passed to ``set_image``, or *None*."""
+        return self._cached_bgr
 
 
 # ── ActionArrow — direction + confidence overlay ─────────────────────
@@ -252,3 +258,21 @@ class StatusBar(QtWidgets.QFrame):
             self._scene_label.setText(f"Scene: {name}")
         else:
             self._scene_label.setText("")
+
+    def flash_message(self, text: str, duration_ms: int = 3000) -> None:
+        """Temporarily replace the metrics line with *text*, then restore."""
+        from PyQt6 import QtCore
+
+        prev = self._metrics_label.text()
+        self._metrics_label.setText(text)
+        self._metrics_label.setStyleSheet(
+            "color: #7dff7d; font-weight: 700; font-size: 13px; padding: 2px 4px;"
+        )
+
+        def _restore() -> None:
+            self._metrics_label.setText(prev)
+            self._metrics_label.setStyleSheet(
+                "color: #d5dde8; font-weight: 600; font-size: 13px; padding: 2px 4px;"
+            )
+
+        QtCore.QTimer.singleShot(duration_ms, _restore)

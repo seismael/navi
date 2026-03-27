@@ -6,8 +6,15 @@ depth view with mode/status indication and a count of discovered actors.
 
 from __future__ import annotations
 
+import json
+import logging
 import time
+from collections import deque
+from datetime import UTC, datetime
+from pathlib import Path
 
+import cv2
+import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -16,12 +23,15 @@ from navi_auditor.dashboard.panels import (
     StatusBar,
 )
 from navi_auditor.dashboard.renderers import (
+    depth_to_observer_palette,
     render_first_person,
 )
 from navi_auditor.dashboard.status_line import build_status_metrics_line
 from navi_auditor.stream_engine import StreamEngine, StreamState
 
 __all__: list[str] = ["GhostMatrixDashboard"]
+
+_LOG = logging.getLogger(__name__)
 
 
 class GhostMatrixDashboard(QtWidgets.QMainWindow):
@@ -229,6 +239,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         elif key in (QtCore.Qt.Key.Key_D, QtCore.Qt.Key.Key_Right):
             self._yaw = -self._yaw_rate_max
 
+        # F12 — diagnostic snapshot
+        if key == QtCore.Qt.Key.Key_F12:
+            self._capture_snapshot()
+            return
+
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QtGui.QKeyEvent | None) -> None:  # type: ignore[override]  # noqa: N802
@@ -259,6 +274,172 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         if event is not None:
             event.accept()
         super().closeEvent(event)
+
+    # ── diagnostic snapshot (F12) ───────────────────────────────────────
+
+    def _capture_snapshot(self) -> None:
+        """Dump a comprehensive diagnostic snapshot of actor 0 to disk."""
+        from navi_contracts import DistanceMatrix
+
+        state = self._engine.actor_states.get(0)
+        if state is None or state.latest_matrix is None:
+            self._status_bar.flash_message("Snapshot failed: no observation data")
+            return
+
+        dm = state.latest_matrix
+        assert isinstance(dm, DistanceMatrix)
+
+        ts = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+        out_dir = Path("artifacts") / "dashboard-captures" / f"snapshot_{ts}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_depth = np.asarray(dm.depth[0], dtype=np.float32)
+        raw_valid = np.asarray(dm.valid_mask[0], dtype=bool)
+        raw_semantic = np.asarray(dm.semantic[0], dtype=np.int32)
+        raw_delta = np.asarray(dm.delta_depth[0], dtype=np.float32)
+
+        # ── 1. Raw arrays ───────────────────────────────────────────
+        np.savez_compressed(
+            out_dir / "distance_matrix_arrays.npz",
+            depth=raw_depth,
+            delta_depth=raw_delta,
+            valid_mask=raw_valid,
+            semantic=raw_semantic,
+        )
+
+        # ── 2. Rendered perspective (current viewport) ───────────
+        perspective_img, _center_m = render_first_person(
+            raw_depth, raw_semantic, raw_valid, 960, 720,
+            pitch=float(dm.robot_pose.pitch),
+        )
+        cv2.imwrite(str(out_dir / "perspective.png"), perspective_img)
+
+        # ── 3. Full 360° panoramic depth heatmap ─────────────────
+        pano_depth = raw_depth.T.astype(np.float32)   # (el, az)
+        pano_valid = raw_valid.T
+        pano_img = depth_to_observer_palette(pano_depth, pano_valid, fog_of_war=True)
+        pano_img = cv2.resize(pano_img, (960, 240), interpolation=cv2.INTER_NEAREST)
+        cv2.imwrite(str(out_dir / "panorama_full.png"), pano_img)
+
+        # ── 4. Valid mask visualisation ───────────────────────────
+        valid_vis: np.ndarray = (raw_valid.T.astype(np.uint8) * np.uint8(255))
+        valid_vis = cv2.resize(valid_vis, (960, 240), interpolation=cv2.INTER_NEAREST)
+        cv2.imwrite(str(out_dir / "panorama_valid.png"), valid_vis)
+
+        # ── 5. Robot pose ────────────────────────────────────────
+        pose = dm.robot_pose
+        pose_dict = {
+            "x": pose.x, "y": pose.y, "z": pose.z,
+            "roll": pose.roll, "pitch": pose.pitch, "yaw": pose.yaw,
+            "timestamp": pose.timestamp,
+        }
+        (out_dir / "robot_pose.json").write_text(
+            json.dumps(pose_dict, indent=2), encoding="utf-8",
+        )
+
+        # ── 6. Observation metadata ─────────────────────────────
+        obs_meta = {
+            "episode_id": int(dm.episode_id),
+            "step_id": int(dm.step_id),
+            "env_ids": [int(x) for x in dm.env_ids],
+            "matrix_shape": [int(raw_depth.shape[0]), int(raw_depth.shape[1])],
+            "timestamp": float(dm.timestamp),
+        }
+        (out_dir / "observation_metadata.json").write_text(
+            json.dumps(obs_meta, indent=2), encoding="utf-8",
+        )
+
+        # ── 7. Comprehensive actor state dump ───────────────────
+        actor_dump = _build_actor_state_dump(state, dm, raw_depth, raw_valid)
+        (out_dir / "actor_state.json").write_text(
+            json.dumps(actor_dump, indent=2), encoding="utf-8",
+        )
+
+        self._status_bar.flash_message(f"Snapshot saved \u2192 {out_dir}")
+        _LOG.info("Dashboard snapshot saved to %s", out_dir)
+
+
+# ── snapshot helpers (module-level to keep class lean) ───────────────
+
+
+def _deque_tail(d: deque[float], n: int = 200) -> list[float]:
+    """Return at most the last *n* values from a ring buffer."""
+    items = list(d)
+    return items[-n:]
+
+
+def _build_actor_state_dump(
+    state: StreamState,
+    dm: object,
+    raw_depth: np.ndarray,
+    raw_valid: np.ndarray,
+) -> dict[str, object]:
+    """Build a JSON-serialisable dict capturing the full actor 0 diagnostic state."""
+    from navi_contracts import Action, DistanceMatrix
+
+    assert isinstance(dm, DistanceMatrix)
+
+    valid_depths = raw_depth[raw_valid] if np.any(raw_valid) else np.array([], dtype=np.float32)
+    max_dist_approx = float(raw_depth.max()) if raw_depth.size > 0 else 1.0
+    starvation_ratio = float(np.mean(raw_depth >= max_dist_approx - 1e-3)) if raw_depth.size > 0 else 0.0
+    proximity_ratio = float(np.mean(raw_valid & (raw_depth <= 0.15))) if raw_depth.size > 0 else 0.0
+
+    action_info: dict[str, object] = {}
+    if state.latest_action is not None and isinstance(state.latest_action, Action):
+        act = state.latest_action
+        action_info = {
+            "linear_velocity": act.linear_velocity[0].tolist() if len(act.linear_velocity) > 0 else [],
+            "angular_velocity": act.angular_velocity[0].tolist() if len(act.angular_velocity) > 0 else [],
+            "policy_id": act.policy_id,
+            "step_id": int(act.step_id),
+        }
+
+    return {
+        "capture_utc": datetime.now(tz=UTC).isoformat(),
+        "scene_name": state.current_scene_name,
+        "action": action_info,
+        "depth_statistics": {
+            "valid_ratio": float(np.mean(raw_valid.astype(np.float32))),
+            "starvation_ratio": starvation_ratio,
+            "proximity_ratio": proximity_ratio,
+            "valid_min": float(valid_depths.min()) if valid_depths.size > 0 else None,
+            "valid_max": float(valid_depths.max()) if valid_depths.size > 0 else None,
+            "valid_mean": float(valid_depths.mean()) if valid_depths.size > 0 else None,
+            "valid_median": float(np.median(valid_depths)) if valid_depths.size > 0 else None,
+            "valid_std": float(valid_depths.std()) if valid_depths.size > 0 else None,
+            "total_bins": int(raw_depth.size),
+            "valid_bins": int(np.sum(raw_valid)),
+        },
+        "histories": {
+            "reward": _deque_tail(state.reward_history),
+            "collision": _deque_tail(state.collision_history),
+            "forward_cmd": _deque_tail(state.forward_cmd_history),
+            "yaw_cmd": _deque_tail(state.yaw_cmd_history),
+            "front_depth": _deque_tail(state.front_depth_history),
+            "mean_depth": _deque_tail(state.mean_depth_history),
+            "near_fraction": _deque_tail(state.near_fraction_history),
+        },
+        "ppo_histories": {
+            "reward_ema": _deque_tail(state.ppo_reward_ema_history),
+            "policy_loss": _deque_tail(state.ppo_policy_loss_history),
+            "value_loss": _deque_tail(state.ppo_value_loss_history),
+            "entropy": _deque_tail(state.ppo_entropy_history),
+            "kl": _deque_tail(state.ppo_kl_history),
+            "clip_fraction": _deque_tail(state.ppo_clip_fraction_history),
+            "total_loss": _deque_tail(state.ppo_total_loss_history),
+            "lr": _deque_tail(state.ppo_lr_history),
+            "raw_reward": _deque_tail(state.ppo_raw_reward_history),
+            "shaped_reward": _deque_tail(state.ppo_shaped_reward_history),
+            "done": _deque_tail(state.ppo_done_history),
+        },
+        "perf_histories": {
+            "sps": _deque_tail(state.perf_sps_history),
+            "forward_ms": _deque_tail(state.perf_forward_ms_history),
+            "batch_step_ms": _deque_tail(state.perf_batch_step_ms_history),
+            "opt_ms": _deque_tail(state.perf_opt_ms_history),
+            "tick_ms": _deque_tail(state.perf_tick_ms_history),
+        },
+    }
 
 
 def run_dashboard(
