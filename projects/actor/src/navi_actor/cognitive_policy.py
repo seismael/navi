@@ -465,8 +465,15 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         path: str | Path,
         **kwargs: Any,
     ) -> CognitiveMambaPolicy:
-        """Load model from checkpoint."""
+        """Load model from checkpoint.
+
+        Accepts both plain state-dicts (from ``save_checkpoint``) and full
+        training snapshots that wrap the model weights under a
+        ``policy_state_dict`` key.
+        """
         policy = cls(**kwargs)
-        state = torch.load(path, weights_only=True, map_location="cpu")
+        state = torch.load(path, weights_only=False, map_location="cpu")
+        if "policy_state_dict" in state:
+            state = state["policy_state_dict"]
         policy.load_state_dict(state)
         return policy

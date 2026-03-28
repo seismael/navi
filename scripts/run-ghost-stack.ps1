@@ -678,14 +678,14 @@ try {
     Write-Host "Starting Environment..."
     $envProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $envArgs -StdOutFile $envLogOut -StdErrFile $envLogErr
     Write-Host "  PID: $($envProc.Id)"
-    if (-not (Wait-ForPorts -Ports @(5559, 5560) -TimeoutSeconds 20)) {
+    if (-not (Wait-ForPorts -Ports @(5559, 5560) -TimeoutSeconds 60)) {
         throw "Environment readiness failed: ports 5559/5560 did not bind in time."
     }
 
     Write-Host "Starting Actor..."
     $actorProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $actorArgs -StdOutFile $actorLogOut -StdErrFile $actorLogErr
     Write-Host "  PID: $($actorProc.Id)"
-    if (-not (Wait-ForPorts -Ports @(5557) -TimeoutSeconds 20)) {
+    if (-not (Wait-ForPorts -Ports @(5557) -TimeoutSeconds 60)) {
         throw "Actor readiness failed: port 5557 did not bind in time."
     }
 
