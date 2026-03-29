@@ -2,7 +2,7 @@
 
 **GMDAG 3D Inspector** — interactive viewer and mesh exporter for `.gmdag` files produced by the Navi voxel-dag compiler.
 
-Load any `.gmdag` file, explore the compiled SDF octree as a 3D voxel structure with flight-style navigation (arrow keys / WASD to fly, mouse to look around), inspect metadata, and export to standard mesh formats (PLY, OBJ, STL) for use in external tools like Blender, MeshLab, or CloudCompare.
+Load any `.gmdag` file, explore the compiled SDF octree as a 3D voxel structure with standard trackball navigation (free orbit, pan, constant-pace scroll movement), inspect metadata, and export to standard mesh formats (PLY, OBJ, STL) for use in external tools.
 
 The default **voxel** mode renders near-surface cells as solid coloured blocks, so walls and floors are clearly visible while architectural openings (doors, windows, corridors) appear as natural gaps. Press **M** to toggle to a traditional marching-cubes surface mesh.
 
@@ -212,20 +212,14 @@ uv run navi-inspector corpus artifacts/gmdag/corpus
 
 Once the 3D viewer window is open, the following controls are available:
 
-### Navigation (VTK flight style)
-
-Hold arrow keys or WASD to fly. The camera moves continuously while a key is held.
+### Movement
 
 | Key | Action | Description |
 |-----|--------|-------------|
-| **↑ Arrow / W** | Fly forward | Move along the camera facing direction. |
-| **↓ Arrow / S** | Fly backward | Move opposite to the camera facing direction. |
-| **← Arrow** | Turn left | Yaw the camera left while flying. |
-| **→ Arrow** | Turn right | Yaw the camera right while flying. |
-| **A** | Fly up | Move up along the world vertical axis. |
-| **Z** | Fly down | Move down along the world vertical axis. |
-| **+** | Speed up | Double the flight speed. |
-| **-** | Speed down | Halve the flight speed. |
+| **W / ↑ Arrow** | Move forward | Translate camera along the view direction at constant pace. |
+| **S / ↓ Arrow** | Move backward | Translate camera backward at constant pace. |
+| **+** | Speed up | Double the movement speed. |
+| **-** | Speed down | Halve the movement speed. |
 
 ### Display toggles
 
@@ -245,14 +239,19 @@ Hold arrow keys or WASD to fly. The camera moves continuously while a key is hel
 
 ## Viewer Mouse Controls
 
-In flight mode the mouse controls where you look:
+The viewer uses **standard trackball camera** (free orbit in any direction) with a **constant-pace scroll** override:
 
 | Input | Action |
 |-------|--------|
-| **Left-click + drag** | Pitch and yaw the camera (look around) |
+| **Left-click + drag** | Free orbit (rotate in any direction) |
+| **Middle-click + drag** | Pan the scene |
+| **Shift + left-click + drag** | Pan the scene (alternative) |
+| **Right-click + drag** | Dolly zoom |
+| **Ctrl + left-click + drag** | Spin (roll) |
+| **Mouse scroll wheel** | Move forward / backward (constant pace — never stalls) |
 
-> **Tip:** Hold an arrow key or W to fly forward while dragging the mouse to steer. Use **+** and **-** to adjust flight speed.
-
+> **Tip:** Scroll wheel moves the camera at a fixed step size (3 % of scene diagonal). Use **+** / **-** to double or halve the step. Left-drag to orbit freely, middle-drag to pan.
+ 
 ---
 
 ## PowerShell Wrapper Script
@@ -298,22 +297,22 @@ Settings are managed via `pydantic-settings` and can be configured through envir
 
 ```ini
 NAVI_INSPECTOR_DEFAULT_RESOLUTION=256
-NAVI_INSPECTOR_EXPORT_RESOLUTION=512
-NAVI_INSPECTOR_CACHE_DIR=artifacts/inspector/cache
-```
-
----
-
-## Pipeline Architecture
-
-The inspector follows a linear extraction pipeline:
-
-```
-┌──────────────┐     ┌───────────────┐     ┌──────────────┐     ┌─────────────┐
-│  .gmdag file │────▶│  DAG Extractor │────▶│ Mesh Builder │────▶│   Viewer /  │
-│  (binary)    │     │  (SDF grid)    │     │ (marching    │     │   Exporter  │
-│              │     │                │     │  cubes)      │     │             │
-└──────────────┘     └───────────────┘     └──────────────┘     └─────────────┘
+NAVI_INSPECTOR_EXPORT_RESOLUTION=512G
+NAVI_INSPECTOR_CACHE_DIR=artifacts/inspector/cacheG
+```G
+G
+---G
+G
+## Pipeline ArchitectureG
+G
+The inspector follows a linear extraction pipeline:G
+G
+```G
+┌──────────────┐     ┌───────────────┐     ┌──────────────┐     ┌─────────────┐G
+│  .gmdag file │────▶│  DAG Extractor │────▶│ Mesh Builder │────▶│   Viewer /  │G
+│  (binary)    │     │  (SDF grid)    │     │ (marching    │     │   Exporter  │G
+│              │     │                │     │  cubes)      │     │             │G
+└──────────────┘     └───────────────┘     └──────────────┘     └─────────────┘G
       │                                          │
       ▼                                          ▼
   gmdag_io.py                              mesh_builder.py
