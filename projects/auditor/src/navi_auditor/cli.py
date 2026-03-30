@@ -419,6 +419,12 @@ def explore(
     ),
     azimuth_bins: int = typer.Option(256, help="Distance-matrix azimuth bins"),
     elevation_bins: int = typer.Option(48, help="Distance-matrix elevation bins"),
+    record: bool = typer.Option(False, help="Enable demonstration recording (auto-starts, B to pause/resume)."),
+    drone_max_speed: float = typer.Option(5.0, help="Drone max forward speed for action normalization."),
+    drone_climb_rate: float = typer.Option(2.0, help="Drone max climb rate for action normalization."),
+    drone_strafe_speed: float = typer.Option(3.0, help="Drone max strafe speed for action normalization."),
+    drone_yaw_rate: float = typer.Option(3.0, help="Drone max yaw rate for action normalization."),
+    max_steps: int = typer.Option(0, help="Auto-close after N recorded steps (0 = unlimited)."),
 ) -> None:
     """Launch a standalone manual explorer: environment + dashboard with keyboard navigation.
 
@@ -555,6 +561,10 @@ def explore(
     typer.echo("  WASD / Arrow keys = navigate")
     typer.echo("  Tab = toggle manual mode")
     typer.echo("  F12 = capture snapshot")
+    if record:
+        typer.echo("  Recording starts automatically — B toggles pause/resume")
+        if max_steps > 0:
+            typer.echo(f"  Auto-close after {max_steps} recorded steps")
     typer.echo("  ESC / Q = quit")
     typer.echo("")
 
@@ -566,7 +576,14 @@ def explore(
         linear_speed=linear_speed,
         yaw_rate=yaw_rate,
         max_distance_m=resolved_max_distance,
+        scene_path=gmdag_file or None,
         start_manual=True,
+        enable_recording=record,
+        drone_max_speed=drone_max_speed,
+        drone_climb_rate=drone_climb_rate,
+        drone_strafe_speed=drone_strafe_speed,
+        drone_yaw_rate=drone_yaw_rate,
+        max_steps=max_steps,
     )
     dashboard_runner.run()
 

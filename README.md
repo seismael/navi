@@ -91,6 +91,33 @@ discovered dataset corpus and runs continuously until stopped.
 
 ---
 
+## Manual Training (Behavioral Cloning)
+
+Human demonstration capture and supervised pre-training before RL fine-tuning.
+
+```powershell
+# 1. Explore a scene and record demonstrations (auto-starts recording)
+uv run --project .\projects\auditor explore --record --gmdag-file .\artifacts\gmdag\corpus\apartment_1.gmdag
+
+# 2. Train from recorded demonstrations
+uv run --project .\projects\actor brain bc-pretrain
+
+# 3. Resume training with existing checkpoint (incremental multi-scene)
+uv run --project .\projects\actor brain bc-pretrain --checkpoint artifacts\checkpoints\bc_base_model.pt
+
+# 4. Automated multi-scene training loop
+./scripts/run-manual-training.ps1
+```
+
+Demonstrations are saved as `.npz` files under `artifacts/demonstrations/`.
+The BC checkpoint is a standard v2 file loadable by `navi-actor train --checkpoint`
+for RL fine-tuning.
+
+See [docs/TRAINING.md](docs/TRAINING.md) for algorithm details and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § 10.4 for the full pipeline design.
+
+---
+
 ## Corpus Tooling
 
 ```powershell
@@ -197,6 +224,7 @@ uv run --project .\projects\auditor dashboard
 | `run-nightly-validation.ps1` | End-to-end nightly validation suite |
 | `qualify-canonical-stack.ps1` | Canonical stack qualification |
 | `run-attribution-matrix.ps1` | Throughput attribution diagnostics |
+| `run-manual-training.ps1` | Multi-scene BC demonstration + training loop |
 | `setup-actor-cuda.ps1` | CUDA wheel installation for actor env |
 | `check_gpu.py` | GPU availability check |
 | `summarize-bounded-train-log.ps1` | Post-run log summarizer |
@@ -240,7 +268,7 @@ All inter-service communication uses ZMQ with MessagePack serialization.
 | [docs/DATAFLOW.md](docs/DATAFLOW.md) | End-to-end data flow |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Throughput targets and analysis |
 | [docs/RESOLUTION_BENCHMARKS.md](docs/RESOLUTION_BENCHMARKS.md) | Observation-resolution sweep results |
-| [docs/AUDITOR.md](docs/AUDITOR.md) | Auditor layer specification |
+| [docs/AUDITOR.md](docs/AUDITOR.md) | Auditor layer specification (incl. demonstration recording) |
 | [docs/NIGHTLY_VALIDATION.md](docs/NIGHTLY_VALIDATION.md) | Nightly validation pipeline |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | SDF/DAG validation standard |
 | [docs/PARALLEL.md](docs/PARALLEL.md) | Parallel architecture notes |

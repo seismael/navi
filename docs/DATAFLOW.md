@@ -126,10 +126,41 @@ attribution without becoming a second runtime:
 - telemetry publication timing
 - coarse environment perf snapshots
 
-## 9. Related Docs
+## 9. Manual Training (Behavioral Cloning) Dataflow
+
+The BC dataflow is an offline supervised pipeline that reuses the same actor
+policy architecture and observation contract as the canonical trainer:
+
+```text
+Dashboard teleop input
+  -> StreamEngine.send_step_request(fwd, yaw, vert)
+  -> Environment steps scene, returns DistanceMatrix
+  -> DemonstrationRecorder.capture(dm, velocities)
+    -> observation: stack(depth, semantic, valid) -> (3, Az, El) float32
+    -> action: normalise(fwd, vert, lat, yaw) / kinematic_limits -> (4,) float32
+  -> save to .npz on dashboard close
+
+BC Training (offline, in actor project):
+  -> load all .npz from artifacts/demonstrations/
+  -> chunk into BPTT sequences of length T
+  -> for each minibatch:
+      -> policy.evaluate_sequence(obs_seqs, act_seqs, hidden=None)
+      -> loss = -log_prob.mean() - entropy_coeff * entropy
+      -> optimizer step with gradient clipping
+  -> save v2 checkpoint (policy_state_dict + fresh RND)
+  -> optional: load checkpoint for incremental training on next scene
+```
+
+The BC path shares the `evaluate_sequence()` forward pass with PPO but uses
+supervised maximum-likelihood instead of the clipped surrogate objective.
+The temporal core (Mamba-2 SSD or GRU) processes demonstration sequences
+with BPTT, preserving sequential context.
+
+## 10. Related Docs
 
 - `docs/ARCHITECTURE.md`
 - `docs/SIMULATION.md`
 - `docs/ACTOR.md`
 - `docs/PERFORMANCE.md`
 - `docs/AUDITOR.md`
+- `docs/TRAINING.md`

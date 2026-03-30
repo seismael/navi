@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import random as _random
 import time
 import warnings
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     from navi_actor.training.ppo_trainer import PpoTrainer
 
 __all__: list[str] = ["app"]
+
+_LOG = logging.getLogger(__name__)
 
 app = typer.Typer(name="navi-actor", help="Brain Layer — Sacred Cognitive Engine")
 
@@ -819,6 +822,105 @@ def brain(
     else:
         typer.echo(f"Unknown brain mode: {mode}", err=True)
         raise typer.Exit(1)
+
+
+@app.command("bc-pretrain")  # type: ignore[untyped-decorator]
+def bc_pretrain(
+    demonstrations: str = typer.Option(
+        "artifacts/demonstrations",
+        help="Directory containing .npz demonstration files.",
+    ),
+    output: str = typer.Option(
+        "artifacts/checkpoints/bc_base_model.pt",
+        help="Output path for the BC checkpoint.",
+    ),
+    checkpoint: str = typer.Option(
+        "",
+        help="Resume training from an existing checkpoint (.pt) to incrementally improve the model.",
+    ),
+    temporal_core: str = typer.Option(
+        "",
+        help="Temporal core selector: mamba2 (default), gru, or mambapy.",
+    ),
+    embedding_dim: int = typer.Option(128, help="Encoder embedding dimension."),
+    azimuth_bins: int = typer.Option(256, help="Observation azimuth resolution."),
+    elevation_bins: int = typer.Option(48, help="Observation elevation resolution."),
+    epochs: int = typer.Option(50, help="Number of training epochs."),
+    learning_rate: float = typer.Option(1e-3, help="Adam learning rate."),
+    bptt_len: int = typer.Option(8, help="BPTT sequence length."),
+    minibatch_size: int = typer.Option(32, help="Sequences per minibatch."),
+    entropy_coeff: float = typer.Option(0.01, help="Entropy regularization coefficient."),
+    max_grad_norm: float = typer.Option(0.5, help="Gradient clipping threshold."),
+    freeze_log_std: bool = typer.Option(
+        True, help="Freeze policy log-std to preserve exploration capacity for PPO."
+    ),
+) -> None:
+    """Behavioral cloning pre-training from recorded human demonstrations.
+
+    Trains the full CognitiveMambaPolicy pipeline (RayViTEncoder → TemporalCore
+    → ActorCriticHeads) via supervised maximum-likelihood on human navigation
+    demonstrations.  Produces a v2 checkpoint that can be loaded directly by
+    ``navi-actor train --checkpoint <path>`` for RL fine-tuning.
+
+    Workflow:
+      1. Record demonstrations: ``uv run explore --record``
+      2. Pre-train:            ``uv run brain bc-pretrain``
+      3. Fine-tune with RL:    ``uv run brain train --checkpoint artifacts/checkpoints/bc_base_model.pt``
+
+    Incremental workflow (across scenes):
+      1. Fly scene 1:  ``uv run explore --record --gmdag-file scene1.gmdag``
+      2. Train:        ``uv run brain bc-pretrain``
+      3. Fly scene 2:  ``uv run explore --record --gmdag-file scene2.gmdag``
+      4. Update model: ``uv run brain bc-pretrain --checkpoint artifacts/checkpoints/bc_base_model.pt``
+    """
+    setup_logging("navi_actor_bc_pretrain")
+    run_context = get_or_create_run_context("actor-bc-pretrain")
+
+    from navi_actor.config import ActorConfig
+
+    config = ActorConfig()
+    resolved_temporal: TemporalCoreName = cast(
+        TemporalCoreName,
+        temporal_core if temporal_core in SUPPORTED_TEMPORAL_CORES else config.temporal_core,
+    )
+
+    _LOG.info(
+        "BC pre-training — demos=%s temporal=%s epochs=%d lr=%.1e checkpoint=%s",
+        demonstrations,
+        resolved_temporal,
+        epochs,
+        learning_rate,
+        checkpoint or "(none)",
+    )
+
+    from navi_actor.training.bc_trainer import BehavioralCloningTrainer
+
+    resolved_checkpoint = Path(checkpoint) if checkpoint else None
+    if resolved_checkpoint is not None and not resolved_checkpoint.exists():
+        typer.echo(f"Checkpoint not found: {resolved_checkpoint}", err=True)
+        raise typer.Exit(code=1)
+
+    trainer = BehavioralCloningTrainer(
+        demo_dir=Path(demonstrations),
+        output_path=Path(output),
+        checkpoint_path=resolved_checkpoint,
+        temporal_core=resolved_temporal,
+        embedding_dim=embedding_dim,
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        bptt_len=bptt_len,
+        minibatch_size=minibatch_size,
+        entropy_coeff=entropy_coeff,
+        max_grad_norm=max_grad_norm,
+        freeze_log_std=freeze_log_std,
+    )
+    checkpoint_path = trainer.run()
+    typer.echo(f"BC checkpoint saved to {checkpoint_path}")
+    typer.echo("")
+    typer.echo("Next step — fine-tune with RL:")
+    typer.echo(f"  uv run brain train --checkpoint {checkpoint_path}")
 
 
 def brain_main() -> None:

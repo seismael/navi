@@ -82,6 +82,8 @@ artifacts/*.out.log
 checkpoints/
 *.pt
 *.pth
+*.ckpt
+*.npz
 
 # Service-local scratch
 projects/*/artifacts/

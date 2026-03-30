@@ -18,6 +18,7 @@ observer first. Navi now documents that idea against the current codebase.
 | `LiveDashboard` | legacy OpenCV live matrix dashboard surface |
 | `Recorder` | persistent capture of stream data |
 | `Rewinder` | replay via PUB for review and diagnostics |
+| `DemonstrationRecorder` | (observation, action) pair capture during manual navigation |
 | `renderers.py` | pure NumPy rendering utilities |
 
 ## 3. Current Operator UI
@@ -191,7 +192,53 @@ Rules:
 - web-facing surfaces must not widen the canonical wire contract or become a
   required dependency for production training
 
-## 10. Non-Goals
+## 10. Demonstration Recording
+
+**Module:** `demonstration_recorder.py`
+
+The `DemonstrationRecorder` captures `(observation, action)` pairs during manual
+dashboard navigation for behavioral cloning pre-training.  It is a passive data
+collection component that does not modify environment contracts or training
+semantics.
+
+### 10.1 Capture Format
+
+Observations are stored as `(3, Az, El)` float32 arrays matching the actor
+tensor contract:
+
+| Channel | Content | Range |
+|---------|---------|-------|
+| 0 | depth (log-normalised) | `[0, 1]` |
+| 1 | semantic class ID | `[0, N)` |
+| 2 | ray validity mask | `{0.0, 1.0}` |
+
+Actions are stored as `(4,)` float32 in normalised `[-1, 1]` policy space:
+`[forward, vertical, lateral, yaw]`.  Raw m/s and rad/s velocities are divided
+by the drone kinematic limits.
+
+### 10.2 Recording Lifecycle
+
+When the dashboard is launched with `--record`, recording starts automatically.
+Each teleop step that produces movement captures one pair.  The **B** key
+toggles pause/resume.  Data is auto-saved as a compressed `.npz` archive under
+`artifacts/demonstrations/` when the dashboard is closed.
+
+### 10.3 Integration with BC Training
+
+The saved `.npz` files are consumed by `BehavioralCloningTrainer` in the actor
+project (`navi-actor bc-pretrain`).  The auditor does not depend on torch or the
+actor package — it only writes numpy archives.
+
+### 10.4 Passivity Guarantee
+
+The recorder:
+
+- does not modify `DistanceMatrix` or `Action` contracts
+- does not add ZMQ streams or synchronisation barriers
+- does not affect environment stepping cadence
+- captures data strictly from the existing teleop path
+
+## 11. Non-Goals
 
 The auditor layer should not:
 
@@ -200,7 +247,7 @@ The auditor layer should not:
 - define training-time synchronization barriers
 - replace benchmark and verification surfaces with visual inspection alone
 
-## 11. Related Docs
+## 12. Related Docs
 
 - `docs/ARCHITECTURE.md`
 - `docs/DATAFLOW.md`

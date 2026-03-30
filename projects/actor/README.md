@@ -83,6 +83,35 @@ Repository wrappers:
 ./scripts/run-ghost-stack.ps1 -Train -WithDashboard
 ```
 
+### Behavioral Cloning Pre-Training
+
+```bash
+# Train from accumulated human demonstrations
+uv run brain bc-pretrain
+
+# Resume from existing checkpoint (incremental improvement)
+uv run brain bc-pretrain --checkpoint artifacts/checkpoints/bc_base_model.pt
+
+# Custom hyperparameters
+uv run brain bc-pretrain --epochs 100 --learning-rate 5e-4 --bptt-len 16
+```
+
+Demonstrations are recorded in the auditor project:
+
+```bash
+uv run --project projects/auditor explore --record --gmdag-file <scene.gmdag>
+```
+
+Multi-scene incremental training wrapper:
+
+```powershell
+./scripts/run-manual-training.ps1
+./scripts/run-manual-training.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
+```
+
+The BC checkpoint is a standard v2 file loadable by `navi-actor train --checkpoint <path>`
+for RL fine-tuning.
+
 ### Windows Wrapper
 
 ```powershell

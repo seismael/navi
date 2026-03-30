@@ -375,6 +375,31 @@ The dashboard and recorder must tolerate missing producers and idle sockets.
 Observer tooling should display `WAITING` or equivalent non-crashing states when
 upstream streams are absent.
 
+### 10.4 Manual Training Mode (Behavioral Cloning)
+
+Manual training bridges human navigation expertise into the actor policy via
+behavioral cloning (BC).  The pipeline is:
+
+1. **Capture** — the auditor `DemonstrationRecorder` accumulates `(observation,
+   action)` pairs during manual dashboard navigation.  Observations are stored
+   as `(3, Az, El)` float32 arrays (depth, semantic, valid) matching the actor
+   tensor contract.  Actions are stored as `(4,)` float32 in the normalised
+   `[-1, 1]` policy action space.
+2. **Train** — `BehavioralCloningTrainer` in the actor project trains the full
+   `CognitiveMambaPolicy` (RayViTEncoder → TemporalCore → ActorCriticHeads)
+   via supervised maximum-likelihood on the captured demonstrations.  BPTT
+   sequences preserve temporal-core state.
+3. **Checkpoint** — the trainer produces a v2 checkpoint compatible with
+   `PpoTrainer.load_training_state()`.  The `--checkpoint` flag enables
+   incremental improvement across scenes.
+4. **Fine-tune** — the BC checkpoint can be loaded by `navi-actor train
+   --checkpoint <path>` for subsequent RL training, giving the agent a human-
+   informed starting point.
+
+This mode remains passive and optional.  The sacred cognitive pipeline is
+unchanged — BC trains the same architecture that PPO trains.  The auditor
+recorder only captures data; it does not modify environment contracts.
+
 ## 11. Launch Surfaces
 
 | Scope | Command | Notes |
@@ -384,6 +409,9 @@ upstream streams are absent.
 | Actor trainer | `uv run --project projects/actor navi-actor train` | full-corpus default |
 | Environment service | `uv run --project projects/environment environment` | canonical environment shortcut |
 | Dashboard | `uv run --project projects/auditor dashboard` | passive viewer |
+| Manual explore | `uv run --project projects/auditor explore --record` | manual navigation + demo recording |
+| BC pre-training | `uv run --project projects/actor brain bc-pretrain` | supervised policy pre-training |
+| BC incremental | `./scripts/run-manual-training.ps1` | multi-scene incremental BC loop |
 
 ## 12. Document Map
 

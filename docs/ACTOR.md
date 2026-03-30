@@ -488,7 +488,55 @@ The canonical trainer uses one end-to-end pipeline only:
 
 There are no equal-status alternate production trainers.
 
-## 18. Related Docs
+## 18. Behavioral Cloning Pre-Training
+
+**Module:** `training/bc_trainer.py`
+
+Behavioral cloning provides a supervised pre-training path that trains the same
+sacred `CognitiveMambaPolicy` from human navigation demonstrations.  The BC
+trainer shares the `evaluate_sequence()` forward pass with PPO but uses
+maximum-likelihood loss instead of the clipped surrogate objective.
+
+Architectural properties:
+
+- trains the **identical** pipeline: `RayViTEncoder` → `TemporalCore` →
+  `ActorCriticHeads`
+- uses BPTT sequences to preserve temporal-core context
+- freezes `log_std` during BC to preserve exploration capacity for subsequent
+  PPO fine-tuning
+- produces standard v2 checkpoints loadable by `PpoTrainer.load_training_state()`
+- supports `--checkpoint` for incremental improvement across scenes
+
+Demonstration capture occurs in the auditor project (`DemonstrationRecorder`),
+not in the actor.  This preserves the boundary: the auditor records passively,
+the actor trains.  The data exchange format is `.npz` archives with observations
+matching `(N, 3, Az, El)` and actions matching `(N, 4)` in normalised policy
+space.
+
+### 18.1 BC Training Algorithm
+
+1. Load all `.npz` demonstration files from the demonstrations directory.
+2. Chunk concatenated observations and actions into BPTT sequences.
+3. Shuffle and iterate in minibatches through the full dataset per epoch.
+4. Compute loss: `L = -E[log pi(a|o)] - beta * H(pi)` where `H` is entropy.
+5. Gradient clip and Adam optimiser step.
+6. Save v2 checkpoint with fresh RND weights.
+
+### 18.2 BC Commands
+
+```powershell
+# Single-scene workflow
+uv run --project projects/auditor explore --record --gmdag-file <scene.gmdag>
+uv run --project projects/actor brain bc-pretrain
+
+# Incremental multi-scene
+uv run --project projects/actor brain bc-pretrain --checkpoint artifacts/checkpoints/bc_base_model.pt
+
+# Automated corpus loop
+./scripts/run-manual-training.ps1
+```
+
+## 19. Related Docs
 
 - `docs/ARCHITECTURE.md`
 - `docs/SIMULATION.md`

@@ -368,3 +368,127 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLi
 - `rollout_overlap_groups` (`ActorConfig`, env var `NAVI_ACTOR_ROLLOUT_OVERLAP_GROUPS`) controls multi-group pipelined rollout; default is `1` (optimal for MX150's 3 SMs); `2` is available for larger GPUs with enough SMs for concurrent kernel execution
 - on `sm_61`, GPU compute utilization during training is limited by eager PyTorch dispatcher overhead (~72-90 kernel launches per rollout tick, ~165-376 per PPO minibatch) and cannot be improved without `torch.compile` (`sm_70+` required), `mamba-ssm` fused Triton kernels (not available on Windows), or a PPO/rollout double-buffer overlap architecture; see `docs/PERFORMANCE.md` §4.0 for the full analysis
 - canonical `SdfDagBackend` hot-path `cast_rays()` calls use `skip_direction_validation=True` because yaw-rotated unit vectors are mathematically guaranteed normalized, eliminating four GPU→CPU synchronization barriers per call
+
+---
+
+## Behavioral Cloning Pre-Training
+
+Behavioral cloning (BC) provides a supervised pre-training path that bootstraps
+the policy from human navigation demonstrations before RL fine-tuning.
+
+### Overview
+
+The BC pipeline trains the **same** `CognitiveMambaPolicy` architecture that PPO
+trains.  No separate model or surrogate is involved.  The result is a standard
+v2 checkpoint loadable by `navi-actor train --checkpoint <path>`.
+
+### Demonstration Capture
+
+Demonstrations are recorded during manual dashboard navigation using the auditor
+`explore` command:
+
+```powershell
+# Launch explorer with automatic recording
+uv run --project projects/auditor explore --record --gmdag-file <scene.gmdag>
+```
+
+Recording starts automatically when the dashboard opens.  Navigate the scene
+with WASD/arrow keys.  Every teleop step captures the current observation and
+the normalised action.  Demonstrations are saved as `.npz` archives under
+`artifacts/demonstrations/` when the dashboard is closed (ESC/Q) or when the
+user presses **B** to pause recording.
+
+Each `.npz` file contains:
+
+| Key | Shape | Description |
+|-----|-------|-------------|
+| `observations` | `(N, 3, Az, El)` | Stacked depth/semantic/valid channels |
+| `actions` | `(N, 4)` | Normalised `[fwd, vert, lat, yaw]` in `[-1, 1]` |
+| `format_version` | scalar | Archive format version (currently `1`) |
+| `scene` | string | Scene identifier |
+| `azimuth_bins` | scalar | Observation azimuth resolution |
+| `elevation_bins` | scalar | Observation elevation resolution |
+
+Action normalisation uses the drone kinematic limits:
+
+| Channel | Raw Unit | Normaliser | Default |
+|---------|----------|------------|---------|
+| forward | m/s | `drone_max_speed` | 5.0 |
+| vertical | m/s | `drone_climb_rate` | 2.0 |
+| lateral | m/s | `drone_strafe_speed` | 3.0 |
+| yaw | rad/s | `drone_yaw_rate` | 3.0 |
+
+### Single-Scene Training
+
+```powershell
+# Train from scratch on accumulated demonstrations
+uv run --project projects/actor brain bc-pretrain
+
+# Custom hyperparameters
+uv run --project projects/actor brain bc-pretrain --epochs 100 --learning-rate 5e-4 --bptt-len 16
+```
+
+### Incremental Multi-Scene Training
+
+The `--checkpoint` flag loads an existing model before training, enabling
+incremental improvement across scenes:
+
+```powershell
+# Scene 1: explore and record
+uv run --project projects/auditor explore --record --gmdag-file scene1.gmdag
+
+# Train from scratch
+uv run --project projects/actor brain bc-pretrain
+
+# Scene 2: explore and record
+uv run --project projects/auditor explore --record --gmdag-file scene2.gmdag
+
+# Update the existing model with new data
+uv run --project projects/actor brain bc-pretrain \
+    --checkpoint artifacts/checkpoints/bc_base_model.pt
+```
+
+Or use the automated wrapper that loops through the entire corpus:
+
+```powershell
+# Full corpus incremental training
+./scripts/run-manual-training.ps1
+
+# Resume from an existing checkpoint
+./scripts/run-manual-training.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
+
+# Train on specific scenes only
+./scripts/run-manual-training.ps1 -Scenes "scene1.gmdag","scene2.gmdag"
+```
+
+### Training Algorithm
+
+1. Load all `.npz` files from `artifacts/demonstrations/`.
+2. Chunk into BPTT sequences of configurable length (default 8).
+3. Shuffle sequences and iterate in minibatches.
+4. Forward through `evaluate_sequence()` — the same pipeline PPO uses.
+5. Optimise negative log-likelihood loss with entropy regularisation.
+6. Save a v2 checkpoint with fresh RND module weights.
+
+Policy `log_std` is frozen during BC by default (`--freeze-log-std`) to
+preserve exploration capacity for subsequent PPO training.
+
+### Transition to RL Fine-Tuning
+
+The BC checkpoint is a standard v2 file:
+
+```powershell
+uv run --project projects/actor navi-actor train \
+    --checkpoint artifacts/checkpoints/bc_base_model.pt
+```
+
+The RL trainer unfreezes `log_std` and continues optimising the same policy
+weights with PPO.  This gives the agent a human-informed starting point
+instead of learning from zero.
+
+### Default Paths
+
+| Artifact | Default Location |
+|----------|------------------|
+| Demonstrations | `artifacts/demonstrations/*.npz` |
+| BC checkpoint | `artifacts/checkpoints/bc_base_model.pt` |

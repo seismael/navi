@@ -27,6 +27,7 @@ from navi_auditor.dashboard.renderers import (
     render_first_person,
 )
 from navi_auditor.dashboard.status_line import build_status_metrics_line
+from navi_auditor.demonstration_recorder import DemonstrationRecorder
 from navi_auditor.stream_engine import StreamEngine, StreamState
 
 __all__: list[str] = ["GhostMatrixDashboard"]
@@ -65,6 +66,12 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         max_distance_m: float = 30.0,
         scene_path: str | None = None,
         start_manual: bool = False,
+        enable_recording: bool = False,
+        drone_max_speed: float = 5.0,
+        drone_climb_rate: float = 2.0,
+        drone_strafe_speed: float = 3.0,
+        drone_yaw_rate: float = 3.0,
+        max_steps: int = 0,
     ) -> None:
         super().__init__()
         title = "Ghost-Matrix RL Auditor"
@@ -91,6 +98,21 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._yaw = 0.0
         self._scene_path = scene_path
         self._max_distance_m = float(max_distance_m)
+
+        # ── demonstration recorder ───────────────────────────────────
+        self._recorder: DemonstrationRecorder | None = None
+        if enable_recording:
+            self._recorder = DemonstrationRecorder(
+                drone_max_speed=drone_max_speed,
+                drone_climb_rate=drone_climb_rate,
+                drone_strafe_speed=drone_strafe_speed,
+                drone_yaw_rate=drone_yaw_rate,
+                scene_name=scene_path or "",
+            )
+            # Auto-start recording so the user can just fly
+            self._recorder.start()
+
+        self._max_steps = max_steps
 
         # ── build UI ─────────────────────────────────────────────────
         self._status_bar = StatusBar()
@@ -168,6 +190,12 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
         if self._manual_mode:
             mode = "MANUAL"
+            if self._recorder is not None and self._recorder.is_recording:
+                steps = self._recorder.step_count
+                if self._max_steps > 0:
+                    mode = f"MANUAL ● REC ({steps}/{self._max_steps} steps)"
+                else:
+                    mode = f"MANUAL ● REC ({steps} steps)"
         elif has_training_data:
             mode = "TRAINING"
         elif has_inference_data:
@@ -216,6 +244,50 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         has_input = abs(self._fwd) > 0.01 or abs(self._vert) > 0.01 or abs(self._yaw) > 0.01
         if has_input and self._engine.has_step_socket:
             self._engine.send_step_request(self._fwd, self._yaw, self._vert)
+            # Capture demonstration data if recording
+            if (
+                self._recorder is not None
+                and self._recorder.is_recording
+            ):
+                state = self._engine.actor_states.get(0)
+                if state is not None and state.latest_matrix is not None:
+                    self._recorder.capture(
+                        state.latest_matrix,
+                        linear_velocity=self._fwd,
+                        yaw_rate=self._yaw,
+                        vertical_velocity=self._vert,
+                    )
+                    if (
+                        self._max_steps > 0
+                        and self._recorder.step_count >= self._max_steps
+                    ):
+                        _LOG.info(
+                            "Reached max steps (%d) — auto-closing.",
+                            self._max_steps,
+                        )
+                        self.close()
+                        return
+
+    def _toggle_recording(self) -> None:
+        """Toggle demonstration recording on/off."""
+        if self._recorder is None:
+            self._status_bar.set_mode("MANUAL (recording not enabled — use --record)")
+            return
+        if self._recorder.is_recording:
+            self._recorder.stop()
+            if self._recorder.step_count > 0:
+                try:
+                    save_path = self._recorder.save()
+                    _LOG.info("Demonstration saved to %s", save_path)
+                    self._status_bar.set_mode(f"MANUAL — saved {save_path.name}")
+                except Exception:
+                    _LOG.exception("Failed to save demonstration")
+                    self._status_bar.set_mode("MANUAL — save FAILED")
+            else:
+                self._status_bar.set_mode("MANUAL — empty recording discarded")
+        else:
+            self._recorder.start()
+            self._status_bar.set_mode("MANUAL ● REC")
 
     def keyPressEvent(self, event: QtGui.QKeyEvent | None) -> None:  # type: ignore[override]  # noqa: N802
         """Handle key press for teleop and dashboard control."""
@@ -255,6 +327,11 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             self._capture_snapshot()
             return
 
+        # B — toggle demonstration recording
+        if key == QtCore.Qt.Key.Key_B:
+            self._toggle_recording()
+            return
+
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QtGui.QKeyEvent | None) -> None:  # type: ignore[override]  # noqa: N802
@@ -287,6 +364,15 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent | None) -> None:  # type: ignore[override]  # noqa: N802
         """Clean up ZMQ on window close."""
+        # Auto-save any in-progress recording
+        if self._recorder is not None and self._recorder.is_recording:
+            self._recorder.stop()
+            if self._recorder.step_count > 0:
+                try:
+                    save_path = self._recorder.save()
+                    _LOG.info("Auto-saved demonstration on close: %s", save_path)
+                except Exception:
+                    _LOG.exception("Failed to auto-save demonstration on close")
         self._timer.stop()
         self._engine.close()
         if event is not None:
@@ -470,6 +556,12 @@ def run_dashboard(
     max_distance_m: float = 30.0,
     scene_path: str | None = None,
     start_manual: bool = False,
+    enable_recording: bool = False,
+    drone_max_speed: float = 5.0,
+    drone_climb_rate: float = 2.0,
+    drone_strafe_speed: float = 3.0,
+    drone_yaw_rate: float = 3.0,
+    max_steps: int = 0,
 ) -> None:
     """Launch the Ghost-Matrix RL Dashboard as a standalone application."""
     app = pg.mkQApp("Ghost-Matrix RL Auditor")
@@ -484,6 +576,12 @@ def run_dashboard(
         max_distance_m=max_distance_m,
         scene_path=scene_path,
         start_manual=start_manual,
+        enable_recording=enable_recording,
+        drone_max_speed=drone_max_speed,
+        drone_climb_rate=drone_climb_rate,
+        drone_strafe_speed=drone_strafe_speed,
+        drone_yaw_rate=drone_yaw_rate,
+        max_steps=max_steps,
     )
     dashboard.show()
     app.exec()

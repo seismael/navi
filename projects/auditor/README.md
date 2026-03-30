@@ -54,6 +54,40 @@ The dashboard displays:
 - WAITING / OBSERVER / TRAINING / INFERENCE mode indicator
 - Compact status: stall time, SPS, reward EMA, episode count, optimizer wall-time
 
+### Manual Exploration & Demonstration Recording
+
+```bash
+# Launch explorer with automatic demonstration recording
+uv run explore --record
+uv run explore --record --gmdag-file <scene.gmdag>
+
+# Custom kinematic limits for action normalisation
+uv run explore --record --drone-max-speed 5.0 --drone-climb-rate 2.0 --drone-yaw-rate 3.0
+```
+
+When `--record` is active:
+- Recording starts automatically when the dashboard opens
+- Navigate with WASD/arrow keys, Space/Shift for vertical, A/D for yaw
+- **B** toggles pause/resume recording
+- Demonstrations auto-save to `artifacts/demonstrations/` on close (ESC/Q)
+- Status bar shows `MANUAL ● REC (N steps)` during active recording
+
+Saved `.npz` files contain `(observation, action)` pairs compatible
+with `navi-actor bc-pretrain` for behavioral cloning pre-training.
+
+### Multi-Scene Incremental Training
+
+```powershell
+# Automated: loop through corpus, fly each scene, train incrementally
+./scripts/run-manual-training.ps1
+
+# Resume from existing checkpoint
+./scripts/run-manual-training.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
+
+# Specific scenes only
+./scripts/run-manual-training.ps1 -Scenes "scene1.gmdag","scene2.gmdag"
+```
+
 ### Recording & Replay
 
 ```bash
