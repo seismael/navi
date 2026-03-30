@@ -34,6 +34,7 @@ open3d = [
 [project.scripts]
 navi-auditor = "navi_auditor.cli:app"
 dashboard = "navi_auditor.cli:dashboard_shortcut"
+explore = "navi_auditor.cli:explore_shortcut"
 
 [tool.uv.sources]
 navi-contracts = { path = "../contracts", editable = true }

@@ -97,6 +97,16 @@ class EnvironmentConfig(BaseSettings):
     drone_climb_rate: float = Field(default=2.0, gt=0.0)
     drone_strafe_speed: float = Field(default=3.0, gt=0.0)
     drone_yaw_rate: float = Field(default=3.0, gt=0.0)
+    collision_clearance: float = Field(
+        default=0.15,
+        validation_alias="NAVI_COLLISION_CLEARANCE",
+        gt=0.0,
+    )
+    speed_limiter_distance: float = Field(
+        default=0.8,
+        validation_alias="NAVI_SPEED_LIMITER_DISTANCE",
+        gt=0.0,
+    )
     n_actors: int = Field(default=1, gt=0)
     training_mode: bool = False
     compute_overhead: bool = False

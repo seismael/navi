@@ -342,6 +342,8 @@ def _make_tensor_action_backend_stub(*, n_actors: int = 4) -> SdfDagBackend:
     backend._structure_band_min_distance = 1.5
     backend._structure_band_max_distance = 10.0
     backend._proximity_distance_threshold = 1.0
+    backend._collision_clearance = 0.15
+    backend._speed_limiter_distance = 0.8
     backend._needs_reset_mask = torch.zeros((n_actors,), dtype=torch.bool)
     backend._actor_positions = torch.zeros((n_actors, 3), dtype=torch.float32)
     backend._actor_yaws = torch.zeros((n_actors,), dtype=torch.float32)

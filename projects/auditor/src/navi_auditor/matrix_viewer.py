@@ -24,6 +24,7 @@ class MatrixViewer:
         yaw_rate: float = 1.5,
         max_distance_m: float = 30.0,
         scene_path: str | None = None,
+        start_manual: bool = False,
     ) -> None:
         self._matrix_sub = matrix_sub
         self._actor_sub = actor_sub
@@ -33,6 +34,7 @@ class MatrixViewer:
         self._yaw_rate = yaw_rate
         self._max_distance_m = max_distance_m
         self._scene_path = scene_path
+        self._start_manual = start_manual
 
     def run(self) -> None:
         """Launch the PyQtGraph RL Dashboard."""
@@ -51,4 +53,5 @@ class MatrixViewer:
             yaw_rate=self._yaw_rate,
             max_distance_m=self._max_distance_m,
             scene_path=self._scene_path,
+            start_manual=self._start_manual,
         )

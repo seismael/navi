@@ -397,6 +397,183 @@ def dashboard(
     dashboard_runner.run()
 
 
+@app.command()
+def explore(
+    gmdag_file: str = typer.Option(
+        "",
+        help="Path to .gmdag world cache. Auto-discovers from corpus if omitted.",
+    ),
+    pub_address: str = typer.Option(
+        "tcp://localhost:5559",
+        help="ZMQ PUB address for the environment server.",
+    ),
+    rep_address: str = typer.Option(
+        "tcp://localhost:5560",
+        help="ZMQ REP address for step control.",
+    ),
+    hz: float = typer.Option(30.0, help="Dashboard tick rate"),
+    linear_speed: float = typer.Option(1.5, help="Max horizontal linear speed"),
+    yaw_rate: float = typer.Option(1.5, help="Max yaw rate"),
+    max_distance: float | None = typer.Option(
+        None, min=0.01, help="Observation normalization horizon in meters."
+    ),
+    azimuth_bins: int = typer.Option(256, help="Distance-matrix azimuth bins"),
+    elevation_bins: int = typer.Option(48, help="Distance-matrix elevation bins"),
+) -> None:
+    """Launch a standalone manual explorer: environment + dashboard with keyboard navigation.
+
+    Starts the environment server as a subprocess and opens the dashboard
+    in manual mode so you can navigate the scene with WASD / arrow keys
+    without any training process running.
+    """
+    import atexit
+    import signal
+
+    setup_logging("navi_auditor_explore")
+    config = AuditorConfig()
+
+    resolved_max_distance = (
+        float(max_distance)
+        if max_distance is not None
+        else float(config.observation_max_distance_m)
+    )
+
+    # Build environment serve command
+    env_cmd = [
+        *_environment_cli_command(),
+        "serve",
+        "--mode", "step",
+        "--actors", "1",
+        "--pub", f"tcp://*:{pub_address.rsplit(':', 1)[-1]}",
+        "--rep", f"tcp://*:{rep_address.rsplit(':', 1)[-1]}",
+        "--azimuth-bins", str(azimuth_bins),
+        "--elevation-bins", str(elevation_bins),
+        "--max-distance", str(resolved_max_distance),
+    ]
+    if gmdag_file:
+        env_cmd.extend(["--gmdag-file", gmdag_file])
+
+    typer.echo("Starting environment server for manual exploration...")
+    typer.echo(f"  Environment command: {' '.join(env_cmd)}")
+
+    # Launch environment as subprocess — clean env to avoid venv cross-talk
+    import os
+
+    env_vars: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if k.startswith("UV_"):
+            continue
+        if k.startswith("PYTHON"):
+            continue
+        if k == "VIRTUAL_ENV":
+            continue
+        env_vars[k] = v
+    if "PATH" in env_vars:
+        env_vars["PATH"] = os.pathsep.join(
+            p
+            for p in env_vars["PATH"].split(os.pathsep)
+            if ".venv" not in p and "projects\\auditor" not in p
+        )
+
+    env_proc = subprocess.Popen(  # noqa: S603
+        env_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=_repo_root(),
+        env=env_vars,
+    )
+
+    def _kill_env() -> None:
+        if env_proc.poll() is None:
+            try:
+                if hasattr(signal, "CTRL_BREAK_EVENT"):
+                    env_proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    env_proc.terminate()
+                env_proc.wait(timeout=5)
+            except Exception:  # noqa: S110
+                env_proc.kill()
+
+    atexit.register(_kill_env)
+
+    # Wait for the environment to become ready
+    typer.echo("  Waiting for environment to start...")
+    _ready = False
+    for _attempt in range(30):
+        if env_proc.poll() is not None:
+            stderr_out = (env_proc.stderr.read() or b"").decode("utf-8", errors="replace")
+            typer.echo(f"  Environment exited unexpectedly: {stderr_out[:500]}", err=True)
+            raise typer.Exit(code=1)
+
+        ctx = zmq.Context()
+        probe = ctx.socket(zmq.REQ)
+        probe.setsockopt(zmq.RCVTIMEO, 500)
+        probe.setsockopt(zmq.SNDTIMEO, 500)
+        probe.setsockopt(zmq.LINGER, 0)
+        probe.setsockopt(zmq.REQ_RELAXED, 1)
+        probe.setsockopt(zmq.REQ_CORRELATE, 1)
+        try:
+            probe.connect(rep_address)
+            # Send a no-op step request to test if the server is alive
+            from navi_contracts import Action, StepRequest, serialize
+
+            noop_action = Action(
+                env_ids=np.array([0], dtype=np.int32),
+                linear_velocity=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+                angular_velocity=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+                policy_id="explore-probe",
+                step_id=0,
+                timestamp=time.time(),
+            )
+            probe.send(serialize(StepRequest(
+                action=noop_action,
+                step_id=0,
+                timestamp=time.time(),
+            )))
+            _reply = probe.recv()
+            _ready = True
+        except zmq.Again:
+            time.sleep(1.0)
+            continue
+        except Exception:
+            time.sleep(1.0)
+            continue
+        finally:
+            probe.close(linger=0)
+            ctx.term()
+        if _ready:
+            break
+
+    if not _ready:
+        typer.echo("  Environment did not become ready within 30 seconds.", err=True)
+        _kill_env()
+        raise typer.Exit(code=1)
+
+    typer.echo("  Environment ready!")
+    typer.echo("")
+    typer.echo("Ghost-Matrix Explorer")
+    typer.echo("  WASD / Arrow keys = navigate")
+    typer.echo("  Tab = toggle manual mode")
+    typer.echo("  F12 = capture snapshot")
+    typer.echo("  ESC / Q = quit")
+    typer.echo("")
+
+    dashboard_runner = _get_matrix_viewer_class()(
+        matrix_sub=pub_address,
+        actor_sub="",
+        step_endpoint=rep_address,
+        hz=hz,
+        linear_speed=linear_speed,
+        yaw_rate=yaw_rate,
+        max_distance_m=resolved_max_distance,
+        start_manual=True,
+    )
+    dashboard_runner.run()
+
+    # Dashboard closed — kill environment
+    _kill_env()
+
+
 @app.command("dashboard-attach-check")
 def dashboard_attach_check(
     actor_sub: str = typer.Option(None, help="Actor or replay PUB SUB address to observe."),
@@ -681,6 +858,13 @@ def dataset_audit(
 def dashboard_shortcut() -> None:
     """Shortcut for 'navi-auditor dashboard' command."""
     app(["dashboard"])
+
+
+def explore_shortcut() -> None:
+    """Shortcut for 'navi-auditor explore' command."""
+    import sys
+
+    app(["explore", *sys.argv[1:]])
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ __all__: list[str] = [
 
 _LOG = logging.getLogger(__name__)
 
-_COLLISION_CLEARANCE: float = 0.35
+_COLLISION_CLEARANCE: float = 0.15
 _EXPLORATION_REWARD: float = 0.3
 _PROGRESS_REWARD_SCALE: float = 0.8
 _COLLISION_PENALTY: float = -2.0
@@ -497,6 +497,7 @@ def _reward_components_tensor(
     forward_structure_reward_scale: float,
     inspection_activation_threshold: float,
     inspection_reward_scale: float,
+    starvation_dead_zone: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     progress_rewards = torch.linalg.vector_norm(current_positions - previous_positions, dim=-1)
     progress_rewards = progress_rewards * progress_reward_scale
@@ -513,8 +514,8 @@ def _reward_components_tensor(
             * norm_deltas.clamp(min=-1.0, max=1.0)
             * obstacle_clearance_reward_scale
         )
-    # Dead zone: starvation below _STARVATION_DEAD_ZONE is free (normal viewing).
-    effective_starvation = (starvation_ratios - _STARVATION_DEAD_ZONE).clamp(min=0.0)
+    # Dead zone: starvation below starvation_dead_zone is free (normal viewing).
+    effective_starvation = (starvation_ratios - starvation_dead_zone).clamp(min=0.0)
     starvation_baselines = 0.35 * effective_starvation
     # Overflow accelerates penalty above the raw-ratio threshold.
     starvation_overflows = (starvation_ratios - starvation_ratio_threshold).clamp(min=0.0)
@@ -571,6 +572,7 @@ def _step_kinematics_tensor(
     speed_yaw: float,
     smoothing: float,
     dt: float,
+    speed_limiter_distance: float = 0.8,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     actor_count = int(previous_depths.shape[0])
     span = max(1, int(previous_depths.shape[1]) // 8)
@@ -581,7 +583,7 @@ def _step_kinematics_tensor(
     # Invert to recover metric distance for the speed limiter.
     _log_denom = math.log1p(max_distance)
     min_front_metric = torch.expm1(min_front * _log_denom)
-    speed_factors = (min_front_metric / 1.5).clamp(min=0.05, max=1.0).unsqueeze(1)
+    speed_factors = (min_front_metric / speed_limiter_distance).clamp(min=0.05, max=1.0).unsqueeze(1)
 
     linear_cmd = actions_linear.clone()
     linear_cmd[:, 0] *= speed_fwd
@@ -705,6 +707,12 @@ class SdfDagBackend(SimulatorBackend):
         )
         self._inspection_activation_threshold = float(
             getattr(config, "inspection_activation_threshold", _INSPECTION_ACTIVATION_THRESHOLD)
+        )
+        self._collision_clearance = float(
+            getattr(config, "collision_clearance", _COLLISION_CLEARANCE)
+        )
+        self._speed_limiter_distance = float(
+            getattr(config, "speed_limiter_distance", 0.8)
         )
         self._scene_pool: list[str] = list(config.scene_pool) if config.scene_pool else []
         self._scene_pool_idx: int = 0
@@ -1087,7 +1095,7 @@ class SdfDagBackend(SimulatorBackend):
                 metric_2d = metric_batch[batch_idx]
 
                 min_distance = float(all_min_distances[batch_idx])
-                collision = min_distance < _COLLISION_CLEARANCE
+                collision = min_distance < self._collision_clearance
                 previous_clearance = float(self._prev_min_distances[actor_id])
 
                 if collision:
@@ -1321,7 +1329,7 @@ class SdfDagBackend(SimulatorBackend):
                 _clamped_metric_t,
             ) = self._postprocess_cast_outputs(out_distances, out_semantics)
 
-            collisions_t = min_distances_t < _COLLISION_CLEARANCE
+            collisions_t = min_distances_t < self._collision_clearance
             current_positions_t = self._torch.where(
                 collisions_t.unsqueeze(1), previous_positions_t, positions
             )
@@ -2025,6 +2033,7 @@ class SdfDagBackend(SimulatorBackend):
             forward_structure_reward_scale=self._forward_structure_reward_scale,
             inspection_activation_threshold=self._inspection_activation_threshold,
             inspection_reward_scale=self._inspection_reward_scale,
+            starvation_dead_zone=_STARVATION_DEAD_ZONE,
         )
 
     def _step_kinematics_indexed(
@@ -2056,6 +2065,7 @@ class SdfDagBackend(SimulatorBackend):
             speed_yaw=self._speed_yaw,
             smoothing=self._smoothing,
             dt=self._dt,
+            speed_limiter_distance=self._speed_limiter_distance,
         )
         self._prev_linear_vels[actor_indices] = smooth_linear
         self._prev_angular_vels[actor_indices] = smooth_angular
@@ -2099,6 +2109,7 @@ class SdfDagBackend(SimulatorBackend):
             speed_yaw=self._speed_yaw,
             smoothing=self._smoothing,
             dt=self._dt,
+            speed_limiter_distance=self._speed_limiter_distance,
         )
         self._prev_linear_vels[actor_indices] = smooth_linear
         self._prev_angular_vels[actor_indices] = smooth_angular

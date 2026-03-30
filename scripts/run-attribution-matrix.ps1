@@ -11,6 +11,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+trap [System.Management.Automation.BreakException] {
+    Write-Host "`nInterrupted. Cleaning up Navi processes..."
+    Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -and ($_.CommandLine -like "*navi-actor*")
+    } | ForEach-Object {
+        try { & taskkill /PID $_.ProcessId /T /F *> $null } catch {}
+    }
+    exit 1
+}
+
 function Get-RepoRoot {
     $root = Resolve-Path (Join-Path $PSScriptRoot "..")
     return $root.Path

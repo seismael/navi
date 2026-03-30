@@ -29,6 +29,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+trap [System.Management.Automation.BreakException] {
+    Write-Host "`nInterrupted. Cleaning up Navi processes..."
+    Stop-NaviProcesses -ActorTelemetryPort $BaseActorTelemetryPort
+    exit 1
+}
+
 function Get-RepoRoot {
     $root = Resolve-Path (Join-Path $PSScriptRoot "..")
     return $root.Path

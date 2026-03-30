@@ -707,6 +707,7 @@ def profile(
 ) -> None:
     """Run a fixed-length rollout with CUDA profiling active (Phase 14)."""
     del ctx
+    setup_logging("navi_actor_profile")
     import torch
 
     from navi_actor.training.ppo_trainer import PpoTrainer

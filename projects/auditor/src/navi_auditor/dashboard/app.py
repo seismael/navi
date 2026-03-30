@@ -64,9 +64,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         yaw_rate: float = 1.5,
         max_distance_m: float = 30.0,
         scene_path: str | None = None,
+        start_manual: bool = False,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("Ghost-Matrix RL Auditor")
+        title = "Ghost-Matrix RL Auditor"
+        if start_manual:
+            title = "Ghost-Matrix Explorer — WASD to navigate, ESC to quit"
+        self.setWindowTitle(title)
         self.resize(1920, 1080)
         self.setStyleSheet("QMainWindow { background: #0d0d1a; }")
 
@@ -81,8 +85,9 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         # Teleop state
         self._linear_speed = linear_speed
         self._yaw_rate_max = yaw_rate
-        self._manual_mode = False
+        self._manual_mode = start_manual and self._engine.has_step_socket
         self._fwd = 0.0
+        self._vert = 0.0
         self._yaw = 0.0
         self._scene_path = scene_path
         self._max_distance_m = float(max_distance_m)
@@ -208,9 +213,9 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         """Send step request if in manual mode with active input."""
         if not self._manual_mode:
             return
-        has_input = abs(self._fwd) > 0.01 or abs(self._yaw) > 0.01
+        has_input = abs(self._fwd) > 0.01 or abs(self._vert) > 0.01 or abs(self._yaw) > 0.01
         if has_input and self._engine.has_step_socket:
-            self._engine.send_step_request(self._fwd, self._yaw)
+            self._engine.send_step_request(self._fwd, self._yaw, self._vert)
 
     def keyPressEvent(self, event: QtGui.QKeyEvent | None) -> None:  # type: ignore[override]  # noqa: N802
         """Handle key press for teleop and dashboard control."""
@@ -239,6 +244,12 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         elif key in (QtCore.Qt.Key.Key_D, QtCore.Qt.Key.Key_Right):
             self._yaw = -self._yaw_rate_max
 
+        # Vertical (Space/R = up, Shift/F = down)
+        if key in (QtCore.Qt.Key.Key_Space, QtCore.Qt.Key.Key_R):
+            self._vert = self._linear_speed
+        elif key in (QtCore.Qt.Key.Key_Shift, QtCore.Qt.Key.Key_F):
+            self._vert = -self._linear_speed
+
         # F12 — diagnostic snapshot
         if key == QtCore.Qt.Key.Key_F12:
             self._capture_snapshot()
@@ -265,6 +276,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             QtCore.Qt.Key.Key_Right,
         ):
             self._yaw = 0.0
+        if key in (
+            QtCore.Qt.Key.Key_Space,
+            QtCore.Qt.Key.Key_R,
+            QtCore.Qt.Key.Key_Shift,
+            QtCore.Qt.Key.Key_F,
+        ):
+            self._vert = 0.0
         super().keyReleaseEvent(event)
 
     def closeEvent(self, event: QtGui.QCloseEvent | None) -> None:  # type: ignore[override]  # noqa: N802
@@ -451,6 +469,7 @@ def run_dashboard(
     yaw_rate: float = 1.5,
     max_distance_m: float = 30.0,
     scene_path: str | None = None,
+    start_manual: bool = False,
 ) -> None:
     """Launch the Ghost-Matrix RL Dashboard as a standalone application."""
     app = pg.mkQApp("Ghost-Matrix RL Auditor")
@@ -464,6 +483,7 @@ def run_dashboard(
         yaw_rate=yaw_rate,
         max_distance_m=max_distance_m,
         scene_path=scene_path,
+        start_manual=start_manual,
     )
     dashboard.show()
     app.exec()

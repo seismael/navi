@@ -71,7 +71,6 @@ artifacts/pytest-tmp/
 artifacts/tmp/
 artifacts/qualification/
 artifacts/validation/
-artifacts/inspector/
 
 # Artifact scratch files
 artifacts/*.csv

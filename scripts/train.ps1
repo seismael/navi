@@ -318,50 +318,64 @@ $logErr = Join-Path $LogDir "train.err.log"
 Write-Host "  Starting canonical training engine..."
 Write-Host "  Logs: $logErr"
 
-$trainLaunchStartedAt = Get-Date
-$trainProc = Start-Process -FilePath "uv" -ArgumentList $actorArgs `
-    -WorkingDirectory $repoRoot `
-    -RedirectStandardOutput $logOut `
-    -RedirectStandardError $logErr `
-    -NoNewWindow -PassThru
-
-Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_launch" -StartedAt $trainLaunchStartedAt -ProcessId $trainProc.Id -Metadata ([ordered]@{
-    actors = $NumActors
-    temporal_core = $TemporalCore
-    telemetry_port = $ActorTelemetryPort
-}) | Out-Null
-
-Write-Host "  PID: $($trainProc.Id)"
-Write-Host "  Metrics : $($runContext.MetricsRoot)"
-Write-Host "  Verifying training telemetry readiness ($ActorTelemetryPort)..."
-
-$trainingReadyStartedAt = Get-Date
-$trainingReady = Wait-ForTrainingReady -Process $trainProc -Port $ActorTelemetryPort -LogFiles @($logErr) -TimeoutSeconds 180
-Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_ready" -StartedAt $trainingReadyStartedAt -ProcessId $(if ($null -ne $trainProc) { $trainProc.Id } else { 0 }) -Metadata ([ordered]@{
-    ready = [bool]$trainingReady.Ready
-    reason = [string]$trainingReady.Reason
-    exit_code = if ($trainingReady.ContainsKey('ExitCode')) { $trainingReady.ExitCode } else { $null }
-    telemetry_port = $ActorTelemetryPort
-}) | Out-Null
-
-if (-not $trainingReady.Ready) {
-    if ($null -ne $trainProc) {
+$trainProc = $null
+trap [System.Management.Automation.BreakException] {
+    Write-Host "`nInterrupted. Cleaning up..."
+    if ($null -ne $trainProc -and -not $trainProc.HasExited) {
         Stop-ProcessTreeById -ProcessId $trainProc.Id
     }
-    if ($trainingReady.Reason -eq "process-exited") {
-        throw "Canonical training exited before telemetry became ready (exit code $($trainingReady.ExitCode))."
-    }
-    throw "Training telemetry failed readiness check ($ActorTelemetryPort, reason=$($trainingReady.Reason))."
+    exit 1
 }
 
-$trainExitStartedAt = Get-Date
-Wait-Process -Id $trainProc.Id
-$trainProc.Refresh()
-$exitCode = if ($null -eq $trainProc.ExitCode) { 0 } else { [int]$trainProc.ExitCode }
-Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_exit" -StartedAt $trainExitStartedAt -Metadata ([ordered]@{
-    exit_code = $exitCode
-}) | Out-Null
+try {
+    $trainLaunchStartedAt = Get-Date
+    $trainProc = Start-Process -FilePath "uv" -ArgumentList $actorArgs `
+        -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $logOut `
+        -RedirectStandardError $logErr `
+        -NoNewWindow -PassThru
 
-if ($exitCode -ne 0) {
-    throw "Canonical training exited with code $exitCode. See $logErr"
+    Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_launch" -StartedAt $trainLaunchStartedAt -ProcessId $trainProc.Id -Metadata ([ordered]@{
+        actors = $NumActors
+        temporal_core = $TemporalCore
+        telemetry_port = $ActorTelemetryPort
+    }) | Out-Null
+
+    Write-Host "  PID: $($trainProc.Id)"
+    Write-Host "  Metrics : $($runContext.MetricsRoot)"
+    Write-Host "  Verifying training telemetry readiness ($ActorTelemetryPort)..."
+
+    $trainingReadyStartedAt = Get-Date
+    $trainingReady = Wait-ForTrainingReady -Process $trainProc -Port $ActorTelemetryPort -LogFiles @($logErr) -TimeoutSeconds 180
+    Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_ready" -StartedAt $trainingReadyStartedAt -ProcessId $(if ($null -ne $trainProc) { $trainProc.Id } else { 0 }) -Metadata ([ordered]@{
+        ready = [bool]$trainingReady.Ready
+        reason = [string]$trainingReady.Reason
+        exit_code = if ($trainingReady.ContainsKey('ExitCode')) { $trainingReady.ExitCode } else { $null }
+        telemetry_port = $ActorTelemetryPort
+    }) | Out-Null
+
+    if (-not $trainingReady.Ready) {
+        if ($trainingReady.Reason -eq "process-exited") {
+            throw "Canonical training exited before telemetry became ready (exit code $($trainingReady.ExitCode))."
+        }
+        throw "Training telemetry failed readiness check ($ActorTelemetryPort, reason=$($trainingReady.Reason))."
+    }
+
+    $trainExitStartedAt = Get-Date
+    Wait-Process -Id $trainProc.Id
+    $trainProc.Refresh()
+    $exitCode = if ($null -eq $trainProc.ExitCode) { 0 } else { [int]$trainProc.ExitCode }
+    Write-NaviPhaseMetric -RunContext $runContext -Operation "train_process_exit" -StartedAt $trainExitStartedAt -Metadata ([ordered]@{
+        exit_code = $exitCode
+    }) | Out-Null
+
+    if ($exitCode -ne 0) {
+        throw "Canonical training exited with code $exitCode. See $logErr"
+    }
+}
+finally {
+    if ($null -ne $trainProc -and -not $trainProc.HasExited) {
+        Write-Host "Stopping training engine (PID $($trainProc.Id))..."
+        Stop-ProcessTreeById -ProcessId $trainProc.Id
+    }
 }

@@ -287,6 +287,7 @@ class StreamEngine:
         self,
         linear_velocity: float,
         yaw_rate: float,
+        vertical_velocity: float = 0.0,
     ) -> None:
         """Send manual teleop StepRequest via REQ socket."""
         if self._sock_step is None:
@@ -294,7 +295,7 @@ class StreamEngine:
         action = Action(
             env_ids=np.array([0], dtype=np.int32),
             linear_velocity=np.array(
-                [[linear_velocity, 0.0, 0.0]],
+                [[linear_velocity, vertical_velocity, 0.0]],
                 dtype=np.float32,
             ),
             angular_velocity=np.array(
