@@ -1,1 +1,5 @@
-{}
+{
+  "tests/unit/test_renderers.py::TestRenderFirstPerson::test_oracle_house_window_changes_right_upper_projection_against_closed_baseline": true,
+  "tests/unit/test_renderers.py::TestDistanceColor::test_close_is_red": true,
+  "tests/unit/test_renderers.py::TestDistanceColor::test_far_is_grey": true
+}

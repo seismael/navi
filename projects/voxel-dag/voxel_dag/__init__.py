@@ -14,6 +14,13 @@ from voxel_dag.compiler import (
     write_gmdag,
 )
 
+from voxel_dag.bsp_to_obj import (
+    Q3BspParser,
+    BezierPatchTessellator,
+    Q3BspToObjConverter,
+    extract_bsp_from_pk3,
+)
+
 __all__ = [
     "MeshIngestor",
     "canonical_node_hash",
@@ -22,4 +29,8 @@ __all__ = [
     "deduplicate_signatures",
     "main",
     "write_gmdag",
+    "Q3BspParser",
+    "BezierPatchTessellator",
+    "Q3BspToObjConverter",
+    "extract_bsp_from_pk3",
 ]

@@ -18,6 +18,7 @@ test = ["pytest>=7.0.0"]
 
 [project.scripts]
 voxel-dag-compiler = "voxel_dag.compiler:main"
+bsp-to-obj = "voxel_dag.bsp_to_obj:main"
 
 [tool.setuptools]
 packages = ["voxel_dag"]

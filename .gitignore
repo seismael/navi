@@ -95,6 +95,9 @@ projects/*/artifacts/
 # ==============================================================================
 *.zarr/
 data/
+!data/quake3/
+data/quake3/*
+!data/quake3/quake3_map_manifest.json
 *.gmdag
 artifacts/gmdag/
 

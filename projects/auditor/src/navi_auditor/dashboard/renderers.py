@@ -11,6 +11,8 @@ colormaps with fog-of-war hatching for masked regions.
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 
@@ -38,6 +40,45 @@ __all__: list[str] = [
 # ── visual constants ─────────────────────────────────────────────────
 VIEW_RANGE_M: float = 30.0
 FWD_FOV_DEG: float = 180.0
+
+# ── unbounded logarithmic colour scale ───────────────────────────────
+# Maps [0, ∞) → [0, 1) via  t = log1p(d) / (log1p(d) + C).
+# C = log1p(30) allocates 50 % of the spectrum to 0-30 m (navigation-
+# critical near field) with the remaining spectrum smoothly compressing
+# all distances from 30 m to infinity into shades of gray.
+_LOG_SCALE_C: float = math.log1p(30.0)
+
+# Palette control anchors — fixed metric distances and their BGR colours.
+_PALETTE_METER_ANCHORS: tuple[float, ...] = (0.0, 0.5, 2.0, 5.0, 10.0, 30.0)
+_PALETTE_BGR: tuple[tuple[float, float, float], ...] = (
+    (55.0, 225.0, 195.0),   # warm yellow-green  (nearest walls)
+    (80.0, 210.0, 145.0),   # fresh lime-green   (close structure)
+    (148.0, 195.0, 90.0),   # teal-green         (transition)
+    (210.0, 168.0, 72.0),   # light sky blue     (mid-range)
+    (188.0, 118.0, 52.0),   # medium blue        (away structure)
+    (148.0, 78.0, 42.0),    # dark blue          (far structure)
+    (80.0, 72.0, 68.0),     # neutral dark gray  (void / horizon)
+)
+
+
+def _log_color_t(distance_m: float) -> float:
+    """Map metric distance [0, ∞) → [0, 1) via unbounded log scale."""
+    v = math.log1p(max(0.0, distance_m))
+    return v / (v + _LOG_SCALE_C)
+
+
+def _log_color_t_array(distance_m: np.ndarray) -> np.ndarray:
+    """Vectorised unbounded log colour scale for NumPy arrays."""
+    v = np.log1p(np.maximum(distance_m, 0.0))
+    return v / (v + _LOG_SCALE_C)
+
+
+# Pre-computed palette control positions (module-level, no max_distance).
+_PALETTE_CONTROL_X: np.ndarray = np.array(
+    [_log_color_t(m) for m in _PALETTE_METER_ANCHORS] + [1.0],
+    dtype=np.float32,
+)
+_PALETTE_CONTROL_BGR: np.ndarray = np.array(_PALETTE_BGR, dtype=np.float32)
 
 # First-person gradient colours (BGR)
 _FP_SKY_TOP: tuple[int, int, int] = (80, 40, 10)
@@ -179,7 +220,7 @@ def depth_to_viridis(
 
     Input depth is already log-normalized by the environment as
     ``log1p(d) / log1p(max_distance)`` which inherently allocates ~52 %
-    of the [0, 1] range to the 0–10 m near field.  Working directly on
+    of the [0, 1] range to the 0-10 m near field.  Working directly on
     these values preserves logarithmic near-field detail.  Percentile-based
     contrast stretch adapts dynamically to each scene's depth distribution.
     """
@@ -209,52 +250,34 @@ def depth_to_observer_palette(
     valid: np.ndarray | None = None,
     *,
     fog_of_war: bool = True,
+    env_max_distance: float = 100.0,
 ) -> np.ndarray:
     """Convert log-normalized depth to a structure-revealing observer palette.
 
     Input depth is already log-normalized by the environment as
-    ``log1p(d) / log1p(max_distance)`` which inherently allocates ~52 %
-    of the [0, 1] range to the 0–10 m near field — giving rich colour
-    differentiation for nearby walls, furniture, and doorframes while
-    compressing the far horizon into a narrow band.
+    ``log1p(d) / log1p(max_distance)``.  This function denormalises back
+    to metric metres and maps through a smooth, unbounded logarithmic
+    colour scale that spans from 0 to infinity with no far-clipping
+    distance.  Close-range surfaces receive high colour diversity;
+    far-range structure compresses smoothly into neutral gray.
 
-    Near surfaces render as warm yellow-green.  Mid-range structure
-    transitions through teal into light and darker blues.  The far end
-    fades to neutral gray so horizon / void regions recede visually.
-    Percentile-based contrast stretch adapts dynamically to each scene's
-    depth distribution so indoor and outdoor scenes stay readable.
+    Parameters
+    ----------
+    env_max_distance:
+        The environment's normalisation constant (for denormalisation
+        only — the colour mapping itself is parameter-free).
     """
     depth = np.clip(depth, 0.0, 1.0).astype(np.float32)
 
-    if valid is not None and np.any(valid):
-        valid_vals = depth[valid]
-        lo = float(np.percentile(valid_vals, 2))
-        hi = float(np.percentile(valid_vals, 98))
-    else:
-        lo, hi = 0.0, 1.0
+    # Denormalise to metric metres, then apply unbounded log scale.
+    metric = np.expm1(depth * math.log1p(env_max_distance))
+    t = _log_color_t_array(metric)
 
-    span = max(hi - lo, 1e-4)
-    normalised = np.clip((depth - lo) / span, 0.0, 1.0)
-
-    # near (0) = yellow-green → teal → light blue → dark blue → gray (1)
-    control_x = np.array([0.0, 0.12, 0.28, 0.48, 0.68, 0.85, 1.0], dtype=np.float32)
-    control_bgr = np.array(
-        [
-            [55.0, 225.0, 195.0],  # warm yellow-green  (nearest walls)
-            [80.0, 210.0, 145.0],  # fresh lime-green   (close structure)
-            [148.0, 195.0, 90.0],  # teal-green         (transition)
-            [210.0, 168.0, 72.0],  # light sky blue     (mid-range)
-            [188.0, 118.0, 52.0],  # medium blue        (away structure)
-            [148.0, 78.0, 42.0],  # dark blue          (far structure)
-            [80.0, 72.0, 68.0],  # neutral dark gray  (void / horizon)
-        ],
-        dtype=np.float32,
-    )
-
-    flat = normalised.reshape(-1)
-    b = np.interp(flat, control_x, control_bgr[:, 0])
-    g = np.interp(flat, control_x, control_bgr[:, 1])
-    r = np.interp(flat, control_x, control_bgr[:, 2])
+    # Interpolate through the palette.
+    flat = t.reshape(-1)
+    b = np.interp(flat, _PALETTE_CONTROL_X, _PALETTE_CONTROL_BGR[:, 0])
+    g = np.interp(flat, _PALETTE_CONTROL_X, _PALETTE_CONTROL_BGR[:, 1])
+    r = np.interp(flat, _PALETTE_CONTROL_X, _PALETTE_CONTROL_BGR[:, 2])
     coloured = np.stack([b, g, r], axis=-1).reshape((*depth.shape, 3)).astype(np.uint8)
 
     if fog_of_war and valid is not None:
@@ -692,20 +715,30 @@ def _draw_lidar_crosshair(
     cv2.circle(img, (cx, cy), 2, color, -1, cv2.LINE_AA)
 
 
+# Shared palette anchors for distance_color (must match depth_to_observer_palette)
+_DIST_METER_ANCHORS = _PALETTE_METER_ANCHORS
+_DIST_BGR_ANCHORS = _PALETTE_BGR
+
+
 def distance_color(distance_m: float) -> tuple[int, int, int]:
-    """Map distance in meters to a BGR HUD colour."""
-    d = float(max(0.0, distance_m))
-    if d <= 0.5:
-        return (0, 0, 255)
-    if d <= 1.5:
-        return (0, 100, 255)
-    if d <= 3.0:
-        return (0, 255, 200)
-    if d <= 6.0:
-        return (100, 255, 0)
-    if d <= 10.0:
-        return (200, 200, 100)
-    return (50, 50, 50)
+    """Map distance in metres to a BGR HUD colour via unbounded log scale.
+
+    Uses the same smooth ``log1p(d) / (log1p(d) + C)`` mapping as the
+    observer palette — no max-distance parameter.
+    """
+    t = _log_color_t(distance_m)
+    for i in range(len(_PALETTE_CONTROL_X) - 1):
+        if t <= _PALETTE_CONTROL_X[i + 1]:
+            span = float(_PALETTE_CONTROL_X[i + 1] - _PALETTE_CONTROL_X[i])
+            frac = (t - float(_PALETTE_CONTROL_X[i])) / max(span, 1e-6)
+            c0 = _DIST_BGR_ANCHORS[i]
+            c1 = _DIST_BGR_ANCHORS[i + 1]
+            return (
+                int(c0[0] + (c1[0] - c0[0]) * frac),
+                int(c0[1] + (c1[1] - c0[1]) * frac),
+                int(c0[2] + (c1[2] - c0[2]) * frac),
+            )
+    return (int(_DIST_BGR_ANCHORS[-1][0]), int(_DIST_BGR_ANCHORS[-1][1]), int(_DIST_BGR_ANCHORS[-1][2]))
 
 
 def render_forward_polar(
@@ -715,24 +748,28 @@ def render_forward_polar(
     h: int,
     scan_history: list[np.ndarray] | None = None,
     max_distance_m: float = VIEW_RANGE_M,
+    env_max_distance: float = 100.0,
 ) -> np.ndarray:
     """Render forward 180° scan as a continuous Turbo-filled polar plot.
 
-    Each pixel is rasterised through polar-coordinate transform and
-    coloured by depth using the Turbo colormap, producing a smooth,
-    professional-grade radar-style display.
+    Radial pixel positions use the unbounded log scale so near-field
+    structure gets proportionally more screen space and there is no
+    hard far-clipping boundary.
     """
     panel = np.full((h, w, 3), 18, dtype=np.uint8)
     az_bins = depth.shape[0]
     if az_bins == 0:
         return panel
 
-    # ── per-azimuth minimum distance (with smoothing) ───────────────
+    _env_log = math.log1p(env_max_distance)
+
+    # ── per-azimuth minimum metric distance (with smoothing) ─────
     min_d = np.full((az_bins,), float(max_distance_m), dtype=np.float32)
     for i in range(az_bins):
         v = valid[i]
         if np.any(v):
-            min_d[i] = float(np.min(depth[i][v]) * max_distance_m)
+            d_norm = float(np.min(depth[i][v]))
+            min_d[i] = float(math.expm1(d_norm * _env_log))
 
     min_d = np.convolve(
         min_d,
@@ -757,6 +794,9 @@ def render_forward_polar(
         y2 = int(cy - max_r * np.cos(theta))
         cv2.line(panel, (cx, cy), (x2, y2), (35, 35, 35), 1, cv2.LINE_AA)
 
+    # ── Log-scaled scan radii for pixel space ─────────────────────
+    min_d_log = np.array([_log_color_t(float(d)) for d in min_d], dtype=np.float32)
+
     # ── Pixel-space polar rasterisation ───────────────────────────
     ys, xs = np.mgrid[0:h, 0:w]
     dx = (xs - cx).astype(np.float32)
@@ -770,28 +810,29 @@ def render_forward_polar(
     bin_idx_f = (pixel_angle - az_lo) / (az_hi - az_lo) * (az_bins - 1)
     bin_idx = np.clip(bin_idx_f, 0, az_bins - 1)
 
-    # Interpolate scan distance at each pixel's azimuth
+    # Interpolate log-scaled scan radius at each pixel's azimuth
     bin_lo = np.floor(bin_idx).astype(np.int32)
     bin_hi = np.clip(bin_lo + 1, 0, az_bins - 1)
     frac = bin_idx - bin_lo.astype(np.float32)
-    scan_dist = min_d[bin_lo] * (1.0 - frac) + min_d[bin_hi] * frac
+    scan_t = min_d_log[bin_lo] * (1.0 - frac) + min_d_log[bin_hi] * frac
+    scan_r_px = scan_t * max_r
 
-    # Pixel radius corresponding to scan distance
-    scan_r_px = (scan_dist / float(max_distance_m)) * max_r
+    # Also interpolate metric distances for Turbo colouring
+    scan_dist = min_d[bin_lo] * (1.0 - frac) + min_d[bin_hi] * frac
 
     # Fill mask: inside scan boundary AND within 180° forward arc
     in_arc = (pixel_angle >= az_lo) & (pixel_angle <= az_hi) & (dy >= -4)
     fill_mask = in_arc & (pixel_dist <= scan_r_px) & (pixel_dist > 6)
 
-    # Depth at each filled pixel (normalised 0-1)
+    # Depth at each filled pixel (fraction within scan boundary)
     filled_depth = np.where(
         fill_mask,
         np.clip(pixel_dist / np.maximum(scan_r_px, 1.0), 0.0, 1.0),
         0.0,
     )
-    # Map to actual distance for Turbo colouring
+    # Map fraction to metric distance then to unbounded log colour scale
     filled_dist_m = filled_depth * scan_dist
-    depth_norm = np.clip(filled_dist_m / float(max_distance_m), 0.0, 1.0)
+    depth_norm = _log_color_t_array(filled_dist_m)
 
     # Turbo LUT colouring
     lut = _turbo_lut()
@@ -813,7 +854,7 @@ def render_forward_polar(
     boundary_angles = np.linspace(-np.pi / 2.0, np.pi / 2.0, az_bins)
     boundary_pts: list[tuple[int, int]] = []
     for k in range(az_bins):
-        rd = float(min_d[k] / float(max_distance_m)) * max_r
+        rd = float(min_d_log[k]) * max_r
         bx = int(cx + rd * np.sin(boundary_angles[k]))
         by = int(cy - rd * np.cos(boundary_angles[k]))
         boundary_pts.append((bx, by))
@@ -821,15 +862,15 @@ def render_forward_polar(
         pts_arr = np.array(boundary_pts, dtype=np.int32).reshape(-1, 1, 2)
         cv2.polylines(panel, [pts_arr], False, (220, 220, 220), 1, cv2.LINE_AA)
 
-    # ── Range rings with metric labels ────────────────────────────
+    # ── Range rings with metric labels (unbounded log scale) ──────
     ring_specs = [
         (1.0, "1m"),
-        (2.0, "2m"),
-        (5.0, "5m"),
+        (3.0, "3m"),
         (10.0, "10m"),
+        (30.0, "30m"),
     ]
     for ring_m, ring_label in ring_specs:
-        rr = int(max_r * min(1.0, ring_m / float(max_distance_m)))
+        rr = int(max_r * _log_color_t(ring_m))
         cv2.ellipse(
             panel,
             (cx, cy),
@@ -888,8 +929,13 @@ def render_bev_occupancy(
     h: int,
     pose_history: list[tuple[float, float, float]] | None = None,
     max_distance_m: float = VIEW_RANGE_M,
+    env_max_distance: float = 100.0,
 ) -> np.ndarray:
-    """Render 360-degree observation as top-down occupancy map."""
+    """Render 360-degree observation as top-down occupancy map.
+
+    Dot positions use the unbounded log colour scale so near-field
+    structure is expanded and far-field compresses gracefully.
+    """
     panel = np.full((h, w, 3), 20, dtype=np.uint8)
     az_bins = depth.shape[0]
     if az_bins == 0:
@@ -897,12 +943,13 @@ def render_bev_occupancy(
 
     cx = w // 2
     cy = h // 2
-    scale = (min(w, h) * 0.45) / float(max_distance_m)
+    _max_pixel_r = min(w, h) * 0.45
+    _env_log = math.log1p(env_max_distance)
     angles = np.linspace(-np.pi, np.pi, az_bins, endpoint=False)
 
-    # Distance rings for reference
-    for ring_m in (1.0, 2.0, 5.0, 10.0):
-        rr = int(ring_m * scale)
+    # Distance rings (unbounded log scale — no max_distance)
+    for ring_m in (1.0, 3.0, 10.0, 30.0):
+        rr = int(_log_color_t(ring_m) * _max_pixel_r)
         if rr < max(w, h):
             cv2.circle(panel, (cx, cy), rr, _GUIDE_COLOR, 1)
 
@@ -910,21 +957,27 @@ def render_bev_occupancy(
         v = valid[i]
         if not np.any(v):
             continue
-        d = float(np.min(depth[i][v]) * max_distance_m)
-        d_clamped = min(float(max_distance_m), d)
-        x = int(cx + d_clamped * np.sin(angles[i]) * scale)
-        y = int(cy - d_clamped * np.cos(angles[i]) * scale)
+        d_norm = float(np.min(depth[i][v]))
+        actual_m = math.expm1(d_norm * _env_log)
+        r_frac = _log_color_t(actual_m)
+        x = int(cx + r_frac * np.sin(angles[i]) * _max_pixel_r)
+        y = int(cy - r_frac * np.cos(angles[i]) * _max_pixel_r)
         if 0 <= x < w and 0 <= y < h:
-            cv2.circle(panel, (x, y), 3, distance_color(d_clamped), thickness=-1)
+            cv2.circle(panel, (x, y), 3, distance_color(actual_m), thickness=-1)
 
     if pose_history and len(pose_history) >= 2:
         cur_x, cur_z, _ = pose_history[-1]
         trail: list[tuple[int, int]] = []
         for hx, hz, _hyaw in pose_history:
-            dx = hx - cur_x
-            dz = hz - cur_z
-            px = int(cx + dx * scale)
-            py = int(cy + dz * scale)
+            dx_m = hx - cur_x
+            dz_m = hz - cur_z
+            dist_m = math.sqrt(dx_m * dx_m + dz_m * dz_m)
+            if dist_m < 1e-6:
+                trail.append((cx, cy))
+                continue
+            r_frac = _log_color_t(dist_m)
+            px = int(cx + (dx_m / dist_m) * r_frac * _max_pixel_r)
+            py = int(cy + (dz_m / dist_m) * r_frac * _max_pixel_r)
             if 0 <= px < w and 0 <= py < h:
                 trail.append((px, py))
         for i in range(1, len(trail)):

@@ -38,7 +38,8 @@ param(
     [int]$MinSceneBytes = 100000,
     [string]$PythonVersion = "3.12",
     [switch]$KeepScratch,
-    [switch]$ForceRecompile
+    [switch]$ForceRecompile,
+    [switch]$IncludeQuake3
 )
 
 $ErrorActionPreference = "Stop"
@@ -277,6 +278,25 @@ try {
     }
 
     $refreshSucceeded = $true
+
+    # ── Optional: Quake 3 Arena Maps ───────────────────────────
+    if ($IncludeQuake3) {
+        Write-Host ""
+        Write-Host "=== Quake 3 Arena Maps (via download-quake3-maps.ps1) ==="
+        $q3Output = Join-Path $finalCompiledRoot "quake3-arenas"
+        $q3Args = @(
+            "-OutputRoot", $q3Output,
+            "-Resolution", "$Resolution",
+            "-PythonVersion", $PythonVersion
+        )
+        if ($ForceRecompile) { $q3Args += "-ForceRecompile" }
+        $q3Script = Join-Path $PSScriptRoot "download-quake3-maps.ps1"
+        & $q3Script @q3Args
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Quake 3 map download completed with errors."
+        }
+    }
+
     Write-Host ""
     Write-Host "========================================================"
     Write-Host "  Corpus refresh complete"
