@@ -304,7 +304,7 @@ if ($AutoCompileGmDag) {
 
 if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) {
     if (-not [System.IO.Path]::IsPathRooted($ResumeCheckpoint)) {
-        $ResumeCheckpoint = Join-Path $repoRoot "projects\actor\$ResumeCheckpoint"
+        $ResumeCheckpoint = Join-Path $repoRoot $ResumeCheckpoint
     }
     if (-not (Test-Path $ResumeCheckpoint)) {
         throw "Checkpoint file not found: $ResumeCheckpoint"

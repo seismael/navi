@@ -411,8 +411,8 @@ if ($gmdagFiles.Count -gt 0) {
     Write-Host "  # Training with Q3 maps only:"
     Write-Host "  .\scripts\run-ghost-stack.ps1 -Train -Datasets 'quake3-arenas'"
     Write-Host ""
-    Write-Host "  # Manual training on Q3 corpus:"
-    Write-Host "  .\scripts\run-manual-training.ps1 -CorpusRoot '$OutputRoot'"
+    Write-Host "  # Manual exploration on Q3 corpus:"
+    Write-Host "  .\scripts\run-explore-scenes.ps1 -CorpusRoot '$OutputRoot'"
     Write-Host ""
     Write-Host "  # Observe/explore a specific Q3 map:"
     $sampleGmdag = $gmdagFiles | Select-Object -First 1

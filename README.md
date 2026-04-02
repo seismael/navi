@@ -51,7 +51,17 @@ corpus with no intermediate graphics pipeline.
   - [Flow 9 — Validation & Qualification](#flow-9--validation--qualification)
   - [Flow 10 — Diagnostics & Analysis](#flow-10--diagnostics--analysis)
 - [Complete Scripts Reference](#complete-scripts-reference)
+  - [Training Scripts](#training-scripts)
+  - [Corpus Scripts](#corpus-scripts)
+  - [Service Scripts](#service-scripts)
+  - [Benchmark Scripts](#benchmark-scripts)
+  - [Validation Scripts](#validation-scripts)
+  - [Setup & Diagnostics](#setup--diagnostics)
 - [CLI Entry Points](#cli-entry-points)
+  - [Environment](#environment-projectsenvironment)
+  - [Actor](#actor-projectsactor)
+  - [Auditor](#auditor-projectsauditor)
+  - [Voxel-DAG Compiler](#voxel-dag-compiler-projectsvoxel-dag)
 - [Wire Protocol](#wire-protocol)
 - [Artifact Layout](#artifact-layout)
 - [Repository Commands](#repository-commands)
@@ -169,6 +179,7 @@ The canonical observation is a `256×48` spherical distance matrix (azimuth × e
 ### Flow 1 — First-Time Setup
 
 Complete environment preparation from a fresh clone.
+See also: [`setup-actor-cuda.ps1`](#setup-actor-cudaps1----install-cuda-pytorch-windows) | [`refresh-scene-corpus.ps1`](#refresh-scene-corpusps1----full-transactional-corpus-refresh)
 
 ```
 Step 1: Install dependencies    →  make sync-all
@@ -220,6 +231,7 @@ python scripts\check_embree.py
 
 The training corpus is a collection of compiled `.gmdag` scene files. Multiple
 data sources are supported. All compilation uses resolution 512 by default.
+See also: [Corpus Scripts](#corpus-scripts) | [`compile-gmdag`](#compile-gmdag----compile-mesh-to-gmdag)
 
 #### 2A — Full Corpus Refresh (HuggingFace datasets)
 
@@ -341,6 +353,7 @@ uv run --project projects\environment navi-environment bench-sdfdag `
 
 Unified in-process training: the actor instantiates the `sdfdag` environment
 backend directly, with GPU-resident rollout storage and no ZMQ in the hot loop.
+See also: [Training Scripts](#training-scripts) | [`navi-actor train`](#train----unified-in-process-ppo-training)
 
 #### 3A — Standard Training
 
@@ -447,80 +460,104 @@ artifacts/
 
 Human demonstration capture and supervised pre-training. Use this to bootstrap
 a base policy before RL fine-tuning.
+See also: [`run-explore-scenes.ps1`](#run-explore-scenesps1----multi-scene-navigation--demo-recording) | [`run-bc-pretrain.ps1`](#run-bc-pretrainps1----behavioral-cloning-pre-training) | [`bc-pretrain`](#bc-pretrain----behavioral-cloning-pre-training)
 
-#### 4A — Automated Multi-Scene Loop
+The workflow is split into two independent phases so you can fly through as many
+scenes as you want without waiting for training between each one.
 
-The recommended workflow: iterates through scenes, records your flight,
-trains the model incrementally after each scene.
+#### 4A — Phase 1: Navigate Scenes (Collect Demonstrations)
+
+Fly through scenes continuously. Each scene auto-closes after `MaxSteps`
+and the next one opens immediately. Demonstrations accumulate in `DemoDir`.
 
 ```powershell
-.\scripts\run-manual-training.ps1
+.\scripts\run-explore-scenes.ps1
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-CorpusRoot` | `artifacts\gmdag\corpus` | Scene directory |
 | `-Scenes` | `@()` (discover all) | Specific scene file paths |
-| `-Checkpoint` | `""` | Starting checkpoint (empty = fresh) |
-| `-CheckpointOutput` | `artifacts\checkpoints\bc_base_model.pt` | Output checkpoint |
 | `-DemoDir` | `artifacts\demonstrations` | Demonstration storage |
-| `-Epochs` | `30` | BC training epochs per scene |
 | `-MaxSteps` | `1000` | Steps per scene (auto-close) |
-| `-LearningRate` | `1e-3` | BC learning rate |
 | `-LinearSpeed` | `1.5` | Flight speed (m/s) |
 | `-YawRate` | `1.5` | Rotation speed (rad/s) |
-| `-TemporalCore` | `""` | Temporal backend |
-
-**Workflow per scene:**
-1. Explorer opens with auto-recording (WASD flight controls)
-2. Dashboard auto-closes after `MaxSteps` steps
-3. BC training runs on all accumulated demonstrations
-4. Updated checkpoint is saved and loaded for the next scene
-5. Repeat until all scenes are completed
 
 ```powershell
 # Examples:
-.\scripts\run-manual-training.ps1                                   # Full corpus, fresh start
-.\scripts\run-manual-training.ps1 -CorpusRoot artifacts\gmdag\corpus\quake3-arenas  # Q3 only
-.\scripts\run-manual-training.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt  # Resume
-.\scripts\run-manual-training.ps1 -Scenes "artifacts\gmdag\corpus\quake3-arenas\aerowalk.gmdag"
+.\scripts\run-explore-scenes.ps1                                    # Full corpus
+.\scripts\run-explore-scenes.ps1 -CorpusRoot artifacts\gmdag\corpus\quake3-arenas
+.\scripts\run-explore-scenes.ps1 -MaxSteps 2000                     # Longer sessions
+.\scripts\run-explore-scenes.ps1 -Scenes "aerowalk.gmdag","padshop.gmdag"
 ```
 
-#### 4B — Manual Steps (Individual Commands)
+**Per-scene flow:**
+1. Explorer opens with auto-recording (WASD / arrow keys)
+2. Dashboard auto-closes after `MaxSteps` steps (or press ESC/Q to skip)
+3. Demo `.npz` is saved to `DemoDir`
+4. Next scene opens immediately — no training wait
+5. Repeat until all scenes are done, or Ctrl+C to stop
+
+#### 4B — Phase 2: Train on Demonstrations
+
+When you have enough demonstrations, train a BC checkpoint:
 
 ```powershell
-# Step 1 — Record a demonstration
-uv run --project projects\auditor explore `
-    --record --gmdag-file .\artifacts\gmdag\corpus\quake3-arenas\aerowalk.gmdag
-
-# Step 2 — Train from demonstrations
 .\scripts\run-bc-pretrain.ps1
-# Or directly:
-uv run --project projects\actor brain bc-pretrain `
-    --demonstrations artifacts\demonstrations `
-    --output artifacts\checkpoints\bc_base_model.pt `
-    --epochs 50
-
-# Step 3 — Fine-tune the BC model with RL
-.\scripts\train.ps1 -ResumeCheckpoint artifacts\checkpoints\bc_base_model.pt
 ```
-
-**BC Pre-Training Parameters** (`run-bc-pretrain.ps1`):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-Demonstrations` | `artifacts/demonstrations` | Path to `.npz` demo files |
 | `-Output` | `artifacts/checkpoints/bc_base_model.pt` | Output checkpoint |
+| `-Checkpoint` | `""` | Resume from existing checkpoint |
 | `-Epochs` | `50` | Training epochs |
 | `-LearningRate` | `1e-3` | Learning rate |
 | `-BpttLen` | `8` | BPTT sequence length |
 | `-MinibatchSize` | `32` | Minibatch size |
+| `-TemporalCore` | `""` | Temporal backend override |
+
+```powershell
+# Examples:
+.\scripts\run-bc-pretrain.ps1                                        # Fresh start
+.\scripts\run-bc-pretrain.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt  # Resume
+.\scripts\run-bc-pretrain.ps1 -Epochs 100 -LearningRate 5e-4        # Custom hyperparams
+```
+
+#### 4C — Fine-Tune the BC Model with RL
+
+Once you have a BC checkpoint, promote it to RL training:
+
+```powershell
+.\scripts\train.ps1 -ResumeCheckpoint artifacts\checkpoints\bc_base_model.pt
+```
+
+The BC checkpoint is a standard v2 file directly compatible with the canonical
+PPO trainer.
+
+#### 4D — Raw CLI Commands
+
+```powershell
+# Record a single scene
+uv run --project projects\auditor explore `
+    --record --gmdag-file .\artifacts\gmdag\corpus\quake3-arenas\aerowalk.gmdag
+
+# Train from all accumulated demos
+uv run --project projects\actor brain bc-pretrain `
+    --demonstrations artifacts\demonstrations `
+    --output artifacts\checkpoints\bc_base_model.pt `
+    --epochs 50
+
+# Fine-tune with RL
+.\scripts\train.ps1 -ResumeCheckpoint artifacts\checkpoints\bc_base_model.pt
+```
 
 ---
 
 ### Flow 5 — Interactive Exploration
 
 Keyboard-controlled drone flight for scene inspection and demonstration recording.
+See also: [`run-explore.ps1`](#run-exploreps1----single-scene-interactive-explorer) | [`explore`](#explore----interactive-keyboard-controlled-explorer)
 
 ```powershell
 .\scripts\run-explore.ps1 -GmdagFile .\artifacts\gmdag\corpus\quake3-arenas\padshop.gmdag
@@ -556,6 +593,7 @@ uv run --project projects\auditor navi-auditor explore `
 
 Run a trained policy in real-time with separate Environment, Actor, and
 Dashboard processes communicating over ZMQ.
+See also: [Service Scripts](#service-scripts) | [`run-ghost-stack.ps1`](#run-ghost-stackps1----orchestrated-stack-launcher)
 
 ```powershell
 .\scripts\run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
@@ -594,7 +632,8 @@ Dashboard processes communicating over ZMQ.
 ### Flow 7 — Live Dashboard
 
 The auditor dashboard is a passive observer. It subscribes to the actor PUB
-telemetry stream and renders actor 0 observations at 5–10 Hz.
+telemetry stream and renders actor 0 observations at 5-10 Hz.
+See also: [`run-dashboard.ps1`](#run-dashboardps1----passive-observation-dashboard) | [`dashboard`](#dashboard----live-passive-observation-dashboard)
 
 ```powershell
 # Attach to a running training session or inference stack
@@ -615,6 +654,8 @@ uv run --project projects\auditor navi-auditor dashboard `
 ---
 
 ### Flow 8 — Benchmarking & Comparison
+
+See also: [Benchmark Scripts](#benchmark-scripts)
 
 #### 8A — Temporal Core Comparison (End-to-End)
 
@@ -708,6 +749,8 @@ training telemetry, perf telemetry — all enabled/disabled systematically.
 
 ### Flow 9 — Validation & Qualification
 
+See also: [Validation Scripts](#validation-scripts)
+
 #### 9A — Canonical Stack Qualification
 
 One-pass end-to-end proof: dataset audit → bounded training → checkpoint
@@ -755,6 +798,8 @@ Comprehensive automated validation pipeline (typically 8+ hours).
 ---
 
 ### Flow 10 — Diagnostics & Analysis
+
+See also: [Setup & Diagnostics](#setup--diagnostics) | [`check-sdfdag`](#check-sdfdag----validate-runtime--assets)
 
 #### 10A — GPU Preflight
 
@@ -806,123 +851,962 @@ mean/min/max statistics.
 
 ## Complete Scripts Reference
 
+All scripts live in `scripts/` and are invoked from the repository root.
+Each entry shows the full parameter surface with types, defaults, and the
+underlying CLI command the wrapper calls.
+
+> **Convention:** Parameters without a default are required.
+> `(switch)` parameters are boolean flags (supply to enable, omit to disable).
+
+---
+
 ### Training Scripts
 
-| Script | Purpose | Key Variations |
-|--------|---------|----------------|
-| `train.ps1` | Canonical PPO training wrapper | `-TemporalCore`, `-TotalSteps`, `-NumActors`, `-ResumeCheckpoint` |
-| `train-all-night.ps1` | Durable overnight training | Same as `train.ps1`, runs until Ctrl+C |
-| `run-ghost-stack.ps1` | Orchestrated stack launcher | `-Train` for training, omit for inference; `-WithDashboard` |
-| `run-manual-training.ps1` | Multi-scene BC loop | `-CorpusRoot`, `-MaxSteps`, `-Checkpoint` |
-| `run-bc-pretrain.ps1` | BC supervised pre-training | `-Demonstrations`, `-Epochs`, `-Output` |
+#### `train.ps1` -- Standard PPO Training
+
+Canonical RL training wrapper. Full corpus, continuous by default. [(Flow 3A)](#3a--standard-training)
+
+**Wraps:** `uv run --project projects/actor brain train`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-NumActors` | int | `4` | Parallel actor count |
+| `-TemporalCore` | string | `mamba2` | Temporal backend (`mamba2` / `gru` / `mambapy`) |
+| `-TotalSteps` | int | `0` | Steps before auto-stop (0 = continuous) |
+| `-RolloutLength` | int | `512` | Steps per rollout before PPO update |
+| `-MinibatchSize` | int | `64` | PPO minibatch size |
+| `-PpoEpochs` | int | `1` | PPO optimizer epochs per update |
+| `-LearningRate` | float | `5e-4` | Learning rate |
+| `-EntropyCoeff` | float | `0.02` | Entropy regularization weight |
+| `-ExistentialTax` | float | `-0.02` | Per-step existence penalty |
+| `-BpttLen` | int | `8` | Truncated BPTT sequence length |
+| `-CheckpointEvery` | int | `25000` | Steps between checkpoint saves |
+| `-CheckpointDir` | string | `""` | Custom checkpoint directory |
+| `-ResumeCheckpoint` | string | `""` | Resume from existing checkpoint path |
+| `-Scene` | string | `""` | Override single scene GLB file |
+| `-Manifest` | string | `""` | Corpus manifest path |
+| `-CorpusRoot` | string | `""` | Custom corpus root directory |
+| `-GmDagRoot` | string | `""` | Custom .gmdag root directory |
+| `-GmDagFile` | string | `""` | Single .gmdag file override |
+| `-AutoCompileGmDag` | switch | | Auto-compile scene to .gmdag |
+| `-GmDagResolution` | int | `512` | Compile resolution for auto-compile |
+| `-AzimuthBins` | int | `256` | Observation azimuth resolution |
+| `-ElevationBins` | int | `48` | Observation elevation resolution |
+| `-ActorTelemetryPort` | int | `5557` | Actor PUB port for dashboard |
+| `-LogDir` | string | `""` | Custom log directory |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\train.ps1                                                    # Full corpus, continuous
+.\scripts\train.ps1 -TotalSteps 50000                                  # Bounded run
+.\scripts\train.ps1 -TemporalCore gru -NumActors 8                    # GRU with 8 actors
+.\scripts\train.ps1 -ResumeCheckpoint artifacts\checkpoints\latest.pt  # Resume training
+```
+
+---
+
+#### `train-all-night.ps1` -- Overnight Continuous Training
+
+Durable overnight training with process management. Same parameters as `train.ps1`.
+Includes CUDA env setup and graceful cleanup on Ctrl+C. [(Flow 3C)](#3c--overnight-training)
+
+**Wraps:** `uv run --project projects/actor brain train`
+
+All parameters from `train.ps1` above apply identically.
+
+```powershell
+.\scripts\train-all-night.ps1                                          # Continuous overnight
+.\scripts\train-all-night.ps1 -ResumeCheckpoint artifacts\checkpoints\latest.pt
+```
+
+---
+
+#### `run-ghost-stack.ps1` -- Orchestrated Stack Launcher
+
+Full-stack launcher: training mode (`-Train`) or inference mode (default).
+Handles process lifecycle, pre-kill, and optional dashboard. [(Flow 3B)](#3b--ghost-stack-training-orchestrated) [(Flow 6)](#flow-6--inference-3-process-stack)
+
+**Wraps (training):** `uv run --project projects/actor brain train`
+**Wraps (inference):** 3-process stack (environment + actor + dashboard)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Train` | switch | | Enable unified PPO training mode |
+| `-Actors` | int | `4` | Parallel actor count (training) or env actors (inference) |
+| `-TotalSteps` | int | `0` | Training step limit (0 = continuous) |
+| `-CheckpointEvery` | int | `25000` | Checkpoint interval (training) |
+| `-CheckpointDir` | string | `""` | Checkpoint directory |
+| `-Checkpoint` | string | `""` | Resume from checkpoint path |
+| `-TemporalCore` | string | `mamba2` | Temporal backend |
+| `-Scene` | string | `""` | Specific scene GLB file |
+| `-Manifest` | string | `""` | Corpus manifest path |
+| `-CorpusRoot` | string | `""` | Corpus root directory |
+| `-GmDagRoot` | string | `""` | Custom .gmdag root |
+| `-GmDagFile` | string | `""` | Single .gmdag file path |
+| `-Datasets` | string | `""` | Include only these datasets |
+| `-ExcludeDatasets` | string | `""` | Exclude datasets by name |
+| `-AutoCompileGmDag` | switch | | Auto-compile scene to .gmdag |
+| `-GmDagResolution` | int | `512` | Compile resolution |
+| `-AzimuthBins` | int | `256` | Observation azimuth resolution |
+| `-ElevationBins` | int | `48` | Observation elevation resolution |
+| `-WithDashboard` | switch | | Auto-attach passive dashboard |
+| `-NoDashboard` | switch | | Suppress dashboard launch |
+| `-NoPreKill` | switch | | Skip stale process cleanup |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\run-ghost-stack.ps1 -Train                                   # Train on full corpus
+.\scripts\run-ghost-stack.ps1 -Train -WithDashboard                    # Train with live view
+.\scripts\run-ghost-stack.ps1 -Train -Datasets "quake3-arenas"         # Q3 maps only
+.\scripts\run-ghost-stack.ps1 -GmDagFile .\scene.gmdag                 # Inference on one scene
+```
+
+---
+
+#### `run-explore-scenes.ps1` -- Multi-Scene Navigation + Demo Recording
+
+Navigate all corpus scenes continuously. Each scene auto-closes after MaxSteps;
+next scene opens immediately. Demos accumulate in DemoDir. [(Flow 4A)](#4a--phase-1-navigate-scenes-collect-demonstrations)
+
+**Wraps:** `uv run --project projects/auditor explore --record`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-CorpusRoot` | string | `artifacts\gmdag\corpus` | Scene directory to discover |
+| `-Scenes` | string[] | `@()` (discover all) | Specific scene file paths |
+| `-DemoDir` | string | `artifacts\demonstrations` | Demonstration output directory |
+| `-MaxSteps` | int | `1000` | Steps per scene before auto-close |
+| `-LinearSpeed` | float | `1.5` | Flight speed (m/s) |
+| `-YawRate` | float | `1.5` | Rotation speed (rad/s) |
+
+```powershell
+.\scripts\run-explore-scenes.ps1                                       # Full corpus
+.\scripts\run-explore-scenes.ps1 -MaxSteps 2000                        # Longer sessions
+.\scripts\run-explore-scenes.ps1 -CorpusRoot artifacts\gmdag\corpus\quake3-arenas
+```
+
+---
+
+#### `run-bc-pretrain.ps1` -- Behavioral Cloning Pre-Training
+
+Supervised learning from recorded `.npz` demos. Trains on ALL demos found in
+the demonstrations folder. [(Flow 4B)](#4b--phase-2-train-on-demonstrations)
+
+**Wraps:** `uv run --project projects/actor brain bc-pretrain`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Demonstrations` | string | `artifacts/demonstrations` | Path to `.npz` demo files |
+| `-Output` | string | `artifacts/checkpoints/bc_base_model.pt` | Output checkpoint path |
+| `-Checkpoint` | string | `""` | Resume from existing BC checkpoint |
+| `-Epochs` | int | `50` | Training epochs |
+| `-LearningRate` | float | `1e-3` | Learning rate |
+| `-BpttLen` | int | `8` | BPTT sequence length |
+| `-MinibatchSize` | int | `32` | Minibatch size |
+| `-TemporalCore` | string | `""` | Temporal backend override |
+
+```powershell
+.\scripts\run-bc-pretrain.ps1                                          # Fresh start
+.\scripts\run-bc-pretrain.ps1 -Epochs 100 -LearningRate 5e-4          # Custom hyperparams
+.\scripts\run-bc-pretrain.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt  # Resume
+```
+
+---
 
 ### Corpus Scripts
 
-| Script | Purpose | Key Variations |
-|--------|---------|----------------|
-| `refresh-scene-corpus.ps1` | Full transactional corpus refresh | `-Datasets`, `-ForceRecompile`, `-IncludeQuake3` |
-| `download-habitat-data.ps1` | Bootstrap public Habitat scenes | `-Datasets`, `-PreserveExisting` |
-| `expand-replicacad-corpus.ps1` | Incremental ReplicaCAD growth | `-ScenesLimit` |
-| `download-quake3-maps.ps1` | Q3 arena download + compile | `-MapFilter`, `-ForceRecompile` |
+#### `refresh-scene-corpus.ps1` -- Full Transactional Corpus Refresh
+
+Download from HuggingFace → compile → validate → promote to live corpus.
+Staged transaction: stale data is only replaced after successful rebuild.
+[(Flow 2A)](#2a--full-corpus-refresh-huggingface-datasets)
+
+**Wraps:** HuggingFace API + `uv run navi-environment compile-gmdag`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-DataDir` | string | `data/scenes` | Source data directory |
+| `-Datasets` | string | `"hssd/hssd-hab,ai-habitat/ReplicaCAD_dataset,..."` | Comma-separated HuggingFace dataset IDs |
+| `-ScenesPerDataset` | int | `10` | Max scenes to download per dataset |
+| `-CorpusRoot` | string | `artifacts/gmdag/corpus` | Live corpus root |
+| `-GmDagRoot` | string | `artifacts/gmdag` | Parent .gmdag directory |
+| `-ScratchRoot` | string | `artifacts/tmp/corpus-refresh` | Staging directory |
+| `-Resolution` | int | `512` | .gmdag compile resolution |
+| `-MinSceneBytes` | int | `100000` | Minimum scene file size filter |
+| `-ForceRecompile` | switch | | Recompile all even if .gmdag exists |
+| `-KeepScratch` | switch | | Keep intermediate GLB downloads |
+| `-IncludeQuake3` | switch | | Include Quake 3 maps in the refresh |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\refresh-scene-corpus.ps1                                     # Full default refresh
+.\scripts\refresh-scene-corpus.ps1 -ScenesPerDataset 5                 # Smaller subset
+.\scripts\refresh-scene-corpus.ps1 -ForceRecompile -IncludeQuake3      # Full rebuild with Q3
+```
+
+---
+
+#### `download-habitat-data.ps1` -- Bootstrap Habitat Scenes
+
+Quick download of public Habitat test scenes + ReplicaCAD stages.
+[(Flow 2B)](#2b--habitat-test-scenes-only-bootstrap)
+
+**Wraps:** HuggingFace API downloads
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-DataDir` | string | `data/scenes` | Download target directory |
+| `-Datasets` | string | `"test_scenes,replicacad"` | Which datasets to fetch |
+| `-PreserveExisting` | switch | | Skip if files already exist |
+
+```powershell
+.\scripts\download-habitat-data.ps1                                    # Default bootstrap
+.\scripts\download-habitat-data.ps1 -Datasets "test_scenes"           # Test scenes only
+```
+
+---
+
+#### `expand-replicacad-corpus.ps1` -- Incremental ReplicaCAD Growth
+
+Add new ReplicaCAD baked-lighting scenes without disturbing existing corpus.
+[(Flow 2C)](#2c--replicacad-expansion-incremental)
+
+**Wraps:** HuggingFace API + `uv run navi-environment compile-gmdag`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-ScenesLimit` | int | `0` (all) | Maximum new scenes to download |
+| `-Resolution` | int | `512` | Compile resolution |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\expand-replicacad-corpus.ps1                                 # All available scenes
+.\scripts\expand-replicacad-corpus.ps1 -ScenesLimit 20                 # First 20 only
+```
+
+---
+
+#### `download-quake3-maps.ps1` -- Quake 3 Arena Download + Compile
+
+Download Q3 community maps, extract BSP geometry, compile to .gmdag.
+[(Flow 2D)](#2d--quake-3-arena-maps)
+
+**Wraps:** `uv run voxel-dag bsp-to-obj` + `uv run navi-environment compile-gmdag`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-OutputRoot` | string | `artifacts/gmdag/corpus/quake3-arenas` | Output directory |
+| `-Resolution` | int | `512` | Voxel-DAG compile resolution |
+| `-MapFilter` | string | `""` (all) | Comma-separated map names |
+| `-Sources` | string | `"lvlworld"` | Data sources (`lvlworld`, `openarena`) |
+| `-Tessellation` | int | `4` | BSP bezier patch tessellation level |
+| `-ForceRecompile` | switch | | Overwrite existing .gmdag files |
+| `-KeepIntermediate` | switch | | Keep downloaded PK3 and intermediate OBJ |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\download-quake3-maps.ps1                                     # All maps from manifest
+.\scripts\download-quake3-maps.ps1 -MapFilter "padshop,aerowalk"       # Specific maps
+.\scripts\download-quake3-maps.ps1 -ForceRecompile                     # Rebuild all
+```
+
+---
 
 ### Service Scripts
 
-| Script | Purpose | Key Variations |
-|--------|---------|----------------|
-| `run-environment.ps1` | Environment server | `-Mode` (step/async) |
-| `run-brain.ps1` | Actor server | `-Mode`, `-TemporalCore` |
-| `run-dashboard.ps1` | Passive dashboard | Forwards all args |
-| `run-explore.ps1` | Interactive explorer | `-GmdagFile`, `-LinearSpeed`, `-YawRate` |
+These launch individual ZMQ services for the 3-process inference stack.
+See [(Flow 6)](#flow-6--inference-3-process-stack) for the full startup sequence.
+
+#### `run-environment.ps1` -- Environment Server
+
+**Wraps:** `uv run --project projects/environment navi-environment serve`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Mode` | string | `step` | Service mode (`step` / `async`) |
+| `-AzimuthBins` | int | `256` | Observation azimuth resolution |
+| `-ElevationBins` | int | `48` | Observation elevation resolution |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+| `$ForwardArgs` | remaining | | Additional args passed to CLI |
+
+```powershell
+.\scripts\run-environment.ps1
+.\scripts\run-environment.ps1 -Mode async
+.\scripts\run-environment.ps1 -- --gmdag-file .\scene.gmdag
+```
+
+---
+
+#### `run-brain.ps1` -- Actor Policy Server
+
+**Wraps:** `uv run --project projects/actor navi-actor serve`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Mode` | string | `step` | Service mode (`step` / `async`) |
+| `-TemporalCore` | string | `mamba2` | Temporal backend (`mamba2` / `gru` / `mambapy`) |
+| `-AzimuthBins` | int | `256` | Observation azimuth resolution |
+| `-ElevationBins` | int | `48` | Observation elevation resolution |
+| `$ForwardArgs` | remaining | | Additional args passed to CLI |
+
+```powershell
+.\scripts\run-brain.ps1
+.\scripts\run-brain.ps1 -TemporalCore gru
+.\scripts\run-brain.ps1 -- --policy-checkpoint .\model.pt
+```
+
+---
+
+#### `run-dashboard.ps1` -- Passive Observation Dashboard
+
+Subscribes to actor PUB stream. Displays actor 0 observations in real time.
+Mode auto-detected (TRAINING / INFERENCE / OBSERVER). [(Flow 7)](#flow-7--live-dashboard)
+
+**Wraps:** `uv run --project projects/auditor navi-auditor dashboard`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+| `$ForwardArgs` | remaining | | Additional args passed to CLI |
+
+```powershell
+.\scripts\run-dashboard.ps1                                            # Attach to default port
+.\scripts\run-dashboard.ps1 -- --actor-sub tcp://localhost:5557        # Explicit port
+```
+
+---
+
+#### `run-explore.ps1` -- Single-Scene Interactive Explorer
+
+Standalone manual exploration: environment backend + dashboard with keyboard navigation.
+No training process required. [(Flow 5)](#flow-5--interactive-exploration)
+
+**Wraps:** `uv run --project projects/auditor navi-auditor explore`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-GmdagFile` | string | | Scene .gmdag file to explore |
+| `-LinearSpeed` | float | `1.5` | Movement speed (m/s) |
+| `-YawRate` | float | `1.5` | Rotation speed (rad/s) |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+| `$ForwardArgs` | remaining | | Additional args passed to CLI |
+
+```powershell
+.\scripts\run-explore.ps1 -GmdagFile .\artifacts\gmdag\corpus\quake3-arenas\padshop.gmdag
+.\scripts\run-explore.ps1 -GmdagFile .\scene.gmdag -LinearSpeed 3.0
+```
+
+---
 
 ### Benchmark Scripts
 
-| Script | Purpose | Key Variations |
-|--------|---------|----------------|
-| `run-temporal-compare.ps1` | End-to-end temporal comparison | `-TemporalCores`, `-Repeats`, `-TotalSteps` |
-| `run-temporal-bakeoff.ps1` | Kernel microbenchmark | `-Candidates`, `-Batch`, `-Device` |
-| `run-resolution-compare.ps1` | Resolution scaling sweep | `-Profiles`, `-Repeats` |
-| `run-actor-scaling-test.ps1` | Fleet scaling benchmark | `-ActorCountsStr`, `-StepsPerRun` |
-| `run-attribution-matrix.ps1` | Throughput attribution ablation | `-TotalSteps`, `-Actors` |
+#### `run-temporal-compare.ps1` -- End-to-End Temporal Comparison
+
+Compare temporal cores in real training runs. [(Flow 8A)](#8a--temporal-core-comparison-end-to-end)
+
+**Wraps:** `uv run --project projects/actor brain train` (one run per core)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-TemporalCores` | string[] | `@("mamba2")` | Cores to compare |
+| `-TotalSteps` | int | `256` | Steps per run |
+| `-Repeats` | int | `3` | Independent repetitions |
+| `-Actors` | int | `4` | Actor count |
+| `-MinibatchSize` | int | `64` | PPO minibatch size |
+| `-RolloutLength` | int | `256` | Rollout length |
+| `-ProfileCudaEvents` | switch | | Enable CUDA event tracing |
+| `-OutputRoot` | string | `artifacts/benchmarks/temporal-compare` | Results directory |
+| `-Scene` / `-GmDagFile` | string | `""` | Scene overrides |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\run-temporal-compare.ps1 -TemporalCores @("mamba2","gru") -TotalSteps 1024
+```
+
+---
+
+#### `run-temporal-bakeoff.ps1` -- Temporal Kernel Microbenchmark
+
+Isolated forward/backward pass timing (no training overhead). [(Flow 8B)](#8b--temporal-kernel-microbenchmark)
+
+**Wraps:** `projects/actor/scripts/bench_temporal_backends.py`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Candidates` | string[] | `@("mamba2")` | Backends to benchmark |
+| `-Batch` | int | `16` | Batch size |
+| `-SeqLen` | int | `128` | Sequence length |
+| `-DModel` | int | `128` | Model dimension |
+| `-Repeats` | int | `40` | Benchmark iterations |
+| `-Warmup` | int | `10` | Warmup iterations |
+| `-Device` | string | `cuda` | Device (`cuda` / `cpu`) |
+| `-AllowCpuDiagnostic` | switch | | Allow CPU-side profiling |
+| `-OutputDir` | string | `artifacts/benchmarks/temporal` | JSON output directory |
+
+```powershell
+.\scripts\run-temporal-bakeoff.ps1 -Candidates @("mamba2","gru","mambapy")
+.\scripts\run-temporal-bakeoff.ps1 -Device cpu -AllowCpuDiagnostic
+```
+
+---
+
+#### `run-resolution-compare.ps1` -- Resolution Scaling Benchmark
+
+Compare training throughput across observation resolutions. [(Flow 8C)](#8c--resolution-scaling-benchmark)
+
+**Wraps:** `uv run --project projects/actor brain train` (one run per profile)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Profiles` | string[] | `@("256x48","512x96","768x144")` | Resolution profiles |
+| `-TotalSteps` | int | `512` | Steps per run |
+| `-Repeats` | int | `3` | Repetitions per profile |
+| `-Actors` | int | `4` | Actor count |
+| `-TemporalCore` | string | `mamba2` | Temporal backend |
+| `-MinibatchSize` | int | `64` | PPO minibatch size |
+| `-ProfileCudaEvents` | switch | | Enable CUDA event tracing |
+| `-OutputRoot` | string | `artifacts/benchmarks/resolution-compare` | Results |
+| `-Scene` / `-GmDagFile` | string | `""` | Scene overrides |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\run-resolution-compare.ps1 -Profiles @("256x48","512x96") -TotalSteps 1024
+```
+
+---
+
+#### `run-actor-scaling-test.ps1` -- Fleet Scaling Benchmark
+
+Find optimal parallel actor count for current hardware. [(Flow 8D)](#8d--actor-scaling-test)
+
+**Wraps:** `uv run --project projects/actor brain train` (one run per count)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-ActorCountsStr` | string | `"4,8,12,16,20,24,28,32"` | Comma-separated actor counts |
+| `-StepsPerRun` | int | `2000` | Training steps per count |
+| `-RolloutLength` | int | `256` | Rollout length |
+| `-TemporalCore` | string | `mamba2` | Temporal backend |
+| `-LogEvery` | int | `100` | Log frequency |
+
+```powershell
+.\scripts\run-actor-scaling-test.ps1
+.\scripts\run-actor-scaling-test.ps1 -ActorCountsStr "4,8,16,32" -StepsPerRun 5000
+```
+
+---
+
+#### `run-attribution-matrix.ps1` -- Throughput Attribution Ablation
+
+Systematically disable actor-side components (episodic memory, reward shaping,
+telemetry) to isolate throughput bottlenecks. [(Flow 8E)](#8e--attribution-matrix)
+
+**Wraps:** `uv run --project projects/actor brain train` (one run per ablation)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-GmDagFile` | string | | Test scene |
+| `-Actors` | int | `4` | Actor count |
+| `-TotalSteps` | int | `2048` | Steps per configuration |
+| `-LogEvery` | int | `256` | Log frequency |
+| `-AzimuthBins` | int | `256` | Azimuth resolution |
+| `-ElevationBins` | int | `48` | Elevation resolution |
+| `-BasePort` | int | `5700` | Base telemetry port |
+| `-OutputRoot` | string | `artifacts/benchmarks/attribution-matrix` | Results |
+
+```powershell
+.\scripts\run-attribution-matrix.ps1 -TotalSteps 4096
+```
+
+---
 
 ### Validation Scripts
 
-| Script | Purpose | Key Variations |
-|--------|---------|----------------|
-| `qualify-canonical-stack.ps1` | Stack qualification | `-TotalSteps`, `-SkipDatasetAudit` |
-| `run-nightly-validation.ps1` | Overnight validation | `-SoakHours`, `-QualificationSteps` |
+#### `qualify-canonical-stack.ps1` -- Stack Qualification
+
+One-pass end-to-end proof: dataset audit -> bounded training -> checkpoint resume -> replay.
+[(Flow 9A)](#9a--canonical-stack-qualification)
+
+**Wraps:** Orchestrates `uv run navi-auditor dataset-audit` + `uv run brain train` + dashboard attach
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-TotalSteps` | int | `512` | Qualification training steps |
+| `-CheckpointEvery` | int | `256` | Checkpoint interval |
+| `-StartupTimeoutSeconds` | int | `90` | Process startup timeout |
+| `-AttachTimeoutSeconds` | int | `20` | Dashboard attach timeout |
+| `-ResumeAdditionalSteps` | int | `0` | Extra steps after resume |
+| `-SkipDatasetAudit` | switch | | Skip dataset validation phase |
+| `-SkipResumeQualification` | switch | | Skip resume proof phase |
+| `-EnableCorpusRefreshQualification` | switch | | Run corpus refresh validation |
+| `-RunRoot` | string | `artifacts\qualification\canonical_stack` | Output root |
+| `-NoPreKill` | switch | | Skip stale process cleanup |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\qualify-canonical-stack.ps1                                  # Default qualification
+.\scripts\qualify-canonical-stack.ps1 -TotalSteps 1024 -SkipDatasetAudit
+```
+
+---
+
+#### `run-nightly-validation.ps1` -- Overnight Validation Pipeline
+
+Comprehensive automated validation: preflight -> regressions -> qualification ->
+checkpoint/resume -> drift benchmark -> soak. [(Flow 9B)](#9b--nightly-validation-overnight)
+
+**Wraps:** Orchestrates `qualify-canonical-stack.ps1` + `run-ghost-stack.ps1 -Train` + monitoring
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-SoakHours` | int | `8` | Overnight soak duration |
+| `-QualificationSteps` | int | `512` | Initial qualification steps |
+| `-MonitorIntervalSeconds` | int | `300` | Checkpoint monitoring interval |
+| `-CheckpointEvery` | int | `25000` | Checkpoint interval (soak phase) |
+| `-CheckpointStallMinutes` | int | `60` | Stall timeout (minutes) |
+| `-BoundedSteps` | int | | Steps for bounded training |
+| `-BoundedResumeSteps` | int | | Steps for resume phase |
+| `-AttachTimeoutSeconds` | int | `20` | Dashboard attach timeout |
+| `-RunRoot` | string | `artifacts/nightly` | Nightly run root |
+| `-NoPreKill` | switch | | Preserve prior process state |
+| `-PythonVersion` | string | `3.12` | Python version for uv |
+
+```powershell
+.\scripts\run-nightly-validation.ps1                                   # Full overnight run
+.\scripts\run-nightly-validation.ps1 -SoakHours 2                      # Shorter soak
+```
+
+---
 
 ### Setup & Diagnostics
 
-| Script | Purpose |
-|--------|---------|
-| `setup-actor-cuda.ps1` | Install CUDA PyTorch wheels (Windows) |
-| `setup-actor-cuda.sh` | Install CUDA PyTorch wheels (Linux/WSL2) |
-| `check_gpu.py` | CUDA availability + kernel execution test |
-| `check_embree.py` | Embree ray tracing backend detection |
-| `diagnose_gmdag_corpus.py` | Shallow `.gmdag` header diagnostics |
-| `diagnose_gmdag_deep.py` | Deep DAG structural analysis |
-| `summarize-bounded-train-log.ps1` | Training log metric extraction |
-| `run-json-command.py` | Machine-readable subprocess runner |
-| `run-structured-surface.py` | Diagnostic surface orchestrator |
-| `benchmark_canonical_stack.py` | End-to-end throughput proof (CI gate) |
+#### `setup-actor-cuda.ps1` -- Install CUDA PyTorch (Windows)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-CudaTag` | string | `cu121` | CUDA version tag |
+| `-TorchVersion` | string | `2.5.1` | PyTorch version |
+| `-SkipActorSync` | switch | | Skip `uv sync` after install |
+| `-InstallFusedTemporal` | switch | | Install mamba-ssm fused wheels |
+| `-FusedWheelPath` | string | `""` | Path to fused temporal wheels |
+
+```powershell
+.\scripts\setup-actor-cuda.ps1                                        # Default CUDA 12.1
+.\scripts\setup-actor-cuda.ps1 -CudaTag cu124 -TorchVersion 2.6.0    # CUDA 12.4
+```
+
+**Linux/WSL2 variant:** `./scripts/setup-actor-cuda.sh`
+
+---
+
+#### `summarize-bounded-train-log.ps1` -- Training Log Extraction
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-LogPath` | string | (required) | Path to training log file |
+| `-RepoLogPath` | string | `logs/navi_actor_train.log` | Fallback log path |
+| `-OutputJson` | string | `""` | Output JSON file (optional) |
+
+```powershell
+.\scripts\summarize-bounded-train-log.ps1 -LogPath .\logs\navi_actor_train.log.1
+.\scripts\summarize-bounded-train-log.ps1 -LogPath .\logs\navi_actor_train.log.1 -OutputJson summary.json
+```
+
+---
+
+#### Python Diagnostic Utilities
+
+| Script | Invocation | Purpose |
+|--------|-----------|---------|
+| `check_gpu.py` | `python scripts\check_gpu.py` | CUDA availability + kernel execution test |
+| `check_embree.py` | `python scripts\check_embree.py` | Embree ray tracing backend detection |
+| `diagnose_gmdag_corpus.py` | `python scripts\diagnose_gmdag_corpus.py` | Shallow .gmdag header diagnostics |
+| `diagnose_gmdag_deep.py` | `python scripts\diagnose_gmdag_deep.py` | Deep DAG structural analysis (up to 2M nodes) |
+| `run-json-command.py` | `python scripts\run-json-command.py` | Machine-readable subprocess wrapper |
+| `run-structured-surface.py` | `python scripts\run-structured-surface.py` | Diagnostic surface orchestrator |
+| `benchmark_canonical_stack.py` | `python scripts\benchmark_canonical_stack.py` | End-to-end throughput proof (CI gate) |
 
 ---
 
 ## CLI Entry Points
 
-Each project exposes CLI commands through `uv run`:
+Every project exposes CLI commands via `uv run`. These are the raw commands
+that the wrapper scripts call under the hood. Use them directly when you need
+precise control beyond what the wrappers provide.
+
+> **Pattern:** `uv run --project projects\<project> <command> [options]`
+>
+> **Shortcuts:** Some projects register shortcut names so you can skip the
+> full `navi-*` prefix. Shortcuts are noted in each section.
+
+---
 
 ### Environment (`projects/environment`)
 
-```powershell
-uv run --project projects\environment navi-environment <command>
+**Base command:** `uv run --project projects\environment navi-environment <command>`
+**Shortcut:** `uv run --project projects\environment environment` -> `serve`
 
-Commands:
-  serve              Start the environment server
-  compile-gmdag      Compile a mesh to .gmdag
-  prepare-corpus     Full corpus preparation
-  check-sdfdag       Validate runtime + assets
-  bench-sdfdag       Benchmark compiled assets
-  dataset-audit      Audit available datasets
+#### `serve` -- Start Environment Server
+
+ZMQ-based environment server for the 3-process inference stack.
+
+```powershell
+uv run --project projects\environment navi-environment serve [options]
 ```
 
-**Shortcut:** `uv run --project projects\environment environment` → `serve`
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--pub` | string | `tcp://localhost:5559` | PUB socket address (observation broadcast) |
+| `--rep` | string | `tcp://localhost:5560` | REP socket address (step request/response) |
+| `--action-sub` | string | `tcp://localhost:5557` | SUB socket for actor actions |
+| `--mode` | string | `step` | Service mode (`step` / `async`) |
+| `--gmdag-file` | string | | .gmdag scene file to load |
+| `--actors` | int | `1` | Number of parallel actors |
+| `--azimuth-bins` | int | `256` | Observation azimuth resolution |
+| `--elevation-bins` | int | `48` | Observation elevation resolution |
+| `--max-distance` | float | `30.0` | Maximum ray distance (meters) |
+| `--sdf-max-steps` | int | `256` | Sphere-tracing max iterations |
+
+#### `compile-gmdag` -- Compile Mesh to .gmdag
+
+```powershell
+uv run --project projects\environment navi-environment compile-gmdag [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--source` | string | (required) | Input mesh file (.glb/.obj/.ply/.stl) |
+| `--output` | string | (required) | Output .gmdag file path |
+| `--resolution` | int | `512` | Target cubic voxel resolution |
+
+#### `prepare-corpus` -- Full Corpus Preparation
+
+Discover source scenes, compile missing .gmdag assets, emit manifest.
+
+```powershell
+uv run --project projects\environment navi-environment prepare-corpus [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--scene` | string | `""` | Single scene name filter |
+| `--manifest` | string | `""` | Existing manifest to update |
+| `--corpus-root` | string | `artifacts/gmdag/corpus` | Live corpus root |
+| `--gmdag-root` | string | `artifacts/gmdag` | Parent .gmdag directory |
+| `--resolution` | int | `512` | Compile resolution |
+| `--min-scene-bytes` | int | `1000` | Minimum scene file size |
+| `--force-recompile` | flag | | Recompile all assets |
+| `--json` | flag | | Machine-readable JSON output |
+
+#### `check-sdfdag` -- Validate Runtime + Assets
+
+```powershell
+uv run --project projects\environment navi-environment check-sdfdag [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--gmdag-file` | string | | Validate single .gmdag file |
+| `--gmdag-root` | string | | Validate all files in directory |
+| `--manifest` | string | | Validate against manifest |
+| `--expected-resolution` | int | `512` | Expected compile resolution |
+| `--json` | flag | | Machine-readable JSON output |
+
+#### `bench-sdfdag` -- Benchmark Compiled Assets
+
+Canonical environment-layer throughput benchmark for the SDF/DAG path.
+
+```powershell
+uv run --project projects\environment navi-environment bench-sdfdag [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--gmdag-file` | string | (required) | .gmdag file to benchmark |
+| `--actors` | int | `4` | Parallel actor count |
+| `--steps` | int | `200` | Benchmark steps |
+| `--warmup-steps` | int | `25` | Warmup steps (excluded from timing) |
+| `--repeats` | int | `1` | Benchmark repetitions |
+| `--azimuth-bins` | int | `256` | Azimuth resolution |
+| `--elevation-bins` | int | `48` | Elevation resolution |
+| `--max-distance` | float | `30.0` | Max ray distance |
+| `--sdf-max-steps` | int | `256` | Sphere-tracing iterations |
+| `--torch-compile` | flag | | Enable torch.compile (sm_70+) |
+| `--json` | flag | | Machine-readable JSON output |
+
+---
 
 ### Actor (`projects/actor`)
 
+**Base command:** `uv run --project projects\actor navi-actor <command>`
+**Shortcut:** `uv run --project projects\actor brain <subcommand>` -> unified entry point
+
+#### `train` -- Unified In-Process PPO Training
+
+The canonical training entrypoint. Instantiates the sdfdag environment backend
+directly with GPU-resident rollout storage and no ZMQ in the hot loop.
+
 ```powershell
-uv run --project projects\actor navi-actor <command>
-
-Commands:
-  serve              Start the actor policy server
-  train              Unified in-process PPO training
-  evaluate           Run inference evaluation
-  profile            Throughput profiling
-
-uv run --project projects\actor brain <subcommand>
-
-Subcommands:
-  bc-pretrain        Behavioral cloning pre-training
+uv run --project projects\actor navi-actor train [options]
 ```
 
-**Shortcut:** `uv run --project projects\actor brain` → actor CLI
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--actors` | int | `4` | Parallel actor count |
+| `--temporal-core` | string | `mamba2` | Temporal backend (`mamba2` / `gru` / `mambapy`) |
+| `--total-steps` | int | `0` | Steps before auto-stop (0 = continuous) |
+| `--rollout-length` | int | `256` | Steps per rollout window |
+| `--minibatch-size` | int | `64` | PPO minibatch size |
+| `--ppo-epochs` | int | `2` | PPO optimizer epochs per update |
+| `--learning-rate` | float | `3e-4` | Learning rate |
+| `--bptt-len` | int | `8` | Truncated BPTT sequence length |
+| `--checkpoint-dir` | string | `""` | Checkpoint output directory |
+| `--checkpoint` | string | `""` | Resume from checkpoint |
+| `--scene` | string | `""` | Single scene GLB override |
+| `--manifest` | string | `""` | Corpus manifest path |
+| `--corpus-root` | string | `""` | Corpus root directory |
+| `--gmdag-root` | string | `""` | .gmdag root directory |
+| `--gmdag-file` | string | `""` | Single .gmdag file override |
+| `--compile-resolution` | int | `512` | Auto-compile resolution |
+| `--azimuth-bins` | int | `256` | Observation azimuth resolution |
+| `--elevation-bins` | int | `48` | Observation elevation resolution |
+| `--enable-episodic-memory` | flag | | Enable episodic memory module |
+| `--enable-reward-shaping` | flag | | Enable reward shaping |
+| `--emit-observation-stream` | flag | | Enable observation PUB stream |
+| `--emit-training-telemetry` | flag | | Enable training telemetry events |
+| `--emit-perf-telemetry` | flag | | Enable performance telemetry |
+
+#### `serve` -- Actor Policy Server
+
+ZMQ-based actor for the 3-process inference stack.
+
+```powershell
+uv run --project projects\actor navi-actor serve [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--sub` | string | `tcp://localhost:5559` | SUB socket (environment observations) |
+| `--pub` | string | `tcp://localhost:5557` | PUB socket (actions + telemetry) |
+| `--mode` | string | `async` | Service mode (`async` / `step`) |
+| `--policy-checkpoint` | string | `""` | Trained checkpoint to load |
+| `--temporal-core` | string | `mamba2` | Temporal backend |
+| `--azimuth-bins` | int | `256` | Observation azimuth resolution |
+| `--elevation-bins` | int | `48` | Observation elevation resolution |
+
+#### `bc-pretrain` -- Behavioral Cloning Pre-Training
+
+Supervised learning from recorded `.npz` demonstrations.
+
+```powershell
+uv run --project projects\actor brain bc-pretrain [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--demonstrations` | string | `artifacts/demonstrations` | Demonstration directory |
+| `--output` | string | | Output checkpoint path |
+| `--checkpoint` | string | `""` | Resume from BC checkpoint |
+| `--temporal-core` | string | `""` | Temporal backend override |
+| `--embedding-dim` | int | `128` | Embedding dimension |
+| `--azimuth-bins` | int | `256` | Observation azimuth resolution |
+| `--elevation-bins` | int | `48` | Observation elevation resolution |
+| `--epochs` | int | `50` | Training epochs |
+| `--learning-rate` | float | `1e-3` | Learning rate |
+| `--bptt-len` | int | `8` | BPTT sequence length |
+
+#### `profile` -- Throughput Profiling
+
+Run fixed-length rollout with CUDA profiling active.
+
+```powershell
+uv run --project projects\actor navi-actor profile [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--scene` | string | | Scene to profile |
+| `--steps` | int | `512` | Roll out steps |
+| `--actors` | int | `4` | Actor count |
+| `--azimuth-bins` | int | `256` | Observation azimuth resolution |
+| `--elevation-bins` | int | `48` | Observation elevation resolution |
+
+#### `brain` -- Unified Entry Point
+
+Delegates to `train`, `serve`, or `profile` based on the mode argument:
+
+```powershell
+uv run --project projects\actor brain train [options]      # -> navi-actor train
+uv run --project projects\actor brain serve [options]      # -> navi-actor serve
+uv run --project projects\actor brain bc-pretrain [options] # -> bc-pretrain
+uv run --project projects\actor brain profile [options]    # -> navi-actor profile
+```
+
+---
 
 ### Auditor (`projects/auditor`)
 
-```powershell
-uv run --project projects\auditor navi-auditor <command>
+**Base command:** `uv run --project projects\auditor navi-auditor <command>`
+**Shortcuts:**
+- `uv run --project projects\auditor dashboard` -> `navi-auditor dashboard`
+- `uv run --project projects\auditor explore` -> `navi-auditor explore`
 
-Commands:
-  dashboard          Live passive observation dashboard
-  explore            Interactive keyboard-controlled explorer
-  record             Session recording
-  replay             Session playback
-  dataset-audit      Dataset audit surface
+#### `dashboard` -- Live Passive Observation Dashboard
+
+Subscribes to actor PUB stream. Displays actor 0 observations. Auto-detects mode.
+
+```powershell
+uv run --project projects\auditor navi-auditor dashboard [options]
 ```
 
-**Shortcuts:**
-- `uv run --project projects\auditor dashboard` → `navi-auditor dashboard`
-- `uv run --project projects\auditor explore` → `navi-auditor explore`
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--actor-sub` | string | `tcp://localhost:5557` | Actor PUB socket to subscribe |
+| `--matrix-sub` | string | `""` | Environment PUB socket (optional) |
+| `--step-endpoint` | string | `""` | Environment REP endpoint (optional) |
+| `--passive` | flag | | Force passive mode (no env control) |
+| `--hz` | float | `30.0` | Target frame rate |
+| `--linear-speed` | float | | Manual control speed |
+| `--yaw-rate` | float | | Manual control yaw rate |
+| `--max-distance` | float | | Override max distance for colorization |
+| `--scene` | string | `""` | Scene label for title bar |
+
+#### `explore` -- Interactive Keyboard-Controlled Explorer
+
+Standalone manual exploration: spawns environment backend + dashboard with WASD controls.
+
+```powershell
+uv run --project projects\auditor navi-auditor explore [options]
+# Shortcut:
+uv run --project projects\auditor explore [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--gmdag-file` | string | | .gmdag scene to explore |
+| `--pub-address` | string | `tcp://localhost:5559` | Environment PUB address |
+| `--rep-address` | string | `tcp://localhost:5560` | Environment REP address |
+| `--hz` | float | `30.0` | Target frame rate |
+| `--record` | flag | | Record demonstration to .npz |
+| `--drone-max-speed` | float | `5.0` | Drone max speed (m/s) |
+| `--azimuth-bins` | int | `256` | Azimuth resolution |
+| `--elevation-bins` | int | `48` | Elevation resolution |
+| `--max-steps` | int | | Auto-close after N steps |
+
+#### `record` -- Session Recording
+
+Record live ZMQ streams to Zarr storage for later replay.
+
+```powershell
+uv run --project projects\auditor navi-auditor record [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--sub` | string | | Comma-separated ZMQ SUB addresses |
+| `--out` | string | | Output file path |
+
+#### `replay` -- Session Playback
+
+Play back a recorded session via ZMQ PUB.
+
+```powershell
+uv run --project projects\auditor navi-auditor replay [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--input` | string | | Recorded session file |
+| `--pub` | string | | PUB socket to publish on |
+| `--speed` | float | `1.0` | Playback speed multiplier |
+
+#### `dataset-audit` -- Dataset Quality Assurance
+
+Runtime-backed dataset validation: preflight checks + optional benchmark.
+
+```powershell
+uv run --project projects\auditor navi-auditor dataset-audit [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--gmdag-file` | string | | .gmdag file to audit |
+| `--expected-resolution` | int | `512` | Expected compile resolution |
+| `--benchmark` | flag | | Run throughput benchmark |
+| `--actors` | int | `1` | Actor count (benchmark mode) |
+| `--steps` | int | `8` | Benchmark steps |
+| `--warmup-steps` | int | `1` | Warmup steps |
+| `--azimuth-bins` | int | `64` | Audit azimuth resolution |
+| `--elevation-bins` | int | `16` | Audit elevation resolution |
+| `--json` | flag | | Machine-readable JSON output |
+
+#### `dashboard-attach-check` -- Headless Attach Proof
+
+Verify passive dashboard can connect to actor stream (used by qualification).
+
+```powershell
+uv run --project projects\auditor navi-auditor dashboard-attach-check [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--actor-sub` | string | | Actor PUB socket to test |
+| `--timeout-seconds` | float | `15.0` | Connection timeout |
+| `--json` | flag | | Machine-readable JSON output |
+
+#### `dashboard-capture-frame` -- Capture Dashboard Frame
+
+Capture one live dashboard frame + rendered diagnostics to file.
+
+```powershell
+uv run --project projects\auditor navi-auditor dashboard-capture-frame [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--actor-sub` | string | | Actor PUB socket |
+| `--actor-id` | int | `0` | Actor ID to capture |
+| `--timeout-seconds` | float | `15.0` | Connection timeout |
+| `--output-dir` | string | | Output directory for captured frames |
+| `--max-distance` | float | | Override max distance |
+| `--json` | flag | | Machine-readable JSON output |
+
+---
+
+### Voxel-DAG Compiler (`projects/voxel-dag`)
+
+**Base command:** `uv run --project projects\voxel-dag <command>`
+
+#### `voxel-dag-compiler` -- Compile OBJ to .gmdag
+
+Low-level compiler entry point (the environment `compile-gmdag` command wraps this).
+
+```powershell
+uv run --project projects\voxel-dag voxel-dag-compiler [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--input` | string | (required) | Input OBJ mesh path |
+| `--output` | string | (required) | Output .gmdag file path |
+| `--resolution` | int | `512` | Target cubic voxel resolution |
+| `--padding` | float | `0.1` | Relative cubic padding |
+
+#### `bsp-to-obj` -- Convert Quake 3 BSP/PK3 to OBJ
+
+Extract geometry from Quake 3 maps for .gmdag compilation.
+
+```powershell
+uv run --project projects\voxel-dag bsp-to-obj [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--input` / `-i` | string | (required) | Input .bsp or .pk3 file |
+| `--output` / `-o` | string | (required) | Output .obj (BSP) or directory (PK3) |
+| `--tessellation` / `-t` | int | `4` | Bezier patch tessellation level |
+| `--no-metric-conversion` | flag | | Keep Q3 native units (inches) |
+| `--export-spawns` | flag | | Export spawn points as .spawns.json |
 
 ---
 

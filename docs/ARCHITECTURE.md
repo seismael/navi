@@ -411,7 +411,7 @@ recorder only captures data; it does not modify environment contracts.
 | Dashboard | `uv run --project projects/auditor dashboard` | passive viewer |
 | Manual explore | `uv run --project projects/auditor explore --record` | manual navigation + demo recording |
 | BC pre-training | `uv run --project projects/actor brain bc-pretrain` | supervised policy pre-training |
-| BC incremental | `./scripts/run-manual-training.ps1` | multi-scene incremental BC loop |
+| Multi-scene explore | `./scripts/run-explore-scenes.ps1` | navigate corpus, record demos |
 
 ## 12. Document Map
 

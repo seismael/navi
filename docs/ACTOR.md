@@ -532,8 +532,9 @@ uv run --project projects/actor brain bc-pretrain
 # Incremental multi-scene
 uv run --project projects/actor brain bc-pretrain --checkpoint artifacts/checkpoints/bc_base_model.pt
 
-# Automated corpus loop
-./scripts/run-manual-training.ps1
+# Multi-scene exploration then training
+./scripts/run-explore-scenes.ps1
+./scripts/run-bc-pretrain.ps1
 ```
 
 ## 19. Related Docs

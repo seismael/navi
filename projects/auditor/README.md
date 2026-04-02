@@ -75,17 +75,19 @@ When `--record` is active:
 Saved `.npz` files contain `(observation, action)` pairs compatible
 with `navi-actor bc-pretrain` for behavioral cloning pre-training.
 
-### Multi-Scene Incremental Training
+### Multi-Scene Exploration & Training
 
 ```powershell
-# Automated: loop through corpus, fly each scene, train incrementally
-./scripts/run-manual-training.ps1
+# Step 1: Fly through scenes continuously (no training wait between scenes)
+./scripts/run-explore-scenes.ps1
+./scripts/run-explore-scenes.ps1 -CorpusRoot artifacts\gmdag\corpus\quake3-arenas
+./scripts/run-explore-scenes.ps1 -MaxSteps 2000
 
-# Resume from existing checkpoint
-./scripts/run-manual-training.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
+# Step 2: Train on all accumulated demos when ready
+./scripts/run-bc-pretrain.ps1
 
-# Specific scenes only
-./scripts/run-manual-training.ps1 -Scenes "scene1.gmdag","scene2.gmdag"
+# Step 3: Fine-tune with RL
+./scripts/train.ps1 -ResumeCheckpoint artifacts\checkpoints\bc_base_model.pt
 ```
 
 ### Recording & Replay

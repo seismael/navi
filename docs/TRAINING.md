@@ -448,17 +448,15 @@ uv run --project projects/actor brain bc-pretrain \
     --checkpoint artifacts/checkpoints/bc_base_model.pt
 ```
 
-Or use the automated wrapper that loops through the entire corpus:
+Or use the two-step workflow that separates navigation from training:
 
 ```powershell
-# Full corpus incremental training
-./scripts/run-manual-training.ps1
+# Step 1: Fly through all scenes (demos accumulate, no training waits)
+./scripts/run-explore-scenes.ps1
 
-# Resume from an existing checkpoint
-./scripts/run-manual-training.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
-
-# Train on specific scenes only
-./scripts/run-manual-training.ps1 -Scenes "scene1.gmdag","scene2.gmdag"
+# Step 2: Train on all accumulated demos
+./scripts/run-bc-pretrain.ps1
+./scripts/run-bc-pretrain.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
 ```
 
 ### Training Algorithm

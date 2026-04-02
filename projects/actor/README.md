@@ -99,14 +99,18 @@ uv run brain bc-pretrain --epochs 100 --learning-rate 5e-4 --bptt-len 16
 Demonstrations are recorded in the auditor project:
 
 ```bash
+# Navigate scenes continuously (demos accumulate, no training wait)
+./scripts/run-explore-scenes.ps1
+
+# Record a single scene
 uv run --project projects/auditor explore --record --gmdag-file <scene.gmdag>
 ```
 
-Multi-scene incremental training wrapper:
+Train on accumulated demonstrations:
 
 ```powershell
-./scripts/run-manual-training.ps1
-./scripts/run-manual-training.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
+./scripts/run-bc-pretrain.ps1
+./scripts/run-bc-pretrain.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
 ```
 
 The BC checkpoint is a standard v2 file loadable by `navi-actor train --checkpoint <path>`

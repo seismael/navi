@@ -9,11 +9,12 @@
     Workflow:
       1. Record: uv run explore --record
       2. Pre-train: .\scripts\run-bc-pretrain.ps1
-      3. Fine-tune: uv run brain train --checkpoint artifacts\checkpoints\bc_base_model.pt
+      3. Fine-tune: .\scripts\train.ps1 -ResumeCheckpoint artifacts\checkpoints\bc_base_model.pt
 #>
 param(
     [string]$Demonstrations = "artifacts/demonstrations",
     [string]$Output = "artifacts/checkpoints/bc_base_model.pt",
+    [string]$Checkpoint = "",
     [int]$Epochs = 50,
     [float]$LearningRate = 1e-3,
     [int]$BpttLen = 8,
@@ -21,16 +22,19 @@ param(
     [string]$TemporalCore = ""
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
+
 Set-Location $PSScriptRoot\..
 
 Write-Host "=== Ghost-Matrix Behavioral Cloning Pre-Training ===" -ForegroundColor Cyan
 Write-Host "  Demonstrations: $Demonstrations"
 Write-Host "  Output:         $Output"
+Write-Host "  Checkpoint:     $(if ($Checkpoint) { $Checkpoint } else { '(fresh start)' })"
 Write-Host "  Epochs:         $Epochs"
 Write-Host ""
 
-$args = @(
+$uvArgs = @(
     "run", "--project", "projects/actor",
     "brain", "bc-pretrain",
     "--demonstrations", $Demonstrations,
@@ -42,10 +46,14 @@ $args = @(
 )
 
 if ($TemporalCore) {
-    $args += @("--temporal-core", $TemporalCore)
+    $uvArgs += @("--temporal-core", $TemporalCore)
 }
 
-& uv @args
+if ($Checkpoint) {
+    $uvArgs += @("--checkpoint", $Checkpoint)
+}
+
+& uv @uvArgs 2>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.Exception.Message } else { $_ } }
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
@@ -53,7 +61,7 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "  Checkpoint: $Output"
     Write-Host ""
     Write-Host "  Next step - fine-tune with RL:"
-    Write-Host "    uv run brain train --checkpoint $Output"
+    Write-Host "    .\scripts\train.ps1 -ResumeCheckpoint $Output"
 } else {
     Write-Host "BC pre-training failed with exit code $LASTEXITCODE" -ForegroundColor Red
     exit $LASTEXITCODE

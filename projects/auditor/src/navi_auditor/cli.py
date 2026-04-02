@@ -481,12 +481,18 @@ def explore(
             if ".venv" not in p and "projects\\auditor" not in p
         )
 
+    _creation_flags: int = (
+        subprocess.CREATE_NEW_PROCESS_GROUP
+        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP")
+        else 0
+    )
     env_proc = subprocess.Popen(  # noqa: S603
         env_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=_repo_root(),
         env=env_vars,
+        creationflags=_creation_flags,
     )
 
     def _kill_env() -> None:
