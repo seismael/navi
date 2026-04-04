@@ -63,17 +63,20 @@ Service mode is important for:
 ## 4. Passive Observer Sequence
 
 ```text
-actor and environment PUB streams
-  -> auditor StreamEngine poll
+actor PUB stream
+  -> auditor StreamEngine CONFLATE observation socket (latest frame only)
+  -> auditor StreamEngine telemetry socket (actions + telemetry events)
   -> actor 0 state update
-  -> dashboard render at capped UI cadence
+  -> dashboard render only when a new observation arrived
   -> optional record or replay surfaces
 ```
 
-The critical rule is that observer consumption is droppable. If the dashboard is
-behind, it must drop intermediate frames rather than backpressuring producers.
-Observer-side reshaping of the published sphere is allowed; changing the core
-observation contract to satisfy a view is not.
+The critical rule is that observer consumption is droppable. The `CONFLATE`
+socket guarantees the dashboard always sees the latest observation regardless of
+any transient rendering delay. Telemetry events (which are small and ordered)
+are drained on a conventional bounded `RCVHWM=50` socket. Observer-side
+reshaping of the published sphere is allowed; changing the core observation
+contract to satisfy a view is not.
 
 ## 5. Synchronization Rules
 
@@ -125,6 +128,7 @@ attribution without becoming a second runtime:
 - host extraction timing
 - telemetry publication timing
 - coarse environment perf snapshots
+- dashboard-side observation freshness indicator (`Obs=XXms` in status bar)
 
 ## 9. Manual Training (Behavioral Cloning) Dataflow
 

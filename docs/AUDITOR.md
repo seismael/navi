@@ -13,7 +13,7 @@ observer first. Navi now documents that idea against the current codebase.
 
 | Component | Current Role |
 | --- | --- |
-| `StreamEngine` | multi-stream ZMQ ingestion and actor 0 state |
+| `StreamEngine` | split-socket ZMQ ingestion with CONFLATE observation delivery and actor 0 state |
 | `GhostMatrixDashboard` | primary PyQtGraph operator UI |
 | `LiveDashboard` | legacy OpenCV live matrix dashboard surface |
 | `Recorder` | persistent capture of stream data |
@@ -29,9 +29,14 @@ Current implementation characteristics include:
 - PyQtGraph and PyQt-based desktop UI
 - hardcoded actor `0` view for maximum throughput
 - actor count and active scene name display in status bar
+- observation age indicator (`Obs=XXms`) in the status metrics line
 - passive status-line telemetry
 - forward-FOV extraction from the spherical observation convention
-- capped ZMQ ingestion per tick for UI responsiveness
+- conditional rendering: the actor panel redraws only when a genuinely new
+  observation arrives, not on every UI tick
+- split-socket ZMQ ingestion: a dedicated `CONFLATE` socket for observations
+  ensures the dashboard always displays the latest published frame regardless
+  of transient UI pauses
 
 The dashboard is intentionally visual-only by default and should remain
 non-blocking with respect to the trainer.
@@ -87,7 +92,6 @@ The auditor layer must obey strict throughput rules:
 
 - it must never become a required dependency for canonical training
 - it may drop frames rather than backpressure producers
-- its ingestion must be capped per UI tick
 - the actor telemetry PUB socket uses `SNDHWM=50` so unsent frames are dropped
   rather than accumulating unbounded memory on slow or absent consumers
 - actor-stream-only passive operation must remain supported during training
@@ -95,6 +99,24 @@ The auditor layer must obey strict throughput rules:
 
 Dashboard heartbeat republishing from the trainer is allowed only as a coarse,
 diagnostic convenience during optimizer windows.
+
+Current socket architecture:
+
+- a dedicated `zmq.CONFLATE` observation socket subscribes only to
+  `distance_matrix_v2` on the actor PUB address; `CONFLATE` keeps at most one
+  buffered message, automatically replacing old observations with new ones so
+  the dashboard always renders the latest frame even after transient UI pauses,
+  GC stalls, or window operations
+- a separate telemetry socket subscribes to `action_v2` and
+  `telemetry_event_v2` with `RCVHWM=50`; telemetry events are small and
+  ordered, so a conventional bounded queue is appropriate
+- an optional Environment PUB socket (`matrix_sub`) handles service-mode
+  observation delivery with `RCVHWM=200` and is not connected in passive
+  training mode
+- the `poll()` loop drains the `CONFLATE` observation socket first (at most one
+  message per tick), then drains all available telemetry; rendering occurs only
+  when a new observation was received, saving CPU for queue draining and status
+  updates
 
 Current canonical default:
 

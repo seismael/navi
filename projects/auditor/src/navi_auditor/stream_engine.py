@@ -206,6 +206,7 @@ class StreamEngine:
             TOPIC_TELEMETRY_EVENT: 0,
         }
         self._last_diag_t: float = time.monotonic()
+        self._observation_updated: bool = False
 
         # Pre-populate actor states if requested
         if n_actors > 0:
@@ -223,16 +224,32 @@ class StreamEngine:
                 self._sock_matrix.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
             self._poller.register(self._sock_matrix, zmq.POLLIN)
 
-        # Actor / Trainer PUB socket
+        # Actor / Trainer PUB socket — telemetry + actions only (no observations)
         self._sock_actor: zmq.Socket[bytes] | None = None
         if actor_sub:
             self._sock_actor = self._ctx.socket(zmq.SUB)
-            self._sock_actor.setsockopt(zmq.RCVHWM, 200)
+            self._sock_actor.setsockopt(zmq.RCVHWM, 50)
             self._sock_actor.setsockopt(zmq.LINGER, 0)
             self._sock_actor.connect(actor_sub)
-            for topic in (TOPIC_DISTANCE_MATRIX, TOPIC_ACTION, TOPIC_TELEMETRY_EVENT):
+            for topic in (TOPIC_ACTION, TOPIC_TELEMETRY_EVENT):
                 self._sock_actor.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
             self._poller.register(self._sock_actor, zmq.POLLIN)
+
+        # Dedicated low-HWM observation socket — drain-to-latest pattern
+        # prevents stale buffered observations from replaying after any
+        # transient UI or GC pause.  We do NOT use zmq.CONFLATE because it
+        # is incompatible with multi-part messages (corrupts [topic, payload]
+        # framing, causing libzmq !_more assertion crash).
+        self._sock_obs: zmq.Socket[bytes] | None = None
+        if actor_sub:
+            self._sock_obs = self._ctx.socket(zmq.SUB)
+            self._sock_obs.setsockopt(zmq.RCVHWM, 4)
+            self._sock_obs.setsockopt(zmq.LINGER, 0)
+            self._sock_obs.connect(actor_sub)
+            self._sock_obs.setsockopt(
+                zmq.SUBSCRIBE, TOPIC_DISTANCE_MATRIX.encode("utf-8"),
+            )
+            self._poller.register(self._sock_obs, zmq.POLLIN)
 
         # Manual teleop REQ socket
         self._sock_step: zmq.Socket[bytes] | None = None
@@ -251,14 +268,45 @@ class StreamEngine:
     # ── public API ───────────────────────────────────────────────────
 
     def poll(self, max_messages: int = 50) -> int:
-        """Non-blocking drain of ZMQ queues with a processing cap.
+        """Non-blocking drain of ZMQ queues.
+
+        The dedicated observation socket is drained first — all buffered
+        frames are consumed but only the latest observation is dispatched.
+        Telemetry and action sockets are then drained up to *max_messages*
+        so status metrics stay current.
 
         Returns:
             Number of messages processed.
         """
+        self._observation_updated = False
         count = 0
+
+        # --- Drain observation socket, keep only the latest frame ---
+        if self._sock_obs is not None:
+            latest_topic: str | None = None
+            latest_msg: object | None = None
+            while True:
+                try:
+                    topic_bytes, data = self._sock_obs.recv_multipart(
+                        flags=zmq.NOBLOCK,
+                    )
+                    latest_topic = topic_bytes.decode("utf-8")
+                    latest_msg = deserialize(data)
+                    count += 1
+                except zmq.Again:
+                    break
+            if latest_topic is not None and latest_msg is not None:
+                self._dispatch(latest_topic, latest_msg)
+                self._msg_total += count
+                if latest_topic in self._topic_counts:
+                    self._topic_counts[latest_topic] += count
+
+        # --- Environment and telemetry sockets: drain all available ---
         while count < max_messages:
             socks = dict(self._poller.poll(0))
+            # Remove observation socket from this check — already drained
+            if self._sock_obs is not None:
+                socks.pop(self._sock_obs, None)
             if not socks:
                 break
 
@@ -267,14 +315,13 @@ class StreamEngine:
             if self._sock_actor is not None and self._sock_actor in socks:
                 count += self._recv_from(self._sock_actor, limit=max_messages - count)
 
-            if not socks:
-                break
         now = time.monotonic()
         if now - self._last_diag_t >= 5.0:
             _LOG.info(
-                "auditor.stream poll total=%d dropped=%d selected_actor=%s topics={dm:%d action:%d telem:%d}",
+                "auditor.stream poll total=%d dropped=%d obs_up=%s selected_actor=%s topics={dm:%d action:%d telem:%d}",
                 self._msg_total,
                 self._drop_total,
+                self._observation_updated,
                 str(self._selected_actor_id),
                 self._topic_counts[TOPIC_DISTANCE_MATRIX],
                 self._topic_counts[TOPIC_ACTION],
@@ -328,12 +375,19 @@ class StreamEngine:
         """Whether manual stepping is available."""
         return self._sock_step is not None
 
+    @property
+    def observation_updated(self) -> bool:
+        """Whether the latest ``poll()`` delivered a new observation frame."""
+        return self._observation_updated
+
     def close(self) -> None:
         """Tear down all sockets."""
         if self._sock_matrix is not None:
             self._sock_matrix.close()
         if self._sock_actor is not None:
             self._sock_actor.close()
+        if self._sock_obs is not None:
+            self._sock_obs.close()
         if self._sock_step is not None:
             self._sock_step.close()
         self._ctx.term()
@@ -383,6 +437,7 @@ class StreamEngine:
                 self._drop_total += 1
                 return
             state.latest_matrix = msg
+            self._observation_updated = True
             pose = msg.robot_pose
             state.pose_history.append((pose.x, pose.z, pose.yaw))
 

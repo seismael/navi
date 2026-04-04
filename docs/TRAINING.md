@@ -25,8 +25,11 @@ Detached wrapper launches now disable the actor observation stream entirely so
 no publish-row materialization or update-heartbeat observation callbacks run
 unless passive viewing is explicitly requested with `-WithDashboard`.
 When the dashboard is attached, it passively displays actor 0 observations
-and shows the active actor count. No control endpoint or selector mechanism
-is required.
+and shows the active actor count plus observation freshness (`Obs=XXms`).
+The dashboard uses a `zmq.CONFLATE` observation socket so the displayed frame
+is always the latest published observation, preventing stale buffered frames
+from replaying after transient UI pauses. No control endpoint or selector
+mechanism is required.
 
 Canonical wrappers now create one structured run root per launch. Unless you
 override output directories explicitly, the default operational outputs are

@@ -633,6 +633,9 @@ See also: [Service Scripts](#service-scripts) | [`run-ghost-stack.ps1`](#run-gho
 
 The auditor dashboard is a passive observer. It subscribes to the actor PUB
 telemetry stream and renders actor 0 observations at 5-10 Hz.
+The dashboard uses a split-socket architecture: a dedicated `zmq.CONFLATE`
+socket ensures the displayed observation is always the latest published frame,
+while a separate telemetry socket delivers ordered metrics and actions.
 See also: [`run-dashboard.ps1`](#run-dashboardps1----passive-observation-dashboard) | [`dashboard`](#dashboard----live-passive-observation-dashboard)
 
 ```powershell
@@ -647,9 +650,12 @@ uv run --project projects\auditor navi-auditor dashboard `
 **Dashboard behavior:**
 - Always displays **actor 0** observations (no selector)
 - Shows active actor count in the status bar
+- Shows observation freshness (`Obs=XXms`) in the status metrics line
 - Auto-detects mode: TRAINING / INFERENCE / OBSERVER
 - Handles missing streams gracefully (shows WAITING state)
 - During training: passive actor-only mode — does not open environment control paths
+- Renders only when a new observation arrives; UI ticks without fresh data
+  update status metrics without wasting CPU on redundant rendering
 
 ---
 
@@ -1653,7 +1659,9 @@ uv run --project projects\actor brain profile [options]    # -> navi-actor profi
 
 #### `dashboard` -- Live Passive Observation Dashboard
 
-Subscribes to actor PUB stream. Displays actor 0 observations. Auto-detects mode.
+Subscribes to actor PUB stream via a split-socket architecture: a `CONFLATE`
+observation socket always delivers the latest frame, while a separate telemetry
+socket preserves ordered metrics. Displays actor 0 observations. Auto-detects mode.
 
 ```powershell
 uv run --project projects\auditor navi-auditor dashboard [options]

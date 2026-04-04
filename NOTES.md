@@ -53,6 +53,7 @@
 - [x] **Issue**: Serializing `DistanceMatrix` for the dashboard is CPU-bound on the main thread.
 - [x] **Validation**: `serialize(observation)` confirmed on main thread in `_publish_observation`. Rate-limited to 10 Hz (one serialization per ~10-20 rollout steps). For `256×48` observation: ~50KB per serialize call. Background telemetry thread handles ZMQ send, but serialization itself still blocks.
 - [x] **Status**: VALID but LOW IMPACT — **IMPLEMENTED async serialization below**. Moved `serialize()` call to background telemetry thread. Main thread now enqueues raw observation object; serialization happens off critical path.
+- [x] **Dashboard freshness fix**: Dashboard `StreamEngine` now uses a split-socket architecture — a `zmq.CONFLATE` observation socket always holds only the latest published frame, preventing stale buffered observations from replaying after UI pauses. A separate telemetry socket (`RCVHWM=50`) carries ordered actions and events. Rendering occurs only when a new observation arrives. Status bar shows `Obs=XXms` observation age.
 
 ### 11. Blocking Checkpoint Persistence
 - [x] **Issue**: `torch.save` blocks the main training loop.

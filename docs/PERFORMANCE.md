@@ -145,9 +145,17 @@ Future switch-back rule:
 
 Human-facing tooling may consume data, but it must not shape the runtime.
 
+- dashboards use a dedicated `zmq.CONFLATE` observation socket so the displayed
+  frame is always the latest published observation regardless of UI pauses,
+  garbage collection, or window operations
+- a separate telemetry socket with `RCVHWM=50` carries ordered action and
+  telemetry events without dropping intermediate history
 - dashboards may receive coarse heartbeat republishing during optimizer windows
 - those heartbeats are diagnostic-only, not new environment steps
 - frame dropping is allowed; training stall is not
+- rendering occurs only when a genuinely new observation arrives; redundant
+  re-renders on unchanged frames are eliminated to keep CPU free for queue
+  draining and status updates
 - observation publication is optional and passive; canonical training and inference must remain correct and throughput-safe when the auditor is absent
 - viewer requirements must be implemented by observer-side transforms over the published spherical contract, not by changing core math or environment semantics
 - run-aware manifests, logs, and metrics are required for reviewability, but they must remain append-only side effects around the hot path rather than new gating work inside per-step rollout math

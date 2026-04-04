@@ -88,6 +88,13 @@ def build_status_metrics_line(
     parts.append(f"Env={_fmt_number(env_sps, 1)}")
     parts.append(f"EMA={_fmt_number(reward_ema, 3)}")
     parts.append(f"Step={step_id if step_id is not None else '--'}")
+    # Observation age: how old the currently displayed frame is
+    obs_age_ms: int | None = None
+    obs_ts: float | None = getattr(state.latest_matrix, "timestamp", None) if state.latest_matrix is not None else None
+    if obs_ts is not None and now_ts > 0.0:
+        obs_age_ms = max(0, int((now_ts - obs_ts) * 1000))
+    if obs_age_ms is not None:
+        parts.append(f"Obs={obs_age_ms}ms")
     parts.append(f"Opt={_fmt_number(opt_ms, 0)}ms")
     if zero_wait is not None:
         parts.append(f"ZW={zero_wait * 100.0:.0f}%")

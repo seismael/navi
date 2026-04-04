@@ -40,7 +40,7 @@ _EXPLORATION_REWARD: float = 0.3
 _PROGRESS_REWARD_SCALE: float = 0.8
 _COLLISION_PENALTY: float = -2.0
 _MAX_STEPS_PER_EPISODE: int = 2_000
-_SCENE_EPISODES_PER_SCENE: int = 16
+_SCENE_STEPS_BUDGET_PER_ACTOR: int = 32_000
 _OBSTACLE_CLEARANCE_REWARD_SCALE: float = 0.6
 _OBSTACLE_CLEARANCE_WINDOW: float = 3.0
 _STARVATION_RATIO_THRESHOLD: float = 0.8
@@ -668,9 +668,9 @@ class SdfDagBackend(SimulatorBackend):
         self._max_steps_per_episode = max(
             1, int(getattr(config, "max_steps_per_episode", _MAX_STEPS_PER_EPISODE))
         )
-        self._scene_episodes_per_scene = max(
+        self._scene_steps_budget = max(
             1,
-            int(getattr(config, "scene_episodes_per_scene", _SCENE_EPISODES_PER_SCENE)),
+            int(getattr(config, "scene_steps_budget_per_actor", _SCENE_STEPS_BUDGET_PER_ACTOR)),
         )
         self._obstacle_clearance_reward_scale = float(
             getattr(config, "obstacle_clearance_reward_scale", _OBSTACLE_CLEARANCE_REWARD_SCALE)
@@ -716,7 +716,7 @@ class SdfDagBackend(SimulatorBackend):
         )
         self._scene_pool: list[str] = list(config.scene_pool) if config.scene_pool else []
         self._scene_pool_idx: int = 0
-        self._episodes_in_scene: int = 0
+        self._steps_in_scene: int = 0
         self._initial_resets_remaining: int = self._n_actors
         self._asset: GmDagAsset | None = None
         self._dag_tensor: Any | None = None
@@ -850,36 +850,36 @@ class SdfDagBackend(SimulatorBackend):
 
         if self._scene_pool:
             _LOG.info(
-                "SdfDagBackend scene pool: %d scenes, starting with %s (episode budget per scene=%d, max_steps=%d)",
+                "SdfDagBackend scene pool: %d scenes, starting with %s (step budget per actor=%d, max_episode_steps=%d)",
                 len(self._scene_pool),
                 Path(scene_path).name,
-                self._scene_episodes_per_scene,
+                self._scene_steps_budget,
                 self._max_steps_per_episode,
             )
 
     def torch_compile_enabled(self) -> bool:
         return bool(getattr(self, "_sdfdag_torch_compile", False))
 
-    def _maybe_rotate_scene(self, *, is_natural: bool) -> bool:
-        """Rotate scene if budget met. Returns True if scene was swapped."""
-        if not is_natural or not self._scene_pool:
+    def _maybe_rotate_scene(self) -> bool:
+        """Rotate scene if step budget met. Returns True if scene was swapped."""
+        if not self._scene_pool:
             return False
 
-        self._episodes_in_scene += 1
-        # Total episodes to run in this scene before swapping
-        total_budget = self._scene_episodes_per_scene * self._n_actors
-        if self._episodes_in_scene < total_budget:
+        # Step-based budget: total steps across all actors before rotating.
+        total_budget = self._scene_steps_budget * self._n_actors
+        if self._steps_in_scene < total_budget:
             return False
 
         self._scene_pool_idx = (self._scene_pool_idx + 1) % len(self._scene_pool)
         self._load_scene(self._scene_pool[self._scene_pool_idx])
-        self._episodes_in_scene = 0
+        self._steps_in_scene = 0
 
         # Phase 6: Global Synchronization.
         # Force ALL actors to reset on the next step so they all start in the new scene together.
         self._needs_reset_mask[:] = True
         _LOG.info(
-            "SdfDagBackend: Scene budget met. Rotating to %s and forcing global reset.",
+            "SdfDagBackend: Scene step budget met (%d steps). Rotating to %s and forcing global reset.",
+            total_budget,
             Path(self._scene_pool[self._scene_pool_idx]).name,
         )
         return True
@@ -889,7 +889,8 @@ class SdfDagBackend(SimulatorBackend):
         if not is_natural:
             self._initial_resets_remaining -= 1
 
-        self._maybe_rotate_scene(is_natural=is_natural)
+        if is_natural:
+            self._maybe_rotate_scene()
 
         spawn = self._spawn_positions[actor_id]
         yaw = self._spawn_yaws[actor_id]
@@ -957,7 +958,8 @@ class SdfDagBackend(SimulatorBackend):
         if not is_natural:
             self._initial_resets_remaining -= 1
 
-        self._maybe_rotate_scene(is_natural=is_natural)
+        if is_natural:
+            self._maybe_rotate_scene()
 
         spawn = self._spawn_positions[actor_id]
         yaw = self._spawn_yaws[actor_id]
@@ -1139,6 +1141,7 @@ class SdfDagBackend(SimulatorBackend):
                 )
 
                 self._actor_steps[actor_id] += 1
+                self._steps_in_scene += 1
                 truncated = bool(self._actor_steps[actor_id] >= self._max_steps_per_episode)
                 # Void-detection: force early truncation for lost actors.
                 if starvation_ratio >= _VOID_STARVATION_THRESHOLD:
@@ -1366,6 +1369,7 @@ class SdfDagBackend(SimulatorBackend):
             void_mask = starvation_ratios_t >= _VOID_STARVATION_THRESHOLD
             truncated_mask_t = truncated_mask_t | void_mask
             self._actor_steps[actor_indices_t] = next_steps_t
+            self._steps_in_scene += int(actor_indices_t.numel())
             self._needs_reset_mask[actor_indices_t] = truncated_mask_t
             self._episode_returns[actor_indices_t] = (
                 self._episode_returns.index_select(0, actor_indices_t) + rewards_t
@@ -1617,7 +1621,8 @@ class SdfDagBackend(SimulatorBackend):
             is_natural = self._initial_resets_remaining <= 0
             if not is_natural:
                 self._initial_resets_remaining -= 1
-            self._maybe_rotate_scene(is_natural=is_natural)
+                continue
+            self._maybe_rotate_scene()
 
     def _reset_tensor_actor_batch(
         self,

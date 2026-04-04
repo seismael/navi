@@ -212,7 +212,7 @@ def test_spawn_candidate_score_prefers_structure_over_empty_space() -> None:
 def test_reset_uses_precomputed_spawn_yaw() -> None:
     backend = object.__new__(SdfDagBackend)
     backend._initial_resets_remaining = 0
-    backend._maybe_rotate_scene = lambda *, is_natural: False  # type: ignore[method-assign]
+    backend._maybe_rotate_scene = lambda: False  # type: ignore[method-assign]
     backend._spawn_positions = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
     backend._spawn_yaws = torch.tensor([1.25], dtype=torch.float32)
     backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
@@ -258,7 +258,7 @@ def test_reset_tensor_uses_tensor_ratios_when_materialization_disabled(
 ) -> None:
     backend = object.__new__(SdfDagBackend)
     backend._initial_resets_remaining = 0
-    backend._maybe_rotate_scene = lambda *, is_natural: False  # type: ignore[method-assign]
+    backend._maybe_rotate_scene = lambda: False  # type: ignore[method-assign]
     backend._spawn_positions = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
     backend._spawn_yaws = torch.tensor([0.25], dtype=torch.float32)
     backend._actor_positions = torch.zeros((1, 3), dtype=torch.float32)
@@ -422,6 +422,7 @@ def _make_tensor_action_backend_stub(*, n_actors: int = 4) -> SdfDagBackend:
 
     backend._consume_observation_batch = consume_observation_batch  # type: ignore[method-assign]
     backend._materialize_selected_observations = lambda **kwargs: None  # type: ignore[method-assign]
+    backend._steps_in_scene = 0
     return backend
 
 
@@ -523,12 +524,12 @@ def test_validate_unit_direction_tensor_rejects_unnormalized_vectors() -> None:
         _validate_unit_direction_tensor(torch, ray_dirs, name="ray_dirs")
 
 
-def test_scene_rotation_waits_for_configured_episode_budget() -> None:
+def test_scene_rotation_waits_for_configured_step_budget() -> None:
     backend = object.__new__(SdfDagBackend)
     backend._scene_pool = ["scene_a.gmdag", "scene_b.gmdag"]
     backend._scene_pool_idx = 0
-    backend._episodes_in_scene = 31
-    backend._scene_episodes_per_scene = 16
+    backend._steps_in_scene = 63999
+    backend._scene_steps_budget = 32000
     backend._n_actors = 2
     backend._device = torch.device("cpu")
     backend._torch = torch
@@ -543,10 +544,15 @@ def test_scene_rotation_waits_for_configured_episode_budget() -> None:
 
     backend._load_scene = _load_scene  # type: ignore[assignment]
 
-    backend._maybe_rotate_scene(is_natural=True)
+    # Budget not yet met
+    assert not backend._maybe_rotate_scene()
+
+    # Push past budget
+    backend._steps_in_scene = 64000
+    backend._maybe_rotate_scene()
 
     assert backend._scene_pool_idx == 1
-    assert backend._episodes_in_scene == 0
+    assert backend._steps_in_scene == 0
     assert torch.allclose(backend._spawn_positions[0], torch.tensor([1.0, 2.0, 3.0]))
     assert torch.allclose(backend._spawn_positions[1], torch.tensor([4.0, 5.0, 6.0]))
 

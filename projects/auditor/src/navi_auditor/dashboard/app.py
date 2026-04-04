@@ -157,8 +157,8 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
 
     def _tick(self) -> None:
         """Called every timer interval — poll ZMQ, update all panels."""
-        # Ingest capped ZMQ burst (Standard: UI Throughput)
-        _msgs_processed = self._engine.poll(max_messages=100)
+        # Ingest ZMQ messages (Standard: UI Throughput)
+        _msgs_processed = self._engine.poll(max_messages=200)
 
         # Update actor count and scene name displays
         n_actors = self._engine.n_actors
@@ -211,7 +211,10 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
             ),
         )
 
-        if state.latest_matrix is not None:
+        # Only re-render the actor panel when a genuinely new observation arrived.
+        # This avoids wasting CPU on re-rendering stale frames and ensures the
+        # displayed view always represents the latest training step.
+        if self._engine.observation_updated and state.latest_matrix is not None:
             self._update_actor_panel(self._actor_panel, state.latest_matrix)
 
         self._handle_teleop()
