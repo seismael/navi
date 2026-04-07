@@ -225,8 +225,10 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Structure Seeking Incentive:** Canonical environment reward MUST positively value stable mid-range structure visibility and reorientation toward informative geometry so agents prefer navigable interiors over empty void-facing views.
 - **Inspection Incentive:** Canonical reward MAY positively score controlled look-around only when the spherical observation gains structure information; blind spinning in empty space MUST NOT become rewarding.
 - **Context Preservation:** Temporal hidden states (selected canonical temporal core) MUST NOT be reset upon grazing geometry, preserving situational awareness.
+- **Void Grace Period:** Void-starvation truncation MUST be suppressed for a grace window (default 10 steps) after each episode reset so agents can navigate away from high-starvation spawn positions before being penalised; the per-step starvation penalty already discourages lingering in void regions without hard truncation.
 - **Hard Truncation:** A hard step limit (e.g., 2000 steps) MUST be enforced to ensure episodic diversity.
 - **Scene Residency:** Canonical scene-pool training MUST keep actors on each compiled scene for multiple completed episodes before rotation; switching after only one episode per actor is too eager for both throughput and local scene mastery.
+- **Dataset Quality Gate:** Datasets whose geometry consists of incomplete shells (e.g. HSSD `hssd-hab`) are permanently excluded from the canonical corpus, refresh defaults, tests, and documentation because their high ambient starvation at runtime resolution causes unrecoverable void-truncation death spirals even with spawn quality filtering.
 
 ## 4) Resilient Diagnostic Standard
 - Gallery Layer tools (Dashboard, Recorder) MUST be operational independent of Simulation/Brain layers.

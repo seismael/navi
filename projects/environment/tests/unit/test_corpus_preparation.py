@@ -20,7 +20,7 @@ def test_prepare_training_scene_corpus_discovers_and_compiles_sources(
     """Canonical corpus prep should discover sources, compile them, and emit manifests."""
     source_root = tmp_path / "sources"
     gmdag_root = tmp_path / "compiled"
-    dataset_root = source_root / "hssd"
+    dataset_root = source_root / "replicacad"
     dataset_root.mkdir(parents=True, exist_ok=True)
 
     scene_one = dataset_root / "stage_one.glb"
@@ -61,7 +61,7 @@ def test_prepare_training_scene_corpus_discovers_and_compiles_sources(
     compiled_manifest = json.loads(corpus.compiled_manifest_path.read_text(encoding="utf-8"))
     assert source_manifest["scene_count"] == 2
     assert compiled_manifest["scene_count"] == 2
-    assert source_manifest["scenes"][0]["dataset"] == "hssd"
+    assert source_manifest["scenes"][0]["dataset"] == "replicacad"
     assert compiled_manifest["scenes"][0]["gmdag_path"].endswith("stage_one.gmdag")
 
 
@@ -107,7 +107,7 @@ def test_prepare_training_scene_corpus_supports_compiled_only_reuse(
 ) -> None:
     """Canonical training should be able to run from the compiled corpus alone."""
     gmdag_root = tmp_path / "compiled"
-    compiled_path = gmdag_root / "hssd" / "stage.gmdag"
+    compiled_path = gmdag_root / "replicacad" / "stage.gmdag"
     compiled_path.parent.mkdir(parents=True, exist_ok=True)
     compiled_path.write_bytes(b"G" * 1024)
 
@@ -123,7 +123,7 @@ def test_prepare_training_scene_corpus_falls_back_when_compiled_manifest_is_stal
 ) -> None:
     """Canonical training should scan the live corpus when manifest paths are stale."""
     gmdag_root = tmp_path / "compiled"
-    compiled_path = gmdag_root / "hssd" / "stage.gmdag"
+    compiled_path = gmdag_root / "replicacad" / "stage.gmdag"
     compiled_path.parent.mkdir(parents=True, exist_ok=True)
     compiled_path.write_bytes(b"G" * 1024)
 
@@ -132,9 +132,9 @@ def test_prepare_training_scene_corpus_falls_back_when_compiled_manifest_is_stal
         "scene_count": 1,
         "scenes": [
             {
-                "source_path": str(tmp_path / "scratch" / "downloads" / "hssd" / "stage.glb"),
-                "gmdag_path": str(tmp_path / "scratch" / "compiled" / "hssd" / "stage.gmdag"),
-                "dataset": "hssd",
+                "source_path": str(tmp_path / "scratch" / "downloads" / "replicacad" / "stage.glb"),
+                "gmdag_path": str(tmp_path / "scratch" / "compiled" / "replicacad" / "stage.gmdag"),
+                "dataset": "replicacad",
                 "scene_name": "stage",
                 "resolution": 512,
             }
@@ -195,7 +195,7 @@ def test_prepare_training_scene_corpus_recompiles_resolution_mismatches(
 
 def test_validate_compiled_scene_corpus_reports_missing_manifest(tmp_path: Path) -> None:
     gmdag_root = tmp_path / "compiled"
-    compiled_path = gmdag_root / "hssd" / "stage.gmdag"
+    compiled_path = gmdag_root / "replicacad" / "stage.gmdag"
     compiled_path.parent.mkdir(parents=True, exist_ok=True)
     compiled_path.write_bytes(b"G" * 1024)
 
@@ -211,7 +211,7 @@ def test_validate_compiled_scene_corpus_reports_stale_manifest_entries(
     tmp_path: Path,
 ) -> None:
     gmdag_root = tmp_path / "compiled"
-    live_asset = gmdag_root / "hssd" / "live_scene.gmdag"
+    live_asset = gmdag_root / "replicacad" / "live_scene.gmdag"
     stale_asset = tmp_path / "scratch" / "compiled" / "stale_scene.gmdag"
     live_asset.parent.mkdir(parents=True, exist_ok=True)
     stale_asset.parent.mkdir(parents=True, exist_ok=True)
@@ -226,7 +226,7 @@ def test_validate_compiled_scene_corpus_reports_stale_manifest_entries(
                     {
                         "source_path": stale_asset.as_posix(),
                         "gmdag_path": stale_asset.as_posix(),
-                        "dataset": "hssd",
+                        "dataset": "replicacad",
                         "scene_name": "stale_scene",
                         "resolution": 512,
                     }
@@ -258,7 +258,7 @@ def test_validate_compiled_scene_corpus_reports_resolution_mismatch(
     tmp_path: Path,
 ) -> None:
     gmdag_root = tmp_path / "compiled"
-    compiled_path = gmdag_root / "hssd" / "stage.gmdag"
+    compiled_path = gmdag_root / "replicacad" / "stage.gmdag"
     compiled_path.parent.mkdir(parents=True, exist_ok=True)
     compiled_path.write_bytes(b"G" * 1024)
     (gmdag_root / "gmdag_manifest.json").write_text(
@@ -268,7 +268,7 @@ def test_validate_compiled_scene_corpus_reports_resolution_mismatch(
                     {
                         "source_path": compiled_path.as_posix(),
                         "gmdag_path": compiled_path.as_posix(),
-                        "dataset": "hssd",
+                        "dataset": "replicacad",
                         "scene_name": "stage",
                         "resolution": 256,
                     }
@@ -299,7 +299,7 @@ def test_validate_compiled_scene_corpus_reports_manifest_scene_count_mismatch(
     tmp_path: Path,
 ) -> None:
     gmdag_root = tmp_path / "compiled"
-    compiled_path = gmdag_root / "hssd" / "stage.gmdag"
+    compiled_path = gmdag_root / "replicacad" / "stage.gmdag"
     compiled_path.parent.mkdir(parents=True, exist_ok=True)
     compiled_path.write_bytes(b"G" * 1024)
     (gmdag_root / "gmdag_manifest.json").write_text(
@@ -313,7 +313,7 @@ def test_validate_compiled_scene_corpus_reports_manifest_scene_count_mismatch(
                     {
                         "source_path": compiled_path.as_posix(),
                         "gmdag_path": compiled_path.as_posix(),
-                        "dataset": "hssd",
+                        "dataset": "replicacad",
                         "scene_name": "stage",
                         "resolution": 512,
                     }
@@ -342,7 +342,7 @@ def test_validate_compiled_scene_corpus_reports_manifest_metadata_mismatch(
     tmp_path: Path,
 ) -> None:
     gmdag_root = tmp_path / "compiled"
-    compiled_path = gmdag_root / "hssd" / "stage.gmdag"
+    compiled_path = gmdag_root / "replicacad" / "stage.gmdag"
     compiled_path.parent.mkdir(parents=True, exist_ok=True)
     compiled_path.write_bytes(b"G" * 1024)
     (gmdag_root / "gmdag_manifest.json").write_text(
@@ -356,7 +356,7 @@ def test_validate_compiled_scene_corpus_reports_manifest_metadata_mismatch(
                     {
                         "source_path": compiled_path.as_posix(),
                         "gmdag_path": compiled_path.as_posix(),
-                        "dataset": "hssd",
+                        "dataset": "replicacad",
                         "scene_name": "stage",
                         "resolution": 256,
                     }

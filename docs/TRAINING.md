@@ -251,13 +251,13 @@ nightly or process-capture leftovers. It must not delete the active run root.
 For refresh-to-training qualification without mutating the live promoted corpus:
 
 ```powershell
-./scripts/qualify-canonical-stack.ps1 -EnableCorpusRefreshQualification -RefreshSourceRoot .\data\scenes -RefreshManifest .\data\scenes\scene_manifest_all.json -RefreshScene .\data\scenes\hssd\102343992.glb
+./scripts/qualify-canonical-stack.ps1 -EnableCorpusRefreshQualification -RefreshSourceRoot .\data\scenes -RefreshManifest .\data\scenes\scene_manifest_all.json -RefreshScene .\artifacts\gmdag\corpus\ai-habitat_ReplicaCAD_baked_lighting\Baked_sc0_staging_00.gmdag
 ```
 
 Explicit narrowing remains available when requested:
 
 ```powershell
-./scripts/train.ps1 -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag
+./scripts/train.ps1 -Scene .\artifacts\gmdag\corpus\ai-habitat_ReplicaCAD_baked_lighting\Baked_sc0_staging_00.gmdag
 ./scripts/train.ps1 -TotalSteps 500000
 ./scripts/run-ghost-stack.ps1 -Train -TotalSteps 500000
 ./scripts/train.ps1 -TemporalCore mambapy -TotalSteps 500000

@@ -13,10 +13,7 @@
     4. Remove transient downloads and scratch data after successful integration.
 
   Target datasets (10 scenes each):
-    - hssd/hssd-hab
-    - hssd/hssd-hab-uncluttered (New)
     - ai-habitat/ReplicaCAD_dataset
-    - hssd/ai2thor-hab (Huge ProcTHOR collection)
     - ai-habitat/ReplicaCAD_baked_lighting
     - ai-habitat/habitat_test_scenes
 
@@ -29,7 +26,7 @@
 #>
 param(
     [string]$DataDir = "",
-    [string]$Datasets = "hssd/hssd-hab,hssd/hssd-hab-uncluttered,ai-habitat/ReplicaCAD_dataset,hssd/ai2thor-hab,ai-habitat/ReplicaCAD_baked_lighting,ai-habitat/habitat_test_scenes",
+    [string]$Datasets = "ai-habitat/ReplicaCAD_dataset,ai-habitat/ReplicaCAD_baked_lighting,ai-habitat/habitat_test_scenes",
     [int]$ScenesPerDataset = 10,
     [string]$CorpusRoot = "",
     [string]$GmDagRoot = "",
@@ -177,10 +174,7 @@ try {
         
         # 1. Determine the root path for scenes in this dataset
         $searchRoot = ""
-        if ($dsId -eq "hssd/hssd-hab") { $searchRoot = "stages" }
-        elseif ($dsId -eq "hssd/hssd-hab-uncluttered") { $searchRoot = "stages" }
-        elseif ($dsId -eq "ai-habitat/ReplicaCAD_dataset") { $searchRoot = "stages" }
-        elseif ($dsId -eq "hssd/ai2thor-hab") { $searchRoot = "ai2thor-hab/assets/stages" }
+        if ($dsId -eq "ai-habitat/ReplicaCAD_dataset") { $searchRoot = "stages" }
         elseif ($dsId -eq "ai-habitat/ReplicaCAD_baked_lighting") { $searchRoot = "stages" }
         elseif ($dsId -eq "ai-habitat/habitat_test_scenes") { $searchRoot = "" }
         

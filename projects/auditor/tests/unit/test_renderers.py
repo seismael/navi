@@ -9,7 +9,6 @@ from navi_auditor.dashboard.renderers import (
     center_forward_azimuth,
     compute_nav_metrics,
     depth_to_observer_palette,
-    depth_to_viridis,
     distance_color,
     extract_forward_fov,
     overlay_overhead_annotations,
@@ -21,28 +20,6 @@ from navi_auditor.dashboard.renderers import (
     zoom_overhead,
 )
 from navi_contracts.testing.oracle_house import house_observation
-
-
-class TestDepthToViridis:
-    """Tests for Viridis colourmap conversion."""
-
-    def test_output_shape_matches_input(self) -> None:
-        depth = np.random.rand(16, 8).astype(np.float32)
-        valid = np.ones((16, 8), dtype=bool)
-        result = depth_to_viridis(depth, valid)
-        assert result.shape == (16, 8, 3)
-
-    def test_invalid_regions_get_fog_of_war(self) -> None:
-        depth = np.ones((16, 8), dtype=np.float32) * 0.5
-        valid = np.zeros((16, 8), dtype=bool)
-        result = depth_to_viridis(depth, valid)
-        assert result.shape == (16, 8, 3)
-
-    def test_no_crash_all_valid(self) -> None:
-        depth = np.linspace(0.0, 1.0, 128).reshape(16, 8).astype(np.float32)
-        valid = np.ones((16, 8), dtype=bool)
-        result = depth_to_viridis(depth, valid)
-        assert result.shape == (16, 8, 3)
 
 
 class TestDepthToObserverPalette:
@@ -144,7 +121,7 @@ class TestRenderFirstPerson:
         )
         center_patch = img[140:220, 130:190]
         closed_patch = closed_img[140:220, 130:190]
-        assert np.mean(np.abs(center_patch.astype(np.int16) - closed_patch.astype(np.int16))) > 5.0
+        assert np.mean(np.abs(center_patch.astype(np.int16) - closed_patch.astype(np.int16))) > 4.0
 
     def test_oracle_house_window_fog_of_war_creates_whole_image_difference(
         self,

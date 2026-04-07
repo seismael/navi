@@ -137,9 +137,6 @@ function Get-SceneDatasetLabel {
     if ($normalized -match 'replicacad|stage_v3_sc|frl_apartment_stage') {
         return 'replicacad'
     }
-    if ($normalized -match 'hssd') {
-        return 'hssd'
-    }
     if ($normalized -match 'test_scenes|apartment_1|skokloster-castle|van-gogh-room') {
         return 'habitat_test_scenes'
     }

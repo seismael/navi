@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import torch
@@ -51,7 +51,7 @@ _PERF_TELEMETRY_FIELDS: tuple[str, ...] = (
 )
 
 
-class _CanonicalRuntime:
+class _CanonicalRuntime(Protocol):
     """Minimal runtime surface required by the inference runner."""
 
     def reset_tensor(
@@ -502,7 +502,7 @@ class InferenceRunner:
         _enqueue_telemetry(
             self._telemetry_queue,
             topic=TOPIC_DISTANCE_MATRIX,
-            payload=lambda obs=observation: serialize(obs),
+            payload=lambda obs=observation: serialize(obs),  # type: ignore[misc]
             label="observation",
         )
 

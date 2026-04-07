@@ -175,7 +175,9 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         self._status_bar.set_scene_name(scene_name)
         if state is None:
             self._status_bar.set_mode("WAITING")
-            self._status_bar.set_metrics_text(build_status_metrics_line(None))
+            self._status_bar.set_metrics_text(
+                build_status_metrics_line(None, mode="WAITING"),
+            )
             return
 
         # Determine mode (Standard: Mode Detection)
@@ -189,6 +191,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
         has_inference_data = state.latest_features is not None
 
         if self._manual_mode:
+            base_mode = "MANUAL"
             mode = "MANUAL"
             if self._recorder is not None and self._recorder.is_recording:
                 steps = self._recorder.step_count
@@ -197,10 +200,13 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
                 else:
                     mode = f"MANUAL ● REC ({steps} steps)"
         elif has_inference_data:
+            base_mode = "INFERENCE"
             mode = "INFERENCE"
         elif has_training_data:
+            base_mode = "TRAINING"
             mode = "TRAINING"
         else:
+            base_mode = "OBSERVER"
             mode = "OBSERVER"
         self._status_bar.set_mode(mode)
         self._status_bar.set_metrics_text(
@@ -208,6 +214,7 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
                 state,
                 now=time.time(),
                 fallback_state=self._shared_metrics_state(),
+                mode=base_mode,
             ),
         )
 

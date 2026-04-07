@@ -244,7 +244,7 @@ Transactional pipeline: download → compile → validate → promote to live co
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `-Datasets` | `"hssd/hssd-hab,ai-habitat/ReplicaCAD_dataset,..."` | Comma-separated HuggingFace dataset IDs |
+| `-Datasets` | `"ai-habitat/ReplicaCAD_dataset,ai-habitat/ReplicaCAD_baked_lighting,..."` | Comma-separated HuggingFace dataset IDs |
 | `-ScenesPerDataset` | `10` | Max scenes to download per dataset |
 | `-Resolution` | `512` | `.gmdag` compile resolution |
 | `-ForceRecompile` | (switch) | Recompile even if `.gmdag` exists |
@@ -335,8 +335,8 @@ Map manifest: `data/quake3/quake3_map_manifest.json` (18 lvlworld maps defined).
 ```powershell
 # Compile one mesh file to .gmdag
 uv run --project projects\environment navi-environment compile-gmdag `
-    --source .\data\scenes\hssd\102343992.glb `
-    --output .\artifacts\gmdag\corpus\hssd\102343992.gmdag `
+    --source .\artifacts\gmdag\corpus\ai-habitat_ReplicaCAD_baked_lighting\Baked_sc0_staging_00.gmdag `
+    --output .\artifacts\gmdag\corpus\ai-habitat_ReplicaCAD_baked_lighting\Baked_sc0_staging_00.gmdag `
     --resolution 512
 
 # Validate a compiled asset
@@ -393,7 +393,7 @@ training uses the **full discovered corpus** and runs **continuously until stopp
 .\scripts\train.ps1 -TotalSteps 50000                               # Bounded 50K steps
 .\scripts\train.ps1 -NumActors 8                                    # 8 parallel actors
 .\scripts\train.ps1 -ResumeCheckpoint artifacts\checkpoints\latest.pt  # Resume training
-.\scripts\train.ps1 -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag  # Single scene
+.\scripts\train.ps1 -Scene .\artifacts\gmdag\corpus\ai-habitat_ReplicaCAD_baked_lighting\Baked_sc0_staging_00.gmdag  # Single scene
 
 # Direct CLI (bypasses wrapper):
 uv run --project projects\actor navi-actor train --actors 4 --temporal-core mamba2
@@ -1126,7 +1126,7 @@ Staged transaction: stale data is only replaced after successful rebuild.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `-DataDir` | string | `data/scenes` | Source data directory |
-| `-Datasets` | string | `"hssd/hssd-hab,ai-habitat/ReplicaCAD_dataset,..."` | Comma-separated HuggingFace dataset IDs |
+| `-Datasets` | string | `"ai-habitat/ReplicaCAD_dataset,ai-habitat/ReplicaCAD_baked_lighting,..."` | Comma-separated HuggingFace dataset IDs |
 | `-ScenesPerDataset` | int | `10` | Max scenes to download per dataset |
 | `-CorpusRoot` | string | `artifacts/gmdag/corpus` | Live corpus root |
 | `-GmDagRoot` | string | `artifacts/gmdag` | Parent .gmdag directory |

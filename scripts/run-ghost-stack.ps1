@@ -28,17 +28,11 @@
     # Canonical PPO training with an explicit passive dashboard attach
     .\run-ghost-stack.ps1 -Train -WithDashboard
 
-    # Canonical PPO training with an explicit scene override and refresh
-    .\run-ghost-stack.ps1 -Train -Scene .\data\scenes\hssd\102343992.glb -AutoCompileGmDag
-
     # Resume from an explicit prior run checkpoint
     .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint ".\artifacts\runs\<run_id>\checkpoints\policy_step_0010000.pt"
 
     # Train on only the best dataset (ReplicaCAD baked lighting)
     .\run-ghost-stack.ps1 -Train -Datasets "ai-habitat_ReplicaCAD_baked_lighting" -WithDashboard
-
-    # Train on everything except HSSD (incomplete shells)
-    .\run-ghost-stack.ps1 -Train -ExcludeDatasets "hssd_hssd-hab"
 #>
 param(
     # ── Mode ──
@@ -90,7 +84,12 @@ param(
 )
 
 # Requested Ghost-Matrix Fleet Size
-$NumActors = $Actors
+# Inference defaults to 1 actor unless user explicitly sets -Actors
+if ($Infer -and -not $PSBoundParameters.ContainsKey('Actors')) {
+    $NumActors = 1
+} else {
+    $NumActors = $Actors
+}
 
 $ErrorActionPreference = "Stop"
 

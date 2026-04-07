@@ -66,6 +66,8 @@
   "tests/unit/test_snapshot.py::TestImagePanelCache::test_cached_image_none_initially",
   "tests/unit/test_snapshot.py::TestImagePanelCache::test_cached_image_roundtrip",
   "tests/unit/test_status_line.py::test_build_status_metrics_line_falls_back_to_environment_perf",
+  "tests/unit/test_status_line.py::test_build_status_metrics_line_inference_mode",
+  "tests/unit/test_status_line.py::test_build_status_metrics_line_observer_mode",
   "tests/unit/test_status_line.py::test_build_status_metrics_line_training_values",
   "tests/unit/test_status_line.py::test_build_status_metrics_line_uses_shared_fallback_metrics",
   "tests/unit/test_status_line.py::test_build_status_metrics_line_waiting_state",

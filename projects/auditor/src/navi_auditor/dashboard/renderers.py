@@ -4,9 +4,10 @@ All functions accept NumPy arrays and return BGR ``uint8`` images —
 no Qt, no OpenCV GUI, no GPU dependency.  They can be tested and
 profiled independently of the dashboard UI layer.
 
-This module extracts the static renderers previously embedded in
-``LiveDashboard`` and adds perceptually-uniform Viridis/Magma
-colormaps with fog-of-war hatching for masked regions.
+The single observer palette — a threat-graded logarithmic colour scale
+from red (collision) through green/blue (navigation) to gray (far/void)
+— is pre-computed as a 1024-bin continuous LUT and shared across all
+dashboard, recorder, CLI, and occupancy surfaces.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ __all__: list[str] = [
     "center_forward_azimuth",
     "compute_nav_metrics",
     "depth_to_observer_palette",
-    "depth_to_viridis",
     "distance_color",
     "draw_semantic_legend",
     "extract_forward_fov",
@@ -33,7 +33,6 @@ __all__: list[str] = [
     "render_front_hemisphere_heatmap",
     "render_first_person",
     "render_forward_polar",
-    "turbo_color_bgr",
     "zoom_overhead",
 ]
 
@@ -41,44 +40,100 @@ __all__: list[str] = [
 VIEW_RANGE_M: float = 30.0
 FWD_FOV_DEG: float = 180.0
 
-# ── unbounded logarithmic colour scale ───────────────────────────────
+# ── Adjustable logarithmic colour focus ──────────────────────────────
 # Maps [0, ∞) → [0, 1) via  t = log1p(d) / (log1p(d) + C).
-# C = log1p(30) allocates 50 % of the spectrum to 0-30 m (navigation-
-# critical near field) with the remaining spectrum smoothly compressing
-# all distances from 30 m to infinity into shades of gray.
-_LOG_SCALE_C: float = math.log1p(30.0)
+# ``focus_m`` controls where 50 % of the colour spectrum is allocated:
+#   focus_m = 10  ->  half the spectrum covers 0-10 m (near-field detail)
+#   focus_m = 30  ->  half the spectrum covers 0-30 m (wider view)
+# Lower values allocate more colour diversity to close-range structure.
+_DEFAULT_FOCUS_M: float = 10.0
+
+# ── High-resolution continuous LUT ───────────────────────────────────
+# 1024-bin pre-computed palette eliminates per-frame np.interp overhead.
+# Colours are looked up via O(1) array indexing from the normalised
+# log-scale position ``t``.
+_LUT_SIZE: int = 1024
+_LUT_MAX_IDX: int = _LUT_SIZE - 1
 
 # Palette control anchors — fixed metric distances and their BGR colours.
-_PALETTE_METER_ANCHORS: tuple[float, ...] = (0.0, 0.5, 2.0, 5.0, 10.0, 30.0)
+# Threat-graded spectrum with gradual transitions and extended far-range:
+# RED (collision) → ORANGE → GOLD → YELLOW-GREEN → GREEN → TEAL →
+# STEEL BLUE → MEDIUM BLUE → DARK BLUE → escalating GRAY to horizon.
+_PALETTE_METER_ANCHORS: tuple[float, ...] = (
+    0.0, 0.1, 0.3, 0.7, 1.5, 3.0, 6.0, 12.0, 25.0, 35.0,
+    50.0, 75.0, 100.0, 150.0, 300.0,
+)
 _PALETTE_BGR: tuple[tuple[float, float, float], ...] = (
-    (55.0, 225.0, 195.0),   # warm yellow-green  (nearest walls)
-    (80.0, 210.0, 145.0),   # fresh lime-green   (close structure)
-    (148.0, 195.0, 90.0),   # teal-green         (transition)
-    (210.0, 168.0, 72.0),   # light sky blue     (mid-range)
-    (188.0, 118.0, 52.0),   # medium blue        (away structure)
-    (148.0, 78.0, 42.0),    # dark blue          (far structure)
-    (80.0, 72.0, 68.0),     # neutral dark gray  (void / horizon)
+    (30.0, 30.0, 255.0),    # bright red         (collision / contact)
+    (25.0, 90.0, 255.0),    # red-orange         (danger proximity)
+    (30.0, 155.0, 255.0),   # orange             (close warning)
+    (40.0, 210.0, 245.0),   # gold / amber       (near-field)
+    (50.0, 230.0, 190.0),   # yellow-green       (transition to safe)
+    (65.0, 215.0, 90.0),    # fresh green        (comfortable navigation)
+    (150.0, 200.0, 45.0),   # teal               (mid-range structure)
+    (210.0, 155.0, 50.0),   # steel blue         (away structure)
+    (195.0, 105.0, 55.0),   # medium blue        (far structure)
+    (170.0, 88.0, 55.0),    # dark steel blue    (far transition)
+    (145.0, 72.0, 55.0),    # dark blue          (deep far)
+    (118.0, 64.0, 56.0),    # blue-gray          (very far)
+    (95.0, 58.0, 56.0),     # medium gray        (distant)
+    (72.0, 52.0, 50.0),     # dark gray          (receding)
+    (56.0, 48.0, 48.0),     # dim gray           (fading horizon)
+    (42.0, 40.0, 40.0),     # faint dark gray    (void / infinity)
 )
 
+# ── Missing-data tile pattern ────────────────────────────────────────
+# Distinctive checkerboard in dark magenta / purple tones — clearly
+# distinguishable from any valid distance color in the palette.
+_MISSING_TILE_SIZE: int = 4
+_MISSING_COLOR_A: np.ndarray = np.array([50, 28, 58], dtype=np.uint8)  # dark purple
+_MISSING_COLOR_B: np.ndarray = np.array([70, 42, 78], dtype=np.uint8)  # lighter purple
 
-def _log_color_t(distance_m: float) -> float:
+
+def _log_color_t(distance_m: float, focus_m: float = _DEFAULT_FOCUS_M) -> float:
     """Map metric distance [0, ∞) → [0, 1) via unbounded log scale."""
     v = math.log1p(max(0.0, distance_m))
-    return v / (v + _LOG_SCALE_C)
+    return v / (v + math.log1p(max(0.1, focus_m)))
 
 
-def _log_color_t_array(distance_m: np.ndarray) -> np.ndarray:
+def _log_color_t_array(
+    distance_m: np.ndarray, focus_m: float = _DEFAULT_FOCUS_M,
+) -> np.ndarray:
     """Vectorised unbounded log colour scale for NumPy arrays."""
     v = np.log1p(np.maximum(distance_m, 0.0))
-    return v / (v + _LOG_SCALE_C)
+    return v / (v + math.log1p(max(0.1, focus_m)))
 
 
-# Pre-computed palette control positions (module-level, no max_distance).
-_PALETTE_CONTROL_X: np.ndarray = np.array(
-    [_log_color_t(m) for m in _PALETTE_METER_ANCHORS] + [1.0],
-    dtype=np.float32,
-)
-_PALETTE_CONTROL_BGR: np.ndarray = np.array(_PALETTE_BGR, dtype=np.float32)
+# ── 1024-bin continuous observer LUT ─────────────────────────────────
+# Built once at first access by interpolating the 16 palette anchors to
+# 1024 bins.  At render time, colour lookup is a single O(1) array index
+# instead of per-pixel np.interp across three channels.
+_OBSERVER_LUT: np.ndarray | None = None
+
+
+def _observer_lut() -> np.ndarray:
+    """Return (or lazily build) a 1024x1x3 BGR uint8 continuous LUT.
+
+    Index 0 = near (red), index 1023 = far (gray).  Built by sampling
+    the 16 palette anchor colours at 1024 uniform positions in the
+    ``[0, 1]`` colour-scale range for sub-pixel-smooth gradients.
+    """
+    global _OBSERVER_LUT
+    if _OBSERVER_LUT is not None:
+        return _OBSERVER_LUT
+    # Compute anchor positions in t-space using the default focus.
+    ctrl_x = np.array(
+        [_log_color_t(m) for m in _PALETTE_METER_ANCHORS] + [1.0],
+        dtype=np.float32,
+    )
+    ctrl_bgr = np.array(_PALETTE_BGR, dtype=np.float32)
+    x_full = np.linspace(0.0, 1.0, _LUT_SIZE, dtype=np.float32)
+    b = np.interp(x_full, ctrl_x, ctrl_bgr[:, 0])
+    g = np.interp(x_full, ctrl_x, ctrl_bgr[:, 1])
+    r = np.interp(x_full, ctrl_x, ctrl_bgr[:, 2])
+    bgr = np.stack([b, g, r], axis=-1)
+    _OBSERVER_LUT = np.clip(bgr, 0, 255).astype(np.uint8).reshape(_LUT_SIZE, 1, 3)
+    return _OBSERVER_LUT
 
 # First-person gradient colours (BGR)
 _FP_SKY_TOP: tuple[int, int, int] = (80, 40, 10)
@@ -107,142 +162,30 @@ _GUIDE_COLOR = (90, 90, 90)
 _TRAIL_COLOR = (60, 220, 220)
 _HEADING_COLOR = (0, 255, 255)
 
-# ── Turbo LUT (256 entries, BGR) ──────────────────────────────────────
-_TURBO_LUT: np.ndarray | None = None
 
-
-def _turbo_lut() -> np.ndarray:
-    """Return (or lazily build) a 256x1x3 BGR uint8 Turbo lookup table.
-
-    Turbo is Google's perceptually-uniform rainbow colormap designed
-    specifically for depth/distance data.  Near = warm red/yellow,
-    far = cool blue/indigo.
-    """
-    global _TURBO_LUT
-    if _TURBO_LUT is not None:
-        return _TURBO_LUT
-
-    # 12-point Turbo control curve (RGB 0-1)
-    control_rgb = np.array(
-        [
-            [0.190, 0.072, 0.232],  # 0 — dark indigo (far)
-            [0.120, 0.240, 0.640],  # 1 — deep blue
-            [0.140, 0.460, 0.860],  # 2 — vivid blue
-            [0.130, 0.660, 0.900],  # 3 — cyan
-            [0.180, 0.820, 0.720],  # 4 — teal-green
-            [0.360, 0.910, 0.440],  # 5 — lime-green
-            [0.580, 0.950, 0.240],  # 6 — yellow-green
-            [0.790, 0.930, 0.150],  # 7 — yellow
-            [0.950, 0.820, 0.120],  # 8 — amber
-            [0.990, 0.620, 0.100],  # 9 — orange
-            [0.950, 0.370, 0.080],  # 10 — red-orange
-            [0.840, 0.160, 0.080],  # 11 — deep red (near)
-        ],
-        dtype=np.float32,
-    )
-    x_ctrl = np.linspace(0.0, 255.0, len(control_rgb))
-    x_full = np.arange(256, dtype=np.float32)
-    r = np.interp(x_full, x_ctrl, control_rgb[:, 0])
-    g = np.interp(x_full, x_ctrl, control_rgb[:, 1])
-    b = np.interp(x_full, x_ctrl, control_rgb[:, 2])
-    bgr = np.stack([b, g, r], axis=-1)
-    _TURBO_LUT = (bgr * 255.0).astype(np.uint8).reshape(256, 1, 3)
-    return _TURBO_LUT
-
-
-def turbo_color_bgr(depth_norm: float) -> tuple[int, int, int]:
-    """Map normalised depth [0, 1] to a BGR Turbo colour.
-
-    0 = near (warm red), 1 = far (cool blue).
-    """
-    lut = _turbo_lut()
-    # Invert so 0 (near) → high index (red), 1 (far) → low index (blue)
-    idx = int(np.clip((1.0 - depth_norm) * 255.0, 0, 255))
-    b, g, r = int(lut[idx, 0, 0]), int(lut[idx, 0, 1]), int(lut[idx, 0, 2])
-    return (b, g, r)
-
-
-# ── Viridis LUT (256 entries, BGR) ───────────────────────────────────
-_VIRIDIS_LUT: np.ndarray | None = None
-
-
-def _viridis_lut() -> np.ndarray:
-    """Return (or lazily build) a 256x1x3 BGR uint8 Viridis lookup table."""
-    global _VIRIDIS_LUT
-    if _VIRIDIS_LUT is not None:
-        return _VIRIDIS_LUT
-
-    control_rgb = np.array(
-        [
-            [0.267, 0.004, 0.329],
-            [0.282, 0.140, 0.458],
-            [0.254, 0.265, 0.530],
-            [0.207, 0.372, 0.553],
-            [0.164, 0.471, 0.558],
-            [0.128, 0.567, 0.551],
-            [0.134, 0.658, 0.517],
-            [0.478, 0.821, 0.318],
-            [0.741, 0.873, 0.150],
-            [0.993, 0.906, 0.144],
-        ],
-        dtype=np.float32,
-    )
-    x_ctrl = np.linspace(0.0, 255.0, len(control_rgb))
-    x_full = np.arange(256, dtype=np.float32)
-    r = np.interp(x_full, x_ctrl, control_rgb[:, 0])
-    g = np.interp(x_full, x_ctrl, control_rgb[:, 1])
-    b = np.interp(x_full, x_ctrl, control_rgb[:, 2])
-    bgr = np.stack([b, g, r], axis=-1)
-    _VIRIDIS_LUT = (bgr * 255.0).astype(np.uint8).reshape(256, 1, 3)
-    return _VIRIDIS_LUT
 
 
 def _apply_fog_of_war(img: np.ndarray, invalid_mask: np.ndarray) -> None:
-    """Draw semi-transparent diagonal hatching over invalid regions."""
+    """Stamp a checkerboard tile pattern over missing-data regions.
+
+    Uses a small dark-purple checkerboard that is immediately
+    distinguishable from any valid distance colour in the palette.
+    """
     if not np.any(invalid_mask):
         return
     ys, xs = np.nonzero(invalid_mask)
-    stripe = ((xs.astype(np.int32) + ys.astype(np.int32)) % 8) < 3
-    fog_pixels = np.where(stripe)
-    img[ys[fog_pixels], xs[fog_pixels]] = (
-        img[ys[fog_pixels], xs[fog_pixels]] * 0.3 + np.array([48, 45, 42], dtype=np.float32) * 0.7
-    ).astype(np.uint8)
+    checker = (
+        (xs.astype(np.int32) // _MISSING_TILE_SIZE)
+        + (ys.astype(np.int32) // _MISSING_TILE_SIZE)
+    ) % 2
+    img[ys, xs] = np.where(
+        checker[:, np.newaxis] == 0,
+        _MISSING_COLOR_A,
+        _MISSING_COLOR_B,
+    )
 
 
 # ── public renderers ─────────────────────────────────────────────────
-
-
-def depth_to_viridis(
-    depth: np.ndarray,
-    valid: np.ndarray | None = None,
-) -> np.ndarray:
-    """Convert 2-D log-normalized depth to Viridis-coloured BGR with fog-of-war.
-
-    Input depth is already log-normalized by the environment as
-    ``log1p(d) / log1p(max_distance)`` which inherently allocates ~52 %
-    of the [0, 1] range to the 0-10 m near field.  Working directly on
-    these values preserves logarithmic near-field detail.  Percentile-based
-    contrast stretch adapts dynamically to each scene's depth distribution.
-    """
-    depth = np.clip(depth, 0.0, 1.0).astype(np.float32)
-
-    if valid is not None and np.any(valid):
-        valid_vals = depth[valid]
-        lo = float(np.percentile(valid_vals, 1))
-        hi = float(np.percentile(valid_vals, 99))
-    else:
-        lo, hi = 0.0, 1.0
-
-    span = max(hi - lo, 1e-4)
-    normalised = 1.0 - np.clip((depth - lo) / span, 0.0, 1.0)
-    indices = (normalised * 255.0).astype(np.uint8)
-    lut = _viridis_lut()
-    coloured = lut[indices, 0, :]
-
-    if valid is not None:
-        _apply_fog_of_war(coloured, ~valid)
-
-    return coloured
 
 
 def depth_to_observer_palette(
@@ -251,34 +194,34 @@ def depth_to_observer_palette(
     *,
     fog_of_war: bool = True,
     env_max_distance: float = 100.0,
+    focus_m: float = _DEFAULT_FOCUS_M,
 ) -> np.ndarray:
-    """Convert log-normalized depth to a structure-revealing observer palette.
+    """Convert log-normalized depth to a continuous observer palette.
 
     Input depth is already log-normalized by the environment as
     ``log1p(d) / log1p(max_distance)``.  This function denormalises back
     to metric metres and maps through a smooth, unbounded logarithmic
-    colour scale that spans from 0 to infinity with no far-clipping
-    distance.  Close-range surfaces receive high colour diversity;
-    far-range structure compresses smoothly into neutral gray.
+    colour scale via O(1) LUT indexing.
 
     Parameters
     ----------
     env_max_distance:
         The environment's normalisation constant (for denormalisation
         only — the colour mapping itself is parameter-free).
+    focus_m:
+        The metric distance that consumes 50 % of the colour spectrum.
+        Lower values (e.g. 5-10) maximise near-field colour diversity.
     """
     depth = np.clip(depth, 0.0, 1.0).astype(np.float32)
 
     # Denormalise to metric metres, then apply unbounded log scale.
     metric = np.expm1(depth * math.log1p(env_max_distance))
-    t = _log_color_t_array(metric)
+    t = _log_color_t_array(metric, focus_m=focus_m)
 
-    # Interpolate through the palette.
-    flat = t.reshape(-1)
-    b = np.interp(flat, _PALETTE_CONTROL_X, _PALETTE_CONTROL_BGR[:, 0])
-    g = np.interp(flat, _PALETTE_CONTROL_X, _PALETTE_CONTROL_BGR[:, 1])
-    r = np.interp(flat, _PALETTE_CONTROL_X, _PALETTE_CONTROL_BGR[:, 2])
-    coloured = np.stack([b, g, r], axis=-1).reshape((*depth.shape, 3)).astype(np.uint8)
+    # O(1) LUT indexing — replaces per-pixel np.interp.
+    lut = _observer_lut()
+    indices = np.clip(t * _LUT_MAX_IDX, 0, _LUT_MAX_IDX).astype(np.int32)
+    coloured = lut[indices, 0, :]
 
     if fog_of_war and valid is not None:
         _apply_fog_of_war(coloured, ~valid)
@@ -418,7 +361,7 @@ def render_front_hemisphere_heatmap(
         > 0.5
     )
 
-    heatmap = depth_to_viridis(depth_proj, valid_proj & inside)
+    heatmap = depth_to_observer_palette(depth_proj, valid_proj & inside)
     panel[inside] = heatmap[inside]
 
     boundary_pts: list[tuple[int, int]] = []
@@ -633,8 +576,8 @@ def _draw_lidar_colorbar(
     w: int,
     h: int,
 ) -> None:
-    """Draw a vertical Turbo colorbar with distance labels on the right edge."""
-    lut = _turbo_lut()
+    """Draw a vertical observer-palette colorbar with distance labels."""
+    lut = _observer_lut()
     bar_margin = 4
     bar_x = x + bar_margin
     bar_w = w - bar_margin * 2
@@ -645,8 +588,8 @@ def _draw_lidar_colorbar(
     # Draw the gradient bar
     for row in range(bar_h):
         t = row / max(bar_h - 1, 1)
-        # Top of bar = near (red), bottom = far (blue)
-        idx = int(np.clip((1.0 - t) * 255.0, 0, 255))
+        # Top of bar = near (red, idx 0), bottom = far (gray, idx 1023)
+        idx = int(min(t * _LUT_MAX_IDX, _LUT_MAX_IDX))
         color = (int(lut[idx, 0, 0]), int(lut[idx, 0, 1]), int(lut[idx, 0, 2]))
         cv2.line(
             img,
@@ -665,9 +608,13 @@ def _draw_lidar_colorbar(
         1,
     )
 
-    # Distance labels at key positions
-    labels = [(0.0, "0m"), (0.2, "2m"), (0.5, "5m"), (1.0, "10m")]
-    for frac, label in labels:
+    # Distance labels placed at their log-scale bar positions
+    label_specs: list[tuple[float, str]] = [
+        (0.0, "0m"), (1.0, "1m"), (3.0, "3m"),
+        (10.0, "10m"), (30.0, "30m"),
+    ]
+    for dist_m, label in label_specs:
+        frac = _log_color_t(dist_m)
         row_y = int(bar_top + frac * (bar_h - 1))
         # Tick mark
         cv2.line(img, (bar_x - 2, row_y), (bar_x, row_y), (140, 140, 140), 1)
@@ -675,7 +622,7 @@ def _draw_lidar_colorbar(
         cv2.putText(
             img,
             label,
-            (bar_x - 2, row_y - 3) if frac == 0.0 else (bar_x - 2, row_y + 4),
+            (bar_x - 2, row_y - 3) if dist_m == 0.0 else (bar_x - 2, row_y + 4),
             _HUD_FONT,
             0.30,
             (160, 160, 160),
@@ -715,30 +662,17 @@ def _draw_lidar_crosshair(
     cv2.circle(img, (cx, cy), 2, color, -1, cv2.LINE_AA)
 
 
-# Shared palette anchors for distance_color (must match depth_to_observer_palette)
-_DIST_METER_ANCHORS = _PALETTE_METER_ANCHORS
-_DIST_BGR_ANCHORS = _PALETTE_BGR
-
-
 def distance_color(distance_m: float) -> tuple[int, int, int]:
-    """Map distance in metres to a BGR HUD colour via unbounded log scale.
+    """Map distance in metres to a BGR HUD colour via O(1) LUT lookup.
 
-    Uses the same smooth ``log1p(d) / (log1p(d) + C)`` mapping as the
-    observer palette — no max-distance parameter.
+    Uses the same continuous ``log1p(d) / (log1p(d) + C)`` mapping and
+    1024-bin observer LUT as all other dashboard surfaces.
     """
     t = _log_color_t(distance_m)
-    for i in range(len(_PALETTE_CONTROL_X) - 1):
-        if t <= _PALETTE_CONTROL_X[i + 1]:
-            span = float(_PALETTE_CONTROL_X[i + 1] - _PALETTE_CONTROL_X[i])
-            frac = (t - float(_PALETTE_CONTROL_X[i])) / max(span, 1e-6)
-            c0 = _DIST_BGR_ANCHORS[i]
-            c1 = _DIST_BGR_ANCHORS[i + 1]
-            return (
-                int(c0[0] + (c1[0] - c0[0]) * frac),
-                int(c0[1] + (c1[1] - c0[1]) * frac),
-                int(c0[2] + (c1[2] - c0[2]) * frac),
-            )
-    return (int(_DIST_BGR_ANCHORS[-1][0]), int(_DIST_BGR_ANCHORS[-1][1]), int(_DIST_BGR_ANCHORS[-1][2]))
+    lut = _observer_lut()
+    idx = int(min(t * _LUT_MAX_IDX, _LUT_MAX_IDX))
+    row = lut[idx, 0]
+    return (int(row[0]), int(row[1]), int(row[2]))
 
 
 def render_forward_polar(
@@ -750,7 +684,7 @@ def render_forward_polar(
     max_distance_m: float = VIEW_RANGE_M,
     env_max_distance: float = 100.0,
 ) -> np.ndarray:
-    """Render forward 180° scan as a continuous Turbo-filled polar plot.
+    """Render forward 180° scan as a continuous observer-palette polar plot.
 
     Radial pixel positions use the unbounded log scale so near-field
     structure gets proportionally more screen space and there is no
@@ -834,10 +768,10 @@ def render_forward_polar(
     filled_dist_m = filled_depth * scan_dist
     depth_norm = _log_color_t_array(filled_dist_m)
 
-    # Turbo LUT colouring
-    lut = _turbo_lut()
-    turbo_idx = np.clip((1.0 - depth_norm) * 255.0, 0, 255).astype(np.uint8)
-    colored = lut[turbo_idx, 0, :]  # (h, w, 3)
+    # Observer-palette LUT colouring (unified with all dashboard surfaces)
+    lut = _observer_lut()
+    obs_idx = np.clip(depth_norm * _LUT_MAX_IDX, 0, _LUT_MAX_IDX).astype(np.int32)
+    colored = lut[obs_idx, 0, :]  # (h, w, 3)
 
     # Subtle radial darkening for depth perception
     darken = np.clip(

@@ -14,7 +14,7 @@ import typer
 import zmq
 
 from navi_auditor.config import AuditorConfig
-from navi_auditor.dashboard.renderers import depth_to_viridis, render_first_person
+from navi_auditor.dashboard.renderers import depth_to_observer_palette, render_first_person
 from navi_contracts import (
     TOPIC_ACTION,
     TOPIC_DISTANCE_MATRIX,
@@ -733,7 +733,7 @@ def _capture_dashboard_frame(
                 720,
                 pitch=msg.robot_pose.pitch,
             )
-            raw_img = depth_to_viridis(raw_depth.T, raw_valid.T)
+            raw_img = depth_to_observer_palette(raw_depth.T, raw_valid.T)
             raw_img = cv2.resize(raw_img, (960, 240), interpolation=cv2.INTER_NEAREST)
 
             perspective_path = artifact_root / "perspective.png"

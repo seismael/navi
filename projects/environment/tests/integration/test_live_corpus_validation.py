@@ -46,14 +46,11 @@ def test_live_corpus_uses_downloaded_datasets_only() -> None:
 
     allowed_datasets = {
         "habitat_test_scenes",
-        "hssd",
         "replicacad",
         "ai-habitat_habitat_test_scenes",
         "ai-habitat_habitat-test-scenes",
         "ai-habitat_ReplicaCAD_baked_lighting",
         "ai-habitat_ReplicaCAD_dataset",
-        "hssd-hab",
-        "hssd_hssd-hab",
     }
     forbidden_tokens = (
         "sample",

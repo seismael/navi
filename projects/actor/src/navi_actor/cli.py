@@ -755,7 +755,7 @@ def infer(
     corpus_root: str = typer.Option("", help="Root directory for canonical scene discovery"),
     gmdag_root: str = typer.Option("", help="Root directory for compiled corpus outputs"),
     gmdag_file: str = typer.Option("", help="Single compiled .gmdag cache"),
-    actors: int = typer.Option(4, help="Number of parallel environments"),
+    actors: int = typer.Option(1, help="Number of parallel environments (default 1 for inference)"),
     total_steps: int = typer.Option(0, help="Total environment steps (0 = continuous)"),
     total_episodes: int = typer.Option(0, help="Total completed episodes (0 = unlimited)"),
     min_scene_bytes: int = typer.Option(1000, help="Ignore small scene files"),

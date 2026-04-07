@@ -42,7 +42,7 @@ def test_validate_sdfdag_training_scenes_accepts_gmdag_assets() -> None:
     _validate_sdfdag_training_scenes(
         [
             str(_repo_asset_path("artifacts/gmdag/corpus/apartment_1.gmdag")),
-            str(_repo_asset_path("artifacts/gmdag/corpus/hssd/102343992.gmdag")),
+            str(_repo_asset_path("artifacts/gmdag/corpus/ai-habitat_ReplicaCAD_baked_lighting/Baked_sc0_staging_00.gmdag")),
         ]
     )
 
@@ -50,8 +50,8 @@ def test_validate_sdfdag_training_scenes_accepts_gmdag_assets() -> None:
 @pytest.mark.parametrize(
     "scene_path",
     [
-        "data/scenes/hssd/102343992.glb",
-        "data/scenes/hssd/102344115.glb",
+        "data/scenes/replicacad/stage_one.glb",
+        "data/scenes/replicacad/stage_two.glb",
         "data/scenes/scene_manifest_all.json",
     ],
 )

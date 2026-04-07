@@ -25,7 +25,7 @@ uv run environment
 uv run navi-environment prepare-corpus --force-recompile
 
 # Compile one explicit source scene
-uv run navi-environment compile-gmdag --source ./data/scenes/hssd/102343992.glb --output ./artifacts/gmdag/corpus/hssd/102343992.gmdag --resolution 512
+uv run navi-environment compile-gmdag --source ./artifacts/gmdag/corpus/ai-habitat_ReplicaCAD_baked_lighting/Baked_sc0_staging_00.gmdag --output ./artifacts/gmdag/corpus/ai-habitat_ReplicaCAD_baked_lighting/Baked_sc0_staging_00.gmdag --resolution 512
 
 # Runtime preflight and throughput validation
 uv run navi-environment check-sdfdag

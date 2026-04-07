@@ -58,6 +58,7 @@ _HEADING_SECTORS: int = 16
 _FRONTIER_BONUS_SCALE: float = 0.1
 _STARVATION_DEAD_ZONE: float = 0.2
 _VOID_STARVATION_THRESHOLD: float = 0.85
+_VOID_GRACE_STEPS: int = 10
 _SPAWN_MAX_STARVATION: float = 0.70
 _SPAWN_CANDIDATES_PER_AXIS: int = 5
 _SPAWN_HEIGHT_SAMPLES: int = 7
@@ -1144,7 +1145,11 @@ class SdfDagBackend(SimulatorBackend):
                 self._steps_in_scene += 1
                 truncated = bool(self._actor_steps[actor_id] >= self._max_steps_per_episode)
                 # Void-detection: force early truncation for lost actors.
-                if starvation_ratio >= _VOID_STARVATION_THRESHOLD:
+                # Grace period allows navigation away from high-starvation spawns.
+                if (
+                    starvation_ratio >= _VOID_STARVATION_THRESHOLD
+                    and self._actor_steps[actor_id] > _VOID_GRACE_STEPS
+                ):
                     truncated = True
                 reward, _reward_components = self._compute_reward(
                     actor_id=actor_id,
@@ -1365,8 +1370,13 @@ class SdfDagBackend(SimulatorBackend):
             next_steps_t = self._actor_steps.index_select(0, actor_indices_t) + 1
             truncated_mask_t = next_steps_t >= self._max_steps_per_episode
             # Void-detection: force early truncation when the actor is lost in
-            # empty space and wasting training steps.
-            void_mask = starvation_ratios_t >= _VOID_STARVATION_THRESHOLD
+            # empty space and wasting training steps.  A grace period after
+            # reset gives the agent time to navigate away from high-starvation
+            # spawn positions before void detection kicks in.
+            void_mask = (
+                (starvation_ratios_t >= _VOID_STARVATION_THRESHOLD)
+                & (next_steps_t > _VOID_GRACE_STEPS)
+            )
             truncated_mask_t = truncated_mask_t | void_mask
             self._actor_steps[actor_indices_t] = next_steps_t
             self._steps_in_scene += int(actor_indices_t.numel())

@@ -37,10 +37,23 @@ def build_status_metrics_line(
     *,
     now: float | None = None,
     fallback_state: StreamState | None = None,
+    mode: str = "OBSERVER",
 ) -> str:
-    """Build a compact one-line telemetry summary for the dashboard top bar."""
+    """Build a compact one-line telemetry summary for the dashboard top bar.
+
+    The displayed metrics depend on the active dashboard *mode*:
+
+    * **TRAINING** — full pipeline: SPS, Env, EMA, Step, Obs, Opt, ZW
+    * **INFERENCE** — runner only: SPS, Env, Step, Obs
+    * **OBSERVER / WAITING** — connectivity: Step, Obs, Stall
+    * **MANUAL** — teleop: Step, Obs
+    """
     if state is None:
-        return "SPS=-- | Env=-- | EMA=-- | Step=-- | Opt=--"
+        if mode == "TRAINING":
+            return "SPS=-- | Env=-- | EMA=-- | Step=-- | Opt=--"
+        if mode == "INFERENCE":
+            return "SPS=-- | Env=-- | Step=--"
+        return "Step=--"
 
     now_ts = time.time() if now is None else now
     stall_s = None
@@ -81,21 +94,38 @@ def build_status_metrics_line(
     elif state.latest_matrix is not None:
         step_id = int(state.latest_matrix.step_id)
 
-    parts: list[str] = []
-    if stall_s is not None and stall_s > 1.0:
-        parts.append(f"Stall={_fmt_stall_seconds(stall_s)}")
-    parts.append(f"SPS={_fmt_number(sps, 1)}")
-    parts.append(f"Env={_fmt_number(env_sps, 1)}")
-    parts.append(f"EMA={_fmt_number(reward_ema, 3)}")
-    parts.append(f"Step={step_id if step_id is not None else '--'}")
     # Observation age: how old the currently displayed frame is
     obs_age_ms: int | None = None
     obs_ts: float | None = getattr(state.latest_matrix, "timestamp", None) if state.latest_matrix is not None else None
     if obs_ts is not None and now_ts > 0.0:
         obs_age_ms = max(0, int((now_ts - obs_ts) * 1000))
-    if obs_age_ms is not None:
-        parts.append(f"Obs={obs_age_ms}ms")
-    parts.append(f"Opt={_fmt_number(opt_ms, 0)}ms")
-    if zero_wait is not None:
-        parts.append(f"ZW={zero_wait * 100.0:.0f}%")
+
+    parts: list[str] = []
+
+    # Stall indicator — shown in all modes when communication has stalled
+    if stall_s is not None and stall_s > 1.0:
+        parts.append(f"Stall={_fmt_stall_seconds(stall_s)}")
+
+    if mode == "TRAINING":
+        parts.append(f"SPS={_fmt_number(sps, 1)}")
+        parts.append(f"Env={_fmt_number(env_sps, 1)}")
+        parts.append(f"EMA={_fmt_number(reward_ema, 3)}")
+        parts.append(f"Step={step_id if step_id is not None else '--'}")
+        if obs_age_ms is not None:
+            parts.append(f"Obs={obs_age_ms}ms")
+        parts.append(f"Opt={_fmt_number(opt_ms, 0)}ms")
+        if zero_wait is not None:
+            parts.append(f"ZW={zero_wait * 100.0:.0f}%")
+    elif mode == "INFERENCE":
+        parts.append(f"SPS={_fmt_number(sps, 1)}")
+        parts.append(f"Env={_fmt_number(env_sps, 1)}")
+        parts.append(f"Step={step_id if step_id is not None else '--'}")
+        if obs_age_ms is not None:
+            parts.append(f"Obs={obs_age_ms}ms")
+    else:
+        # OBSERVER, WAITING, MANUAL — minimal connectivity info
+        parts.append(f"Step={step_id if step_id is not None else '--'}")
+        if obs_age_ms is not None:
+            parts.append(f"Obs={obs_age_ms}ms")
+
     return " | ".join(parts)

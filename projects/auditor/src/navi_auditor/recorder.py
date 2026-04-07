@@ -11,6 +11,12 @@ import cv2
 import numpy as np
 import zmq
 
+from navi_auditor.dashboard.renderers import (
+    depth_to_observer_palette,
+)
+from navi_auditor.dashboard.renderers import (
+    distance_color as _canonical_distance_color,
+)
 from navi_contracts import (
     TOPIC_ACTION,
     TOPIC_DISTANCE_MATRIX,
@@ -213,30 +219,12 @@ class LiveDashboard:
         depth: np.ndarray,
         valid: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Convert a 2-D float32 depth plane to a coloured BGR image.
+        """Convert a 2-D float32 depth plane to observer-palette BGR image.
 
-        Uses auto-contrast: the valid depth range is stretched to the
-        full 0-255 colour range so nearby objects appear bright and
-        distant objects dark, regardless of ``max_distance``.
+        Uses the unified observer palette from ``renderers`` so all
+        dashboard surfaces share the same threat-graded colour language.
         """
-        if valid is not None and np.any(valid):
-            valid_vals = depth[valid]
-            lo = float(np.min(valid_vals))
-            hi = float(np.max(valid_vals))
-        else:
-            lo, hi = 0.0, 1.0
-
-        span = max(hi - lo, 1e-4)
-        # Invert: close → high value (bright), far → low value (dark)
-        normalised = 1.0 - np.clip((depth - lo) / span, 0.0, 1.0)
-        grey = (normalised * 255.0).astype(np.uint8)
-        coloured: np.ndarray = cv2.applyColorMap(grey, cv2.COLORMAP_TURBO)
-
-        if valid is not None:
-            invalid = ~valid
-            coloured[invalid] = (30, 30, 30)
-
-        return coloured
+        return depth_to_observer_palette(depth, valid, fog_of_war=True)
 
     @staticmethod
     def _delta_to_bgr(delta: np.ndarray) -> np.ndarray:
@@ -337,18 +325,7 @@ class LiveDashboard:
     @staticmethod
     def _distance_color(distance_m: float) -> tuple[int, int, int]:
         """Map distance in meters to unified dashboard BGR color."""
-        d = float(max(0.0, distance_m))
-        if d <= 0.5:
-            return (0, 0, 255)
-        if d <= 1.5:
-            return (0, 100, 255)
-        if d <= 3.0:
-            return (0, 255, 200)
-        if d <= 6.0:
-            return (100, 255, 0)
-        if d <= 10.0:
-            return (200, 200, 100)
-        return (50, 50, 50)
+        return _canonical_distance_color(distance_m)
 
     def _render_forward_polar(
         self, depth: np.ndarray, valid: np.ndarray, w: int, h: int

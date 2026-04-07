@@ -21,6 +21,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from navi_auditor.dashboard.renderers import (
+    _LUT_MAX_IDX,
+    _log_color_t_array,
+    _observer_lut,
+)
+
 __all__: list[str] = ["OccupancyMap"]
 
 _log = logging.getLogger(__name__)
@@ -349,10 +355,11 @@ class OccupancyMap:
 
         occ_mask = v_occ == 2
         if np.any(occ_mask):
-            d_norm = np.clip(v_dep[occ_mask] / self._max_dist, 0.0, 1.0)
-            gray = (d_norm * 255.0).astype(np.uint8).reshape(-1, 1)
-            colored = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
-            img[occ_mask] = colored.reshape(-1, 3)
+            d_m = np.clip(v_dep[occ_mask], 0.0, self._max_dist)
+            color_t = _log_color_t_array(d_m)
+            lut = _observer_lut()
+            idx = np.clip(color_t * _LUT_MAX_IDX, 0, _LUT_MAX_IDX).astype(np.int32)
+            img[occ_mask] = lut[idx, 0, :]
 
         # ── resize to output ─────────────────────────────────────────
         out = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)

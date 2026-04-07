@@ -78,8 +78,8 @@ Requires: CMake 3.18+, C++17 compiler. Assimp is fetched automatically via CMake
 
 ```bash
 uv run --project ../environment navi-environment compile-gmdag \
-    --source ../../data/scenes/hssd/102343992.glb \
-    --output ../../artifacts/gmdag/corpus/hssd/102343992.gmdag \
+    --source ../../artifacts/gmdag/corpus/ai-habitat_ReplicaCAD_baked_lighting/Baked_sc0_staging_00.gmdag \
+    --output ../../artifacts/gmdag/corpus/ai-habitat_ReplicaCAD_baked_lighting/Baked_sc0_staging_00.gmdag \
     --resolution 512
 ```
 
