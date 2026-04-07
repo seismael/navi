@@ -45,11 +45,12 @@ corpus with no intermediate graphics pipeline.
   - [Flow 3 — PPO Training (Canonical)](#flow-3--ppo-training-canonical)
   - [Flow 4 — Manual Training (Behavioral Cloning)](#flow-4--manual-training-behavioral-cloning)
   - [Flow 5 — Interactive Exploration](#flow-5--interactive-exploration)
-  - [Flow 6 — Inference (3-Process Stack)](#flow-6--inference-3-process-stack)
-  - [Flow 7 — Live Dashboard](#flow-7--live-dashboard)
-  - [Flow 8 — Benchmarking & Comparison](#flow-8--benchmarking--comparison)
-  - [Flow 9 — Validation & Qualification](#flow-9--validation--qualification)
-  - [Flow 10 — Diagnostics & Analysis](#flow-10--diagnostics--analysis)
+  - [Flow 6 — In-Process Inference (Canonical)](#flow-6--in-process-inference-canonical)
+  - [Flow 7 — Legacy Inference (3-Process Stack)](#flow-7--legacy-inference-3-process-stack)
+  - [Flow 8 — Live Dashboard](#flow-8--live-dashboard)
+  - [Flow 9 — Benchmarking & Comparison](#flow-9--benchmarking--comparison)
+  - [Flow 10 — Validation & Qualification](#flow-10--validation--qualification)
+  - [Flow 11 — Diagnostics & Analysis](#flow-11--diagnostics--analysis)
 - [Complete Scripts Reference](#complete-scripts-reference)
   - [Training Scripts](#training-scripts)
   - [Corpus Scripts](#corpus-scripts)
@@ -589,10 +590,64 @@ uv run --project projects\auditor navi-auditor explore `
 
 ---
 
-### Flow 6 — Inference (3-Process Stack)
+### Flow 6 — In-Process Inference (Canonical)
+
+Evaluate a trained policy checkpoint with direct in-process CUDA stepping.
+Same architecture as training (SdfDagBackend, tensor-native, ZMQ telemetry)
+but without PPO, rollout buffers, reward shaping, or episodic memory.
+See also: [`docs/INFERENCE.md`](docs/INFERENCE.md) | [`run-inference.ps1`](#run-inferenceps1----in-process-inference) | [`navi-actor infer`](#infer----in-process-policy-evaluation)
+
+#### 6A — Ghost Stack Inference
+
+```powershell
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint ".\artifacts\checkpoints\bc_base_model.pt"
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-Infer` | (switch) | In-process inference mode |
+| `-Checkpoint` | (required) | Trained model checkpoint path |
+| `-Actors` | `4` | Parallel actor count |
+| `-Deterministic` | (switch) | Use action mean instead of sampling |
+| `-TotalSteps` | `0` | Step limit (0 = unlimited) |
+| `-TotalEpisodes` | `0` | Episode limit (0 = unlimited) |
+| `-Datasets` | `""` | Dataset filter |
+| `-ExcludeDatasets` | `""` | Exclude datasets |
+| `-NoDashboard` | (switch) | Skip dashboard (enabled by default) |
+| `-TemporalCore` | `mamba2` | Temporal backend |
+
+```powershell
+# Examples:
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint ".\my_model.pt" -Deterministic  # Deterministic
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint ".\my_model.pt" -TotalSteps 10000  # Bounded
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint ".\my_model.pt" -NoDashboard  # Headless
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint ".\my_model.pt" -Datasets "quake3-arenas"  # Subset
+```
+
+#### 6B — Standalone Inference Wrapper
+
+```powershell
+.\scripts\run-inference.ps1 -Checkpoint ".\artifacts\checkpoints\bc_base_model.pt"
+```
+
+Same parameters as ghost stack inference. Runs inference directly without
+orchestration overhead.
+
+#### 6C — Direct CLI
+
+```powershell
+uv run --project projects\actor navi-actor infer `
+    --checkpoint .\artifacts\checkpoints\bc_base_model.pt `
+    --actors 4 --deterministic --total-steps 10000
+```
+
+---
+
+### Flow 7 — Legacy Inference (3-Process Stack)
 
 Run a trained policy in real-time with separate Environment, Actor, and
-Dashboard processes communicating over ZMQ.
+Dashboard processes communicating over ZMQ. This is the legacy multi-process
+mode; prefer [Flow 6](#flow-6--in-process-inference-canonical) for new work.
 See also: [Service Scripts](#service-scripts) | [`run-ghost-stack.ps1`](#run-ghost-stackps1----orchestrated-stack-launcher)
 
 ```powershell
@@ -629,7 +684,7 @@ See also: [Service Scripts](#service-scripts) | [`run-ghost-stack.ps1`](#run-gho
 
 ---
 
-### Flow 7 — Live Dashboard
+### Flow 8 — Live Dashboard
 
 The auditor dashboard is a passive observer. It subscribes to the actor PUB
 telemetry stream and renders actor 0 observations at 5-10 Hz.
@@ -659,7 +714,7 @@ uv run --project projects\auditor navi-auditor dashboard `
 
 ---
 
-### Flow 8 — Benchmarking & Comparison
+### Flow 9 — Benchmarking & Comparison
 
 See also: [Benchmark Scripts](#benchmark-scripts)
 
@@ -753,7 +808,7 @@ training telemetry, perf telemetry — all enabled/disabled systematically.
 
 ---
 
-### Flow 9 — Validation & Qualification
+### Flow 10 — Validation & Qualification
 
 See also: [Validation Scripts](#validation-scripts)
 
@@ -803,7 +858,7 @@ Comprehensive automated validation pipeline (typically 8+ hours).
 
 ---
 
-### Flow 10 — Diagnostics & Analysis
+### Flow 11 — Diagnostics & Analysis
 
 See also: [Setup & Diagnostics](#setup--diagnostics) | [`check-sdfdag`](#check-sdfdag----validate-runtime--assets)
 
@@ -929,15 +984,23 @@ All parameters from `train.ps1` above apply identically.
 
 #### `run-ghost-stack.ps1` -- Orchestrated Stack Launcher
 
-Full-stack launcher: training mode (`-Train`) or inference mode (default).
-Handles process lifecycle, pre-kill, and optional dashboard. [(Flow 3B)](#3b--ghost-stack-training-orchestrated) [(Flow 6)](#flow-6--inference-3-process-stack)
+Full-stack launcher: training (`-Train`), in-process inference (`-Infer`),
+or legacy 3-process inference (default).
+Handles process lifecycle, pre-kill, and optional dashboard.
+[(Flow 3B)](#3b--ghost-stack-training-orchestrated)
+[(Flow 6)](#flow-6--in-process-inference-canonical)
+[(Flow 7)](#flow-7--legacy-inference-3-process-stack)
 
 **Wraps (training):** `uv run --project projects/actor brain train`
-**Wraps (inference):** 3-process stack (environment + actor + dashboard)
+**Wraps (inference):** `uv run --project projects/actor brain infer`
+**Wraps (legacy):** 3-process stack (environment + actor + dashboard)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `-Train` | switch | | Enable unified PPO training mode |
+| `-Infer` | switch | | Enable in-process inference mode |
+| `-Deterministic` | switch | | Use action mean (inference only) |
+| `-TotalEpisodes` | int | `0` | Episode limit (0 = unlimited, inference) |
 | `-Actors` | int | `4` | Parallel actor count (training) or env actors (inference) |
 | `-TotalSteps` | int | `0` | Training step limit (0 = continuous) |
 | `-CheckpointEvery` | int | `25000` | Checkpoint interval (training) |
@@ -961,10 +1024,41 @@ Handles process lifecycle, pre-kill, and optional dashboard. [(Flow 3B)](#3b--gh
 | `-PythonVersion` | string | `3.12` | Python version for uv |
 
 ```powershell
+# Training:
 .\scripts\run-ghost-stack.ps1 -Train                                   # Train on full corpus
 .\scripts\run-ghost-stack.ps1 -Train -WithDashboard                    # Train with live view
 .\scripts\run-ghost-stack.ps1 -Train -Datasets "quake3-arenas"         # Q3 maps only
-.\scripts\run-ghost-stack.ps1 -GmDagFile .\scene.gmdag                 # Inference on one scene
+# In-process inference:
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint .\model.pt            # Infer on full corpus
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint .\model.pt -Deterministic  # Deterministic
+.\scripts\run-ghost-stack.ps1 -Infer -Checkpoint .\model.pt -NoDashboard    # Headless
+# Legacy inference:
+.\scripts\run-ghost-stack.ps1 -GmDagFile .\scene.gmdag                 # 3-process inference
+```
+
+---
+
+#### `run-inference.ps1` -- In-Process Inference
+
+Standalone wrapper for in-process policy evaluation.
+Same parameters as ghost stack `-Infer` mode. [(Flow 6B)](#6b--standalone-inference-wrapper)
+
+**Wraps:** `uv run --project projects/actor brain infer`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Checkpoint` | string | (required) | Trained model checkpoint path |
+| `-Actors` | int | `4` | Parallel actor count |
+| `-Deterministic` | switch | | Use action mean instead of sampling |
+| `-TotalSteps` | int | `0` | Step limit (0 = unlimited) |
+| `-TotalEpisodes` | int | `0` | Episode limit (0 = unlimited) |
+| `-TemporalCore` | string | `mamba2` | Temporal backend |
+| `-Datasets` | string | `""` | Include only these datasets |
+| `-ExcludeDatasets` | string | `""` | Exclude datasets by name |
+
+```powershell
+.\scripts\run-inference.ps1 -Checkpoint .\artifacts\checkpoints\bc_base_model.pt
+.\scripts\run-inference.ps1 -Checkpoint .\model.pt -Deterministic -TotalSteps 10000
 ```
 
 ---
@@ -1121,7 +1215,7 @@ Download Q3 community maps, extract BSP geometry, compile to .gmdag.
 ### Service Scripts
 
 These launch individual ZMQ services for the 3-process inference stack.
-See [(Flow 6)](#flow-6--inference-3-process-stack) for the full startup sequence.
+See [(Flow 7)](#flow-7--legacy-inference-3-process-stack) for the full startup sequence.
 
 #### `run-environment.ps1` -- Environment Server
 
@@ -1166,7 +1260,7 @@ See [(Flow 6)](#flow-6--inference-3-process-stack) for the full startup sequence
 #### `run-dashboard.ps1` -- Passive Observation Dashboard
 
 Subscribes to actor PUB stream. Displays actor 0 observations in real time.
-Mode auto-detected (TRAINING / INFERENCE / OBSERVER). [(Flow 7)](#flow-7--live-dashboard)
+Mode auto-detected (TRAINING / INFERENCE / OBSERVER). [(Flow 8)](#flow-8--live-dashboard)
 
 **Wraps:** `uv run --project projects/auditor navi-auditor dashboard`
 
@@ -1637,13 +1731,41 @@ uv run --project projects\actor navi-actor profile [options]
 | `--azimuth-bins` | int | `256` | Observation azimuth resolution |
 | `--elevation-bins` | int | `48` | Observation elevation resolution |
 
+#### `infer` -- In-Process Policy Evaluation
+
+Evaluate a trained checkpoint with direct in-process CUDA stepping.
+Same backend as training (SdfDagBackend, tensor-native), but without PPO,
+rollout buffers, or episodic memory. [(Flow 6)](#flow-6--in-process-inference-canonical)
+
+```powershell
+uv run --project projects\actor navi-actor infer --checkpoint .\model.pt [options]
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--checkpoint` | string | (required) | Trained model checkpoint path |
+| `--actors` | int | `4` | Parallel actor count |
+| `--deterministic` | flag | | Use action mean instead of sampling |
+| `--total-steps` | int | `0` | Step limit (0 = unlimited) |
+| `--total-episodes` | int | `0` | Episode limit (0 = unlimited) |
+| `--temporal-core` | string | `mamba2` | Temporal backend |
+| `--gmdag-file` | string | | Single .gmdag file path |
+| `--gmdag-root` | string | | Custom .gmdag root |
+| `--corpus-root` | string | | Corpus root directory |
+| `--manifest` | string | | Corpus manifest path |
+| `--datasets` | string | | Include only these datasets |
+| `--exclude-datasets` | string | | Exclude datasets by name |
+| `--azimuth-bins` | int | `256` | Observation azimuth resolution |
+| `--elevation-bins` | int | `48` | Observation elevation resolution |
+
 #### `brain` -- Unified Entry Point
 
-Delegates to `train`, `serve`, or `profile` based on the mode argument:
+Delegates to `train`, `serve`, `infer`, or `profile` based on the mode argument:
 
 ```powershell
 uv run --project projects\actor brain train [options]      # -> navi-actor train
 uv run --project projects\actor brain serve [options]      # -> navi-actor serve
+uv run --project projects\actor brain infer [options]      # -> navi-actor infer
 uv run --project projects\actor brain bc-pretrain [options] # -> bc-pretrain
 uv run --project projects\actor brain profile [options]    # -> navi-actor profile
 ```
@@ -1911,6 +2033,7 @@ make bench-temporal  # Run temporal-core bake-off
 | [docs/COMPILER.md](docs/COMPILER.md) | Voxel-DAG compiler internals |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | Wire-format contract specification (v2) |
 | [docs/DATAFLOW.md](docs/DATAFLOW.md) | End-to-end data flow diagrams |
+| [docs/INFERENCE.md](docs/INFERENCE.md) | In-process inference: architecture, telemetry, CLI, scripts |
 | [docs/AUDITOR.md](docs/AUDITOR.md) | Dashboard, recording, replay, demonstration capture |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Throughput targets, profiling, bottleneck analysis |
 | [docs/RESOLUTION_BENCHMARKS.md](docs/RESOLUTION_BENCHMARKS.md) | Observation-resolution sweep results |

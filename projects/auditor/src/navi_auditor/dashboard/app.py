@@ -196,10 +196,10 @@ class GhostMatrixDashboard(QtWidgets.QMainWindow):
                     mode = f"MANUAL ● REC ({steps}/{self._max_steps} steps)"
                 else:
                     mode = f"MANUAL ● REC ({steps} steps)"
-        elif has_training_data:
-            mode = "TRAINING"
         elif has_inference_data:
             mode = "INFERENCE"
+        elif has_training_data:
+            mode = "TRAINING"
         else:
             mode = "OBSERVER"
         self._status_bar.set_mode(mode)

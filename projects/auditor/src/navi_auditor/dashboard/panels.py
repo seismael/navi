@@ -237,6 +237,7 @@ class StatusBar(QtWidgets.QFrame):
             "WAITING": "color: #666; font-weight: 700; font-size: 13px; padding: 2px 6px;",
             "MANUAL": "color: #f0ad4e; font-weight: 700; font-size: 13px; padding: 2px 6px; background: #332200;",
             "TRAINING": "color: #5bc0de; font-weight: 700; font-size: 13px; padding: 2px 6px; background: #002233;",
+            "INFERENCE": "color: #5cb85c; font-weight: 700; font-size: 13px; padding: 2px 6px; background: #003300;",
         }
         self._mode_label.setText(f"[ {mode} ]")
         self._mode_label.setStyleSheet(styles.get(mode, styles["OBSERVER"]))

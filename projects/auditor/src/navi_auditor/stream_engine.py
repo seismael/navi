@@ -163,7 +163,7 @@ class StreamState:
         default_factory=lambda: deque(maxlen=_RING_LEN),
     )
 
-    # Current scene name (updated by actor.training.ppo.scene events)
+    # Current scene name (updated by actor.scene events)
     current_scene_name: str = ""
 
     # Telemetry ring (raw events)
@@ -510,7 +510,7 @@ class StreamEngine:
                 if n > 0:
                     self._fleet_n_actors = n
 
-        elif et == "actor.training.ppo.scene" and len(p) >= 1:
+        elif et in ("actor.training.ppo.scene", "actor.scene") and len(p) >= 1:
             # Scene name encoded as char ordinals in float32 payload
             scene_name = "".join(chr(max(0, min(0x10FFFF, int(c)))) for c in p if int(c) > 0)
             state.current_scene_name = scene_name
@@ -519,6 +519,16 @@ class StreamEngine:
             state.env_perf_sps_history.append(float(p[0]))
             state.env_perf_batch_ms_history.append(float(p[3]))
             state.env_perf_actor_ms_history.append(float(p[4]))
+
+        elif et == "actor.inference.perf" and len(p) >= 4:
+            state.perf_sps_history.append(float(p[0]))
+            state.perf_forward_ms_history.append(float(p[1]))
+            state.perf_batch_step_ms_history.append(float(p[2]))
+            state.perf_tick_ms_history.append(float(p[3]))
+            if len(p) >= 5:
+                n = int(p[4])
+                if n > 0:
+                    self._fleet_n_actors = n
 
         elif et == "actor.inference.features":
             state.latest_features = np.asarray(p, dtype=np.float32)

@@ -1659,7 +1659,7 @@ class PpoTrainer:
             return
         payload = np.array([float(ord(c)) for c in scene_name], dtype=np.float32)
         event = TelemetryEvent(
-            event_type="actor.training.ppo.scene",
+            event_type="actor.scene",
             episode_id=0,
             env_id=0,
             step_id=step_id,

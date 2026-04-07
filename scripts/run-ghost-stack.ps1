@@ -1,13 +1,23 @@
 <# .SYNOPSIS
   Launch the full Navi Ghost-Matrix stack.
 
-    Two modes:
-        1. Inference (default)  — canonical sdfdag Environment + Actor + Dashboard as 3 processes.
-                2. Training  (-Train)   — canonical sdfdag train (in-process env+actor), with dashboard attach optional.
+    Three modes:
+        1. Legacy Inference (default) — canonical sdfdag Environment + Actor + Dashboard as 3 processes.
+        2. Training  (-Train)         — canonical sdfdag train (in-process env+actor), with dashboard attach optional.
+        3. Inference (-Infer)         — canonical sdfdag infer (in-process env+actor), with dashboard by default.
 
 .EXAMPLE
     # Inference on the canonical compiled runtime
     .\run-ghost-stack.ps1 -GmDagFile .\artifacts\gmdag\corpus\apartment_1.gmdag
+
+    # In-process inference with a trained checkpoint (dashboard by default)
+    .\run-ghost-stack.ps1 -Infer -Checkpoint ".\artifacts\runs\<run_id>\checkpoints\policy_step_0010000.pt"
+
+    # In-process inference on a specific dataset with deterministic actions
+    .\run-ghost-stack.ps1 -Infer -Checkpoint ".\artifacts\checkpoints\bc_base_model.pt" -Datasets "ai-habitat_ReplicaCAD_baked_lighting" -Deterministic
+
+    # In-process inference for 10000 steps without dashboard
+    .\run-ghost-stack.ps1 -Infer -Checkpoint ".\my_model.pt" -TotalSteps 10000 -NoDashboard
 
     # Canonical PPO training on the full discovered corpus without the dashboard
     .\run-ghost-stack.ps1 -Train
@@ -33,6 +43,7 @@
 param(
     # ── Mode ──
     [switch]$Train,
+    [switch]$Infer,
 
     # ── Common ──
     [int]$AzimuthBins = 256,
@@ -55,6 +66,8 @@ param(
     [string]$Datasets = "",
     [string]$ExcludeDatasets = "",
     [int]$TotalSteps = 0,
+    [int]$TotalEpisodes = 0,
+    [switch]$Deterministic,
     [int]$CheckpointEvery = 25000,
     [string]$CheckpointDir = "checkpoints",
     [string]$Checkpoint = "",
@@ -351,10 +364,11 @@ $observabilityModule = Join-Path $repoRoot "tools\Navi.Observability.psm1"
 Import-Module $observabilityModule -Force
 $cleanupStartedAt = Get-Date
 $cleanupSummary = Invoke-NaviGeneratedCleanup -RepoRoot $repoRoot
-$runProfile = if ($Train) { "ghost-stack-train" } else { "ghost-stack-inference" }
+$runProfile = if ($Train) { "ghost-stack-train" } elseif ($Infer) { "ghost-stack-infer" } else { "ghost-stack-inference" }
 $runContext = New-NaviRunContext -RepoRoot $repoRoot -Profile $runProfile -BaseRelativeRoot "artifacts\runs"
 Write-NaviRunManifest -RunContext $runContext -Metadata ([ordered]@{
     train = [bool]$Train
+    infer = [bool]$Infer
     actors = $Actors
     temporal_core = $TemporalCore
     actor_telemetry_port = $ActorTelemetryPort
@@ -369,8 +383,12 @@ if ($CheckpointDir -eq "checkpoints") {
     $CheckpointDir = $runContext.CheckpointRoot
 }
 
+if ($Train -and $Infer) {
+    throw "-Train and -Infer cannot be used together. Choose one mode."
+}
+
 $resolvedGmDagFile = ""
-if ($Train) {
+if ($Train -or $Infer) {
     Initialize-CudaEnvironment
     if (-not [string]::IsNullOrWhiteSpace($GmDagFile)) {
         $resolvedGmDagFile = (Resolve-Path $GmDagFile).Path
@@ -436,7 +454,7 @@ if ($Train) {
 
     if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
         if (-not [System.IO.Path]::IsPathRooted($Checkpoint)) {
-            $Checkpoint = Join-Path $repoRoot "projects\actor\$Checkpoint"
+            $Checkpoint = Join-Path $repoRoot $Checkpoint
         }
         if (-not (Test-Path $Checkpoint)) {
             throw "Checkpoint file not found: $Checkpoint"
@@ -630,7 +648,218 @@ if ($Train) {
 }
 
 # ═══════════════════════════════════════════════════════════════════
-# Inference mode: Environment + Actor + Dashboard as 3 processes
+# In-process inference: infer (in-process env+actor), dashboard by default
+# ═══════════════════════════════════════════════════════════════════
+if ($Infer) {
+    if ([string]::IsNullOrWhiteSpace($Checkpoint)) {
+        throw "-Infer requires -Checkpoint <path> to specify the trained model."
+    }
+
+    if ($NoDashboard -and $WithDashboard) {
+        throw "-NoDashboard and -WithDashboard cannot be used together."
+    }
+
+    # Dashboard enabled by default for inference (opposite of training)
+    $dashboardEnabled = (-not $NoDashboard) -or $WithDashboard
+
+    $resolvedScene = ""
+    if (-not [string]::IsNullOrWhiteSpace($Scene)) {
+        $resolvedScene = (Resolve-Path $Scene).Path
+    }
+
+    $resolvedManifest = ""
+    if (-not [string]::IsNullOrWhiteSpace($Manifest)) {
+        $resolvedManifest = (Resolve-Path $Manifest).Path
+    }
+
+    $resolvedCorpusRoot = ""
+    if (-not [string]::IsNullOrWhiteSpace($CorpusRoot)) {
+        $resolvedCorpusRoot = (Resolve-Path $CorpusRoot).Path
+    }
+
+    $resolvedGmDagRoot = ""
+    if (-not [string]::IsNullOrWhiteSpace($GmDagRoot)) {
+        $resolvedGmDagRoot = (Resolve-Path $GmDagRoot).Path
+    }
+
+    if (-not [System.IO.Path]::IsPathRooted($Checkpoint)) {
+        $Checkpoint = Join-Path $repoRoot $Checkpoint
+    }
+    if (-not (Test-Path $Checkpoint)) {
+        throw "Checkpoint file not found: $Checkpoint"
+    }
+
+    $inferArgs = @(
+        "run",
+        "--python", $PythonVersion,
+        "--project", (Join-Path $repoRoot "projects\actor"),
+        "python", "-m", "navi_actor.cli", "infer",
+        "--checkpoint", $Checkpoint,
+        "--actors", "$NumActors",
+        "--temporal-core", "$TemporalCore",
+        "--actor-pub", "tcp://localhost:$ActorTelemetryPort",
+        "--log-every", $LogEvery,
+        "--compile-resolution", $GmDagResolution,
+        "--azimuth-bins", "$AzimuthBins",
+        "--elevation-bins", "$ElevationBins"
+    )
+
+    if ($TotalSteps -gt 0) {
+        $inferArgs += @("--total-steps", $TotalSteps)
+    }
+    if ($TotalEpisodes -gt 0) {
+        $inferArgs += @("--total-episodes", $TotalEpisodes)
+    }
+    if ($Deterministic) {
+        $inferArgs += "--deterministic"
+    }
+
+    if (-not $dashboardEnabled) {
+        $inferArgs += "--no-emit-observation-stream"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedGmDagFile)) {
+        $inferArgs += @("--gmdag-file", $resolvedGmDagFile)
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($resolvedScene)) {
+        $inferArgs += @("--scene", $resolvedScene)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedManifest)) {
+        $inferArgs += @("--manifest", $resolvedManifest)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedCorpusRoot)) {
+        $inferArgs += @("--corpus-root", $resolvedCorpusRoot)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedGmDagRoot)) {
+        $inferArgs += @("--gmdag-root", $resolvedGmDagRoot)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Datasets)) {
+        $inferArgs += @("--datasets", $Datasets)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExcludeDatasets)) {
+        $inferArgs += @("--exclude-datasets", $ExcludeDatasets)
+    }
+
+    $inferLogOut = Join-Path $logsDir "infer.out.log"
+    $inferLogErr = Join-Path $logsDir "infer.err.log"
+    $inferUnifiedLog = Join-Path $repoRoot "logs\navi_actor_train.log"
+
+    $inferProc = $null
+    try {
+        Write-Host "========================================================"
+        Write-Host "  Navi Ghost-Matrix Inference (In-Process)"
+        Write-Host "  Backend    : sdfdag"
+        Write-Host "  Run ID     : $($runContext.RunId)"
+        Write-Host "  Run Root   : $($runContext.RunRoot)"
+        Write-Host "  Checkpoint : $Checkpoint"
+        Write-Host "  Corpus     : $(if ($resolvedGmDagFile) { $resolvedGmDagFile } elseif ($resolvedScene) { $resolvedScene } elseif ($resolvedManifest) { $resolvedManifest } elseif ($resolvedCorpusRoot) { $resolvedCorpusRoot } else { 'auto-discovered canonical corpus' })"
+        Write-Host "  Actors     : $NumActors"
+        Write-Host "  Deterministic: $Deterministic"
+        Write-Host "  Total Steps: $(if ($TotalSteps -le 0) { 'unlimited' } else { $TotalSteps })"
+        Write-Host "  Total Ep.  : $(if ($TotalEpisodes -le 0) { 'unlimited' } else { $TotalEpisodes })"
+        Write-Host "  Temporal   : $TemporalCore"
+        if (-not [string]::IsNullOrWhiteSpace($Datasets)) {
+            Write-Host "  Datasets   : $Datasets"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExcludeDatasets)) {
+            Write-Host "  Exclude DS : $ExcludeDatasets"
+        }
+        Write-Host "  Telemetry  : tcp://localhost:$ActorTelemetryPort"
+        Write-Host "  Dashboard  : $(if ($dashboardEnabled) { 'enabled (passive observer)' } else { 'disabled' })"
+        Write-Host "  Metrics    : $($runContext.MetricsRoot)"
+        Write-Host "========================================================"
+
+        Write-Host "`nStarting canonical inference (background)..."
+        $inferLaunchStartedAt = Get-Date
+        $inferProc = Start-BackgroundUv -RepoRoot $repoRoot -UvArgs $inferArgs -StdOutFile $inferLogOut -StdErrFile $inferLogErr
+        Write-NaviPhaseMetric -RunContext $runContext -Operation "infer_process_launch" -StartedAt $inferLaunchStartedAt -ProcessId $inferProc.Id -Metadata ([ordered]@{
+            dashboard_enabled = [bool]$dashboardEnabled
+            actors = $NumActors
+            temporal_core = $TemporalCore
+            deterministic = [bool]$Deterministic
+        }) | Out-Null
+        Write-Host "  PID: $($inferProc.Id)"
+        Write-Host "  Logs: $inferLogOut"
+        Write-Host "        $inferLogErr"
+        Write-Host "        $inferUnifiedLog"
+
+        Write-Host "Verifying inference telemetry readiness ($ActorTelemetryPort)..."
+        $inferReadyStartedAt = Get-Date
+        $inferReady = Wait-ForTrainingReady -Process $inferProc -Port $ActorTelemetryPort -LogFiles @($inferLogErr, $inferUnifiedLog) -TimeoutSeconds 180
+        Write-NaviPhaseMetric -RunContext $runContext -Operation "infer_process_ready" -StartedAt $inferReadyStartedAt -ProcessId $(if ($null -ne $inferProc) { $inferProc.Id } else { 0 }) -Metadata ([ordered]@{
+            ready = [bool]$inferReady.Ready
+            reason = [string]$inferReady.Reason
+            exit_code = if ($inferReady.ContainsKey('ExitCode')) { $inferReady.ExitCode } else { $null }
+            telemetry_port = $ActorTelemetryPort
+        }) | Out-Null
+        if (-not $inferReady.Ready) {
+            $reason = [string]$inferReady.Reason
+            if ($reason -eq "process-exited") {
+                Write-Host "ERROR: inference exited before telemetry became ready (exit code $($inferReady.ExitCode))."
+            }
+            else {
+                Write-Host "ERROR: inference telemetry failed readiness check ($ActorTelemetryPort, reason=$reason)."
+            }
+            Write-Host "Check logs: $inferLogErr"
+            Write-Host "            $inferUnifiedLog"
+            if ($null -ne $inferProc -and -not $inferProc.HasExited) {
+                Stop-ProcessTreeById -ProcessId $inferProc.Id
+            }
+            Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
+            exit 1
+        }
+        else {
+            Write-Host "  OK: inference telemetry is ready ($($inferReady.Reason))."
+        }
+
+        if ($dashboardEnabled) {
+            Write-Host "`nLaunching Dashboard (foreground, passive)..."
+            Write-Host "  ESC = quit"
+            & uv run --project (Join-Path $repoRoot "projects\auditor") `
+                --python $PythonVersion `
+                navi-auditor dashboard `
+                --actor-sub "tcp://localhost:$ActorTelemetryPort" `
+                --passive
+        }
+        else {
+            Write-Host "`nDashboard not launched."
+            Write-Host "  Tail logs: Get-Content '$inferUnifiedLog' -Wait"
+            Write-Host "  Telemetry: actor.inference.* on tcp://localhost:$ActorTelemetryPort"
+            Write-Host "  Stop:      Stop-Process -Id $($inferProc.Id) -Force"
+
+            $inferWaitStartedAt = Get-Date
+            Wait-Process -Id $inferProc.Id
+            $inferProc.Refresh()
+            $exitCode = if ($null -eq $inferProc.ExitCode) { 0 } else { [int]$inferProc.ExitCode }
+            Write-NaviPhaseMetric -RunContext $runContext -Operation "infer_process_exit" -StartedAt $inferWaitStartedAt -ProcessId $inferProc.Id -Metadata ([ordered]@{
+                exit_code = $exitCode
+                dashboard_enabled = $false
+            }) | Out-Null
+            if ($exitCode -ne 0) {
+                Write-Host "ERROR: inference exited with code $exitCode."
+                exit $exitCode
+            }
+            Write-Host "Inference completed successfully."
+        }
+    }
+    finally {
+        if ($null -ne $inferProc -and -not $inferProc.HasExited) {
+            Write-Host "`nStopping inference (PID $($inferProc.Id))..."
+            $inferStopStartedAt = Get-Date
+            Stop-ProcessTreeById -ProcessId $inferProc.Id
+            Write-NaviPhaseMetric -RunContext $runContext -Operation "infer_process_stop" -StartedAt $inferStopStartedAt -Metadata ([ordered]@{
+                process_id = $inferProc.Id
+            }) | Out-Null
+        }
+        Stop-ListenersOnPorts -Ports @($ActorTelemetryPort, 5559, 5560)
+    }
+    exit 0
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# Legacy inference mode: Environment + Actor + Dashboard as 3 processes
 # ═══════════════════════════════════════════════════════════════════
     $envArgs = @(
         "run",

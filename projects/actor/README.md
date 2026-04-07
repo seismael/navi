@@ -5,6 +5,7 @@ trainer, and policy checkpoint management.
 
 **Full specification:** [docs/ACTOR.md](../../docs/ACTOR.md)  
 **Training guide:** [docs/TRAINING.md](../../docs/TRAINING.md)  
+**Inference guide:** [docs/INFERENCE.md](../../docs/INFERENCE.md)  
 **Implementation policy:** [AGENTS.md](../../AGENTS.md)
 
 ---
@@ -81,6 +82,29 @@ Repository wrappers:
 ./scripts/train.ps1 -TemporalCore gru
 ./scripts/train-all-night.ps1
 ./scripts/run-ghost-stack.ps1 -Train -WithDashboard
+```
+
+### In-Process Inference
+
+Evaluate a trained checkpoint with direct in-process CUDA stepping (same
+backend as training, without PPO or rollout buffers):
+
+```bash
+# Full corpus inference with dashboard
+uv run navi-actor infer --checkpoint artifacts/checkpoints/bc_base_model.pt
+
+# Deterministic evaluation with step limit
+uv run navi-actor infer --checkpoint model.pt --deterministic --total-steps 10000
+
+# Via unified entry point
+uv run brain infer --checkpoint model.pt --actors 4
+```
+
+Repository wrappers:
+
+```powershell
+./scripts/run-ghost-stack.ps1 -Infer -Checkpoint .\model.pt
+./scripts/run-inference.ps1 -Checkpoint .\model.pt -Deterministic
 ```
 
 ### Behavioral Cloning Pre-Training

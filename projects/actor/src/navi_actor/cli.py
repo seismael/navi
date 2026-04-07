@@ -747,6 +747,191 @@ def profile(
     typer.echo("Profiling complete.")
 
 
+@app.command("infer")  # type: ignore[untyped-decorator]
+def infer(
+    checkpoint: str = typer.Option(..., help="Checkpoint path (.pt) — required for inference"),
+    scene: str = typer.Option("", help="Explicit scene name or path override"),
+    manifest: str = typer.Option("", help="Path to scene manifest JSON"),
+    corpus_root: str = typer.Option("", help="Root directory for canonical scene discovery"),
+    gmdag_root: str = typer.Option("", help="Root directory for compiled corpus outputs"),
+    gmdag_file: str = typer.Option("", help="Single compiled .gmdag cache"),
+    actors: int = typer.Option(4, help="Number of parallel environments"),
+    total_steps: int = typer.Option(0, help="Total environment steps (0 = continuous)"),
+    total_episodes: int = typer.Option(0, help="Total completed episodes (0 = unlimited)"),
+    min_scene_bytes: int = typer.Option(1000, help="Ignore small scene files"),
+    shuffle: bool = typer.Option(True, help="Shuffle scene pool"),
+    compile_resolution: int = typer.Option(512, help="Compiler voxel resolution"),
+    force_corpus_refresh: bool = typer.Option(False, help="Force recompile of corpus"),
+    temporal_core: str = typer.Option("", help="Temporal core: mamba2 (default), gru, mambapy."),
+    azimuth_bins: int = typer.Option(256, help="Azimuth resolution"),
+    elevation_bins: int = typer.Option(48, help="Elevation resolution"),
+    embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
+    deterministic: bool = typer.Option(False, help="Use action mean instead of sampling"),
+    log_every: int = typer.Option(100, help="Steps between log messages"),
+    emit_observation_stream: bool = typer.Option(
+        True, help="Publish live DistanceMatrix frames for the dashboard."
+    ),
+    dashboard_observation_hz: float = typer.Option(
+        10.0, min=1.0, help="Dashboard observation cadence in Hz."
+    ),
+    emit_perf_telemetry: bool = typer.Option(True, help="Emit performance telemetry."),
+    emit_internal_stats: bool | None = typer.Option(
+        None,
+        "--emit-internal-stats/--no-emit-internal-stats",
+        help="Write run-scoped machine-readable metrics.",
+    ),
+    attach_resource_snapshots: bool | None = typer.Option(
+        None,
+        "--attach-resource-snapshots/--no-attach-resource-snapshots",
+        help="Attach process/CUDA memory snapshots to metrics.",
+    ),
+    datasets: str = typer.Option(
+        "", help="Comma-separated dataset name filter. Empty = all datasets."
+    ),
+    exclude_datasets: str = typer.Option(
+        "", help="Comma-separated dataset names to exclude."
+    ),
+    actor_pub: str = typer.Option(None, help="Actor PUB bind address"),
+) -> None:
+    """Run inference on a trained checkpoint with direct in-process sdfdag stepping."""
+    setup_logging("navi_actor_infer")
+    run_context = get_or_create_run_context("actor-infer")
+
+    default_config = ActorConfig()
+    resolved_temporal_core = _resolve_temporal_core(temporal_core, default_config)
+
+    config = ActorConfig(
+        pub_address=actor_pub or default_config.pub_address,
+        mode="step",
+        temporal_core=resolved_temporal_core,
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+        n_actors=actors,
+        embedding_dim=embedding_dim,
+        emit_observation_stream=emit_observation_stream,
+        dashboard_observation_hz=dashboard_observation_hz,
+        emit_perf_telemetry=emit_perf_telemetry,
+        emit_internal_stats=(
+            default_config.emit_internal_stats if emit_internal_stats is None else emit_internal_stats
+        ),
+        attach_resource_snapshots=(
+            default_config.attach_resource_snapshots
+            if attach_resource_snapshots is None
+            else attach_resource_snapshots
+        ),
+    )
+
+    # Corpus resolution (reuse training corpus logic)
+    corpus = _load_training_scenes(
+        scene=scene,
+        manifest=manifest,
+        gmdag_file=gmdag_file,
+        corpus_root=corpus_root,
+        gmdag_root=gmdag_root,
+        compile_resolution=compile_resolution,
+        min_scene_bytes=min_scene_bytes,
+        force_corpus_refresh=force_corpus_refresh,
+    )
+    entries = list(corpus.scene_entries)
+    if datasets:
+        allowed = {d.strip() for d in datasets.split(",") if d.strip()}
+        entries = [e for e in entries if e.dataset in allowed]
+        if not entries:
+            typer.echo(f"No scenes matched --datasets filter: {datasets}", err=True)
+            raise typer.Exit(1)
+    if exclude_datasets:
+        excluded = {d.strip() for d in exclude_datasets.split(",") if d.strip()}
+        entries = [e for e in entries if e.dataset not in excluded]
+        if not entries:
+            typer.echo(f"All scenes excluded by --exclude-datasets: {exclude_datasets}", err=True)
+            raise typer.Exit(1)
+    scenes = [str(entry.compiled_path) for entry in entries]
+    _validate_sdfdag_training_scenes(scenes)
+
+    if shuffle:
+        _random.shuffle(scenes)
+
+    bootstrap_scene = _select_bootstrap_scene(scenes)
+    total_label = (
+        "continuous"
+        if total_steps <= 0 and total_episodes <= 0
+        else f"{total_steps} steps" if total_steps > 0 else f"{total_episodes} episodes"
+    )
+    typer.echo(
+        f"Scene pool: {len(scenes)} scenes, {actors} actors, "
+        f"{total_label}, deterministic={deterministic}, temporal={resolved_temporal_core}"
+    )
+    typer.echo(f"  Checkpoint: {checkpoint}")
+    typer.echo(f"  Run ID: {run_context.run_id}")
+
+    write_process_manifest(
+        "navi_actor_infer",
+        context=run_context,
+        metadata={
+            "command": "infer",
+            "actors": actors,
+            "temporal_core": config.temporal_core,
+            "scene_count": len(scenes),
+            "bootstrap_scene": bootstrap_scene,
+            "checkpoint": checkpoint,
+            "deterministic": deterministic,
+        },
+        file_name="navi_actor_infer.command.json",
+    )
+
+    _validate_bindable(config.pub_address, "Actor PUB")
+
+    from navi_actor.inference.runner import InferenceRunner
+    from navi_environment.backends.sdfdag_backend import SdfDagBackend
+    from navi_environment.config import EnvironmentConfig
+
+    env_config = EnvironmentConfig(
+        mode="step",
+        training_mode=False,
+        n_actors=config.n_actors,
+        backend="sdfdag",
+        gmdag_file=bootstrap_scene,
+        scene_pool=tuple(scenes),
+        azimuth_bins=config.azimuth_bins,
+        elevation_bins=config.elevation_bins,
+        max_distance=30.0,
+        compute_overhead=False,
+    )
+    runtime = SdfDagBackend(env_config)
+
+    runner = InferenceRunner(
+        config,
+        runtime=runtime,
+        gmdag_file=bootstrap_scene,
+        scene_pool=tuple(scenes),
+        deterministic=deterministic,
+    )
+
+    ckpt_path = Path(checkpoint)
+    if not ckpt_path.exists():
+        typer.echo(f"Checkpoint not found: {checkpoint}", err=True)
+        raise typer.Exit(1)
+    runner.load_checkpoint(checkpoint)
+
+    runner.start()
+    try:
+        metrics = runner.run(
+            total_steps=total_steps,
+            total_episodes=total_episodes,
+            log_every=log_every,
+        )
+    finally:
+        runner.stop()
+
+    typer.echo(
+        f"\nInference complete | {len(scenes)} scenes | "
+        f"steps={metrics.total_steps} episodes={metrics.total_episodes} "
+        f"mean_return={metrics.episode_return_mean:.3f} ± {metrics.episode_return_std:.3f} | "
+        f"mean_length={metrics.episode_length_mean:.0f} | "
+        f"sps={metrics.sps_mean:.1f}"
+    )
+
+
 @app.command("brain")  # type: ignore[untyped-decorator]
 def brain(
     ctx: click.Context,
@@ -806,6 +991,21 @@ def brain(
             audit_cmd.extend(["--gmdag-file", scene])
         typer.echo(f"Delegating to auditor: {' '.join(audit_cmd)}")
         subprocess.run(audit_cmd, check=True)  # noqa: S603
+    elif mode == "infer":
+        infer_args = [
+            "infer",
+            "--azimuth-bins",
+            str(azimuth_bins),
+            "--elevation-bins",
+            str(elevation_bins),
+            "--actors",
+            str(actors),
+        ]
+        if checkpoint:
+            infer_args.extend(["--checkpoint", checkpoint])
+        if scene:
+            infer_args.extend(["--gmdag-file", scene])
+        app(infer_args)
     elif mode == "profile":
         profile_args = [
             "profile",
@@ -926,6 +1126,11 @@ def bc_pretrain(
 def brain_main() -> None:
     """Entry point for the 'brain' console script."""
     app()
+
+
+def inference_main() -> None:
+    """Entry point for the 'inference' console script."""
+    app(["infer"])
 
 
 if __name__ == "__main__":
