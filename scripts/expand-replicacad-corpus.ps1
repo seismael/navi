@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-  Download and compile all available ReplicaCAD baked lighting scenes into the live corpus.
+  Download and compile all available ReplicaCAD dataset stage scenes into the live corpus.
 
 .DESCRIPTION
-  Incrementally adds new ReplicaCAD baked lighting scenes to the existing
+  Incrementally adds new ReplicaCAD dataset stage scenes to the existing
   corpus without disturbing other dataset folders. After compilation,
-  regenerates the corpus manifest to include all scenes.
+  each scene is quality-validated via qualify-gmdag. Regenerates the
+  corpus manifest to include all scenes.
 
 .PARAMETER ScenesLimit
     Maximum number of scenes to download. 0 = all available.
@@ -20,9 +21,9 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $corpusRoot = Join-Path $repoRoot "artifacts\gmdag\corpus"
-$datasetDir = Join-Path $corpusRoot "ai-habitat_ReplicaCAD_baked_lighting"
+$datasetDir = Join-Path $corpusRoot "ai-habitat_ReplicaCAD_dataset"
 $scratchDir = Join-Path $repoRoot "artifacts\tmp\replicacad-expand"
-$dsId = "ai-habitat/ReplicaCAD_baked_lighting"
+$dsId = "ai-habitat/ReplicaCAD_dataset"
 
 if (-not (Test-Path $datasetDir)) {
     New-Item -ItemType Directory -Path $datasetDir -Force | Out-Null
@@ -33,12 +34,12 @@ if (-not (Test-Path $scratchDir)) {
 
 # ── Discover available scenes on HuggingFace ──────────────────────
 
-Write-Host "Querying HuggingFace for available ReplicaCAD baked lighting scenes..."
+Write-Host "Querying HuggingFace for available ReplicaCAD dataset stages..."
 $hfUrl = "https://huggingface.co/api/datasets/$dsId/tree/main/stages"
 $items = Invoke-RestMethod -Uri $hfUrl -UseBasicParsing
 $glbPaths = $items | Where-Object { $_.path -like "*.glb" } | ForEach-Object { $_.path } | Sort-Object
 
-Write-Host "  Found $($glbPaths.Count) scenes on HuggingFace"
+Write-Host "  Found $($glbPaths.Count) stages on HuggingFace"
 
 if ($ScenesLimit -gt 0 -and $glbPaths.Count -gt $ScenesLimit) {
     $glbPaths = $glbPaths | Select-Object -First $ScenesLimit
@@ -69,7 +70,7 @@ if ($newPaths.Count -eq 0) {
 
 Write-Host ""
 Write-Host "========================================================"
-Write-Host "  ReplicaCAD Baked Lighting Corpus Expansion"
+Write-Host "  ReplicaCAD Dataset Corpus Expansion"
 Write-Host "  New scenes  : $($newPaths.Count)"
 Write-Host "  Resolution  : $Resolution"
 Write-Host "  Output      : $datasetDir"
@@ -121,6 +122,30 @@ foreach ($hfPath in $newPaths) {
 
     # Cleanup source
     Remove-Item $tempGlb -Force
+
+    # Quality gate via real CUDA ray casting
+    Write-Host "  Qualifying observation quality..."
+    $qualifyArgs = @(
+        "run",
+        "--python", $PythonVersion,
+        "--project", (Join-Path $repoRoot "projects\environment"),
+        "navi-environment", "qualify-gmdag",
+        "--gmdag-file", $outputGmdag,
+        "--json"
+    )
+    $qualifyJson = & uv @qualifyArgs 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $qualifyObj = $qualifyJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $verdict = if ($qualifyObj) { $qualifyObj.verdict } else { "ERROR" }
+        Write-Warning "  Quality gate FAILED ($verdict) for $sceneName. Removing."
+        Remove-Item $outputGmdag -Force -ErrorAction SilentlyContinue
+        $failed++
+        continue
+    }
+    $qualifyObj = $qualifyJson | ConvertFrom-Json
+    $verdict = $qualifyObj.verdict
+    Write-Host "  Quality: $verdict (viable=$($qualifyObj.viable_candidates)/$($qualifyObj.total_candidates), starvation=$([math]::Round($qualifyObj.best_starvation * 100, 1))%)"
+
     $compiled++
     $gmdagSize = [math]::Round((Get-Item $outputGmdag).Length / 1MB, 1)
     Write-Host "  Done: ${gmdagSize} MB .gmdag"

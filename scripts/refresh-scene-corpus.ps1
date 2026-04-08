@@ -14,7 +14,6 @@
 
   Target datasets (10 scenes each):
     - ai-habitat/ReplicaCAD_dataset
-    - ai-habitat/ReplicaCAD_baked_lighting
     - ai-habitat/habitat_test_scenes
 
 .PARAMETER Datasets
@@ -26,7 +25,7 @@
 #>
 param(
     [string]$DataDir = "",
-    [string]$Datasets = "ai-habitat/ReplicaCAD_dataset,ai-habitat/ReplicaCAD_baked_lighting,ai-habitat/habitat_test_scenes",
+    [string]$Datasets = "ai-habitat/ReplicaCAD_dataset,ai-habitat/habitat_test_scenes",
     [int]$ScenesPerDataset = 10,
     [string]$CorpusRoot = "",
     [string]$GmDagRoot = "",
@@ -175,7 +174,6 @@ try {
         # 1. Determine the root path for scenes in this dataset
         $searchRoot = ""
         if ($dsId -eq "ai-habitat/ReplicaCAD_dataset") { $searchRoot = "stages" }
-        elseif ($dsId -eq "ai-habitat/ReplicaCAD_baked_lighting") { $searchRoot = "stages" }
         elseif ($dsId -eq "ai-habitat/habitat_test_scenes") { $searchRoot = "" }
         
         # 2. Find GLB files
@@ -221,6 +219,27 @@ try {
             # C. Cleanup Source GLB
             Write-Host "    Cleaning up source GLB..."
             Remove-Item $tempGlb -Force
+
+            # D. Quality gate via CUDA ray casting
+            Write-Host "    Running observation quality check..."
+            $qualifyArgs = @(
+                "run",
+                "--python", $PythonVersion,
+                "--project", (Join-Path $repoRoot "projects\environment"),
+                "navi-environment", "qualify-gmdag",
+                "--gmdag-file", $outputGmdag,
+                "--json"
+            )
+            $qualifyJson = & uv @qualifyArgs 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                $qualifyObj = $qualifyJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+                $verdict = if ($qualifyObj) { $qualifyObj.verdict } else { "ERROR" }
+                Write-Warning "    Quality gate FAILED ($verdict) for $sceneName. Removing."
+                Remove-Item $outputGmdag -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            $qualifyObj = $qualifyJson | ConvertFrom-Json
+            Write-Host "    Quality: $($qualifyObj.verdict) (viable=$($qualifyObj.viable_candidates)/$($qualifyObj.total_candidates))"
         }
     }
 

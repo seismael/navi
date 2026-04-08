@@ -16,7 +16,11 @@ from navi_environment.integration.corpus import (
     prepare_training_scene_corpus,
     validate_compiled_scene_corpus,
 )
-from navi_environment.integration.voxel_dag import compile_gmdag_world, probe_sdfdag_runtime
+from navi_environment.integration.voxel_dag import (
+    compile_gmdag_world,
+    load_gmdag_asset,
+    probe_sdfdag_runtime,
+)
 from navi_environment.server import EnvironmentServer
 
 if TYPE_CHECKING:
@@ -473,6 +477,197 @@ def check_sdfdag(
     if issues:
         for issue in issues:
             typer.echo(f"issue={issue}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command("qualify-gmdag")
+def qualify_gmdag(
+    gmdag_file: str = typer.Option(..., help="Path to compiled .gmdag world cache"),
+    max_distance: float = typer.Option(30.0, help="Maximum ray distance for observation"),
+    sdf_max_steps: int = typer.Option(128, help="Maximum sphere-tracing iterations per ray"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit a JSON quality summary instead of text"
+    ),
+) -> None:
+    """Evaluate observation quality of a .gmdag scene via real CUDA ray casting."""
+    import math
+
+    import numpy as np
+
+    setup_logging("navi_environment_qualify_gmdag")
+
+    # --- constants matching sdfdag_backend spawn probing ---
+    spawn_candidates_per_axis = 5
+    spawn_height_samples = 7
+    probe_azimuth_bins = 48
+    probe_elevation_bins = 12
+    spawn_max_starvation = 0.70
+    proximity_distance_threshold = 2.0
+    structure_band_min_distance = 1.5
+    structure_band_max_distance_default = 30.0
+
+    from navi_environment.backends.sdfdag_backend import (
+        _observation_profile,
+        _spawn_candidate_score,
+        build_spherical_ray_directions,
+    )
+
+    asset = load_gmdag_asset(Path(gmdag_file))
+    bmin = np.array(asset.bbox_min, dtype=np.float32)
+    bmax = np.array(asset.bbox_max, dtype=np.float32)
+    extent = bmax - bmin
+
+    # Scene-adaptive structure band from characteristic length
+    char_len = float((extent[0] * extent[1] * extent[2]) ** (1.0 / 3.0))
+    structure_band_max_distance = min(
+        max(char_len * 0.6, structure_band_min_distance + 1.0),
+        structure_band_max_distance_default,
+    )
+
+    # Build candidate grid (20% AABB inset)
+    x_values = np.linspace(
+        bmin[0] + 0.2 * extent[0], bmax[0] - 0.2 * extent[0],
+        spawn_candidates_per_axis, dtype=np.float32,
+    )
+    z_values = np.linspace(
+        bmin[2] + 0.2 * extent[2], bmax[2] - 0.2 * extent[2],
+        spawn_candidates_per_axis, dtype=np.float32,
+    )
+    y_values = np.linspace(
+        bmin[1] + 0.2 * extent[1], bmax[1] - 0.2 * extent[1],
+        spawn_height_samples, dtype=np.float32,
+    )
+    candidates = np.array(
+        [[x, y, z] for x in x_values for y in y_values for z in z_values],
+        dtype=np.float32,
+    )
+    total_candidates = int(candidates.shape[0])
+
+    # Build probe ray directions
+    probe_dirs = build_spherical_ray_directions(probe_azimuth_bins, probe_elevation_bins)
+    probe_ray_count = int(probe_dirs.shape[0])
+
+    # Set up CUDA tensors
+    import torch
+    import torch_sdf
+
+    if not torch.cuda.is_available():
+        typer.echo("Error: CUDA not available. qualify-gmdag requires CUDA.", err=True)
+        raise typer.Exit(code=1)
+
+    device = torch.device("cuda")
+    dag_tensor = torch.from_numpy(asset.nodes.view(np.int64)).to(device, dtype=torch.int64)
+    bbox_min_list = list(asset.bbox_min)
+    bbox_max_list = list(asset.bbox_max)
+
+    origins = torch.from_numpy(
+        np.repeat(candidates[:, None, :], probe_ray_count, axis=1)
+    ).to(device)
+    dirs = torch.from_numpy(
+        np.repeat(probe_dirs[None, :, :], total_candidates, axis=0)
+    ).to(device)
+    out_distances = torch.empty(
+        (total_candidates, probe_ray_count), device=device, dtype=torch.float32,
+    )
+    out_semantics = torch.empty(
+        (total_candidates, probe_ray_count), device=device, dtype=torch.int32,
+    )
+
+    # Cast rays
+    torch_sdf.cast_rays(
+        dag_tensor, origins, dirs, out_distances, out_semantics,
+        sdf_max_steps, max_distance, bbox_min_list, bbox_max_list, asset.resolution,
+    )
+
+    # Score candidates on CPU
+    metric_distances = out_distances.detach().cpu().numpy().astype(np.float32, copy=False)
+    metric_distances = metric_distances.reshape(
+        total_candidates, probe_azimuth_bins, probe_elevation_bins,
+    )
+    valid = np.isfinite(metric_distances)
+    clamped = np.clip(metric_distances, 0.0, max_distance)
+
+    scored: list[tuple[float, float, float, float]] = []  # score, starvation, structure, proximity
+    for idx in range(total_candidates):
+        metric_2d = clamped[idx]
+        valid_2d = valid[idx]
+        starv, prox, struct, fwd = _observation_profile(
+            metric_2d, valid_2d,
+            max_distance=max_distance,
+            proximity_distance_threshold=proximity_distance_threshold,
+            structure_band_min_distance=structure_band_min_distance,
+            structure_band_max_distance=structure_band_max_distance,
+        )
+        score = _spawn_candidate_score(
+            metric_2d, valid_2d,
+            max_distance=max_distance,
+            proximity_distance_threshold=proximity_distance_threshold,
+            structure_band_min_distance=structure_band_min_distance,
+            structure_band_max_distance=structure_band_max_distance,
+        )
+        scored.append((score, starv, struct, prox))
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+
+    starvations = [s[1] for s in scored]
+    best_starvation = min(starvations)
+    worst_starvation = max(starvations)
+    median_starvation = float(sorted(starvations)[len(starvations) // 2])
+    best_score = scored[0][0]
+    best_structure = scored[0][2]
+
+    viable = [s for s in scored if s[1] < spawn_max_starvation]
+    viable_count = len(viable)
+
+    # Verdict
+    if viable_count >= 4 and best_starvation < 0.50:
+        verdict = "PASS"
+    elif viable_count == 0 or best_starvation >= 0.70:
+        verdict = "FAIL"
+    else:
+        verdict = "MARGINAL"
+
+    ok = verdict != "FAIL"
+
+    summary = {
+        "profile": "qualify-gmdag",
+        "gmdag_file": str(Path(gmdag_file).expanduser().resolve()),
+        "resolution": asset.resolution,
+        "bbox_min": list(asset.bbox_min),
+        "bbox_max": list(asset.bbox_max),
+        "characteristic_length": round(char_len, 2),
+        "structure_band_max_distance": round(structure_band_max_distance, 2),
+        "max_distance": max_distance,
+        "total_candidates": total_candidates,
+        "viable_candidates": viable_count,
+        "best_score": round(best_score, 4),
+        "best_structure_band": round(best_structure, 4),
+        "best_starvation": round(best_starvation, 4),
+        "worst_starvation": round(worst_starvation, 4),
+        "median_starvation": round(median_starvation, 4),
+        "verdict": verdict,
+        "ok": ok,
+    }
+
+    if json_output:
+        typer.echo(json.dumps(summary, indent=2))
+        if not ok:
+            raise typer.Exit(code=1)
+        return
+
+    typer.echo(
+        f"qualify-gmdag - "
+        f"verdict={verdict}, "
+        f"viable={viable_count}/{total_candidates}, "
+        f"best_score={best_score:.3f}, "
+        f"best_starvation={best_starvation:.1%}, "
+        f"median_starvation={median_starvation:.1%}, "
+        f"worst_starvation={worst_starvation:.1%}, "
+        f"structure_band_max={structure_band_max_distance:.1f}m, "
+        f"char_len={char_len:.1f}m"
+    )
+    if not ok:
+        typer.echo(f"FAIL: scene does not meet observation quality gate", err=True)
         raise typer.Exit(code=1)
 
 
