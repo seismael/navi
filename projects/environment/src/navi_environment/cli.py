@@ -488,10 +488,11 @@ def qualify_gmdag(
     json_output: bool = typer.Option(
         False, "--json", help="Emit a JSON quality summary instead of text"
     ),
+    detailed: bool = typer.Option(
+        False, "--detailed", help="Print per-candidate quality breakdown"
+    ),
 ) -> None:
     """Evaluate observation quality of a .gmdag scene via real CUDA ray casting."""
-    import math
-
     import numpy as np
 
     setup_logging("navi_environment_qualify_gmdag")
@@ -587,11 +588,11 @@ def qualify_gmdag(
     valid = np.isfinite(metric_distances)
     clamped = np.clip(metric_distances, 0.0, max_distance)
 
-    scored: list[tuple[float, float, float, float]] = []  # score, starvation, structure, proximity
+    scored: list[tuple[float, float, float, float, int]] = []  # score, starvation, structure, proximity, idx
     for idx in range(total_candidates):
         metric_2d = clamped[idx]
         valid_2d = valid[idx]
-        starv, prox, struct, fwd = _observation_profile(
+        starv, prox, struct, _fwd = _observation_profile(
             metric_2d, valid_2d,
             max_distance=max_distance,
             proximity_distance_threshold=proximity_distance_threshold,
@@ -605,7 +606,7 @@ def qualify_gmdag(
             structure_band_min_distance=structure_band_min_distance,
             structure_band_max_distance=structure_band_max_distance,
         )
-        scored.append((score, starv, struct, prox))
+        scored.append((score, starv, struct, prox, idx))
 
     scored.sort(key=lambda t: t[0], reverse=True)
 
@@ -650,10 +651,50 @@ def qualify_gmdag(
     }
 
     if json_output:
+        if detailed:
+            candidate_details = []
+            for score, starv, struct, prox, cidx in scored:
+                pos = candidates[cidx]
+                candidate_details.append({
+                    "position": [round(float(pos[0]), 2), round(float(pos[1]), 2), round(float(pos[2]), 2)],
+                    "score": round(score, 4),
+                    "starvation": round(starv, 4),
+                    "structure_band": round(struct, 4),
+                    "proximity": round(prox, 4),
+                    "viable": starv < spawn_max_starvation,
+                })
+            summary["candidates"] = candidate_details
         typer.echo(json.dumps(summary, indent=2))
         if not ok:
             raise typer.Exit(code=1)
         return
+
+    if detailed:
+        typer.echo(
+            f"\n{'#':>3}  {'Score':>7}  {'Starv%':>6}  {'Struct%':>7}  {'Prox%':>6}  "
+            f"{'Viable':>6}  Position"
+        )
+        typer.echo("-" * 78)
+        for rank, (score, starv, struct, prox, cidx) in enumerate(scored, 1):
+            pos = candidates[cidx]
+            viable_flag = "YES" if starv < spawn_max_starvation else "no"
+            typer.echo(
+                f"{rank:3d}  {score:7.3f}  {starv:5.1%}  {struct:6.1%}  {prox:5.1%}  "
+                f"{viable_flag:>6}  ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f})"
+            )
+        # Starvation distribution histogram
+        bins = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01]
+        hist_counts = [0] * (len(bins) - 1)
+        for s in starvations:
+            for bi in range(len(bins) - 1):
+                if bins[bi] <= s < bins[bi + 1]:
+                    hist_counts[bi] += 1
+                    break
+        typer.echo("\nStarvation distribution:")
+        for bi in range(len(bins) - 1):
+            bar = "#" * hist_counts[bi]
+            typer.echo(f"  {bins[bi]:4.0%}-{bins[bi+1]:4.0%}: {hist_counts[bi]:3d} {bar}")
+        typer.echo("")
 
     typer.echo(
         f"qualify-gmdag - "
@@ -667,7 +708,7 @@ def qualify_gmdag(
         f"char_len={char_len:.1f}m"
     )
     if not ok:
-        typer.echo(f"FAIL: scene does not meet observation quality gate", err=True)
+        typer.echo("FAIL: scene does not meet observation quality gate", err=True)
         raise typer.Exit(code=1)
 
 

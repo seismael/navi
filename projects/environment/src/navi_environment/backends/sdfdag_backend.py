@@ -1891,7 +1891,8 @@ class SdfDagBackend(SimulatorBackend):
         return self._current_scene_name
 
     def _load_scene(self, scene_path: str) -> list[tuple[float, float, float]]:
-        self._current_scene_name = Path(scene_path).stem
+        p = Path(scene_path)
+        self._current_scene_name = f"{p.parent.name}/{p.stem}"
         asset = load_gmdag_asset(Path(scene_path), validate_layout=False)
         dag_tensor = self._torch.from_numpy(asset.nodes.view(np.int64)).to(
             device=self._device,

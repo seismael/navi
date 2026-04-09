@@ -43,10 +43,10 @@ FWD_FOV_DEG: float = 180.0
 # ── Adjustable logarithmic colour focus ──────────────────────────────
 # Maps [0, ∞) → [0, 1) via  t = log1p(d) / (log1p(d) + C).
 # ``focus_m`` controls where 50 % of the colour spectrum is allocated:
-#   focus_m = 10  ->  half the spectrum covers 0-10 m (near-field detail)
+#   focus_m = 20  ->  half the spectrum covers 0-20 m (navigation detail)
 #   focus_m = 30  ->  half the spectrum covers 0-30 m (wider view)
 # Lower values allocate more colour diversity to close-range structure.
-_DEFAULT_FOCUS_M: float = 10.0
+_DEFAULT_FOCUS_M: float = 20.0
 
 # ── High-resolution continuous LUT ───────────────────────────────────
 # 1024-bin pre-computed palette eliminates per-frame np.interp overhead.
@@ -56,30 +56,33 @@ _LUT_SIZE: int = 1024
 _LUT_MAX_IDX: int = _LUT_SIZE - 1
 
 # Palette control anchors — fixed metric distances and their BGR colours.
-# Threat-graded spectrum with gradual transitions and extended far-range:
-# RED (collision) → ORANGE → GOLD → YELLOW-GREEN → GREEN → TEAL →
-# STEEL BLUE → MEDIUM BLUE → DARK BLUE → escalating GRAY to horizon.
+# 3-band atmospheric perspective: GREEN → BLUE → GRAY.
+# Each band desaturates (washes out) as distance grows, giving a continuous
+# vanishing effect: vivid near-field fades into pale mid-range, then muted void.
 _PALETTE_METER_ANCHORS: tuple[float, ...] = (
-    0.0, 0.1, 0.3, 0.7, 1.5, 3.0, 6.0, 12.0, 25.0, 35.0,
-    50.0, 75.0, 100.0, 150.0, 300.0,
+    0.0, 0.15, 0.5, 1.2, 2.5, 5.0, 10.0, 18.0, 30.0, 45.0,
+    65.0, 90.0, 130.0, 250.0, 500.0,
 )
 _PALETTE_BGR: tuple[tuple[float, float, float], ...] = (
-    (30.0, 30.0, 255.0),    # bright red         (collision / contact)
-    (25.0, 90.0, 255.0),    # red-orange         (danger proximity)
-    (30.0, 155.0, 255.0),   # orange             (close warning)
-    (40.0, 210.0, 245.0),   # gold / amber       (near-field)
-    (50.0, 230.0, 190.0),   # yellow-green       (transition to safe)
-    (65.0, 215.0, 90.0),    # fresh green        (comfortable navigation)
-    (150.0, 200.0, 45.0),   # teal               (mid-range structure)
-    (210.0, 155.0, 50.0),   # steel blue         (away structure)
-    (195.0, 105.0, 55.0),   # medium blue        (far structure)
-    (170.0, 88.0, 55.0),    # dark steel blue    (far transition)
-    (145.0, 72.0, 55.0),    # dark blue          (deep far)
-    (118.0, 64.0, 56.0),    # blue-gray          (very far)
-    (95.0, 58.0, 56.0),     # medium gray        (distant)
-    (72.0, 52.0, 50.0),     # dark gray          (receding)
-    (56.0, 48.0, 48.0),     # dim gray           (fading horizon)
-    (42.0, 40.0, 40.0),     # faint dark gray    (void / infinity)
+    # -- GREEN band (0-5 m): yellow-green, vivid -> faint pale green --
+    (12.0, 235.0, 110.0),   # bright yellow-green (contact / very near)
+    (20.0, 225.0, 85.0),    # warm green          (close proximity)
+    (40.0, 210.0, 62.0),    # medium green        (close warning)
+    (72.0, 195.0, 58.0),    # fading green        (near-field, paler)
+    (110.0, 178.0, 55.0),   # pale teal-green     (comfortable, washed)
+    # -- BLUE band (5-45 m): teal-blue, vivid -> pale washed blue --
+    (152.0, 155.0, 48.0),   # teal                (green-to-blue transition)
+    (185.0, 128.0, 42.0),   # medium blue         (mid-range peak)
+    (180.0, 120.0, 65.0),   # soft blue           (fading)
+    (165.0, 125.0, 90.0),   # pale blue           (washed out)
+    (148.0, 128.0, 108.0),  # very pale blue      (almost gray)
+    # -- GRAY band (65 m - inf): blue-gray -> dim -> near-black --
+    (128.0, 120.0, 112.0),  # blue-gray           (far transition)
+    (105.0, 100.0, 96.0),   # medium gray         (receding)
+    (85.0, 82.0, 80.0),     # dark gray           (distant)
+    (62.0, 60.0, 58.0),     # dim gray            (fading horizon)
+    (46.0, 44.0, 43.0),     # very dim gray       (deep horizon)
+    (35.0, 34.0, 33.0),     # near-black          (void / infinity)
 )
 
 # ── Missing-data tile pattern ────────────────────────────────────────
@@ -610,8 +613,8 @@ def _draw_lidar_colorbar(
 
     # Distance labels placed at their log-scale bar positions
     label_specs: list[tuple[float, str]] = [
-        (0.0, "0m"), (1.0, "1m"), (3.0, "3m"),
-        (10.0, "10m"), (30.0, "30m"),
+        (0.0, "0m"), (1.0, "1m"), (5.0, "5m"),
+        (20.0, "20m"), (60.0, "60m"),
     ]
     for dist_m, label in label_specs:
         frac = _log_color_t(dist_m)
@@ -799,9 +802,9 @@ def render_forward_polar(
     # ── Range rings with metric labels (unbounded log scale) ──────
     ring_specs = [
         (1.0, "1m"),
-        (3.0, "3m"),
-        (10.0, "10m"),
-        (30.0, "30m"),
+        (5.0, "5m"),
+        (20.0, "20m"),
+        (60.0, "60m"),
     ]
     for ring_m, ring_label in ring_specs:
         rr = int(max_r * _log_color_t(ring_m))

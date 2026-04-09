@@ -32,15 +32,17 @@ class TestDepthToObserverPalette:
         assert result.shape == (16, 8, 3)
         assert result.dtype == np.uint8
 
-    def test_near_bins_are_warmer_than_far_bins(self) -> None:
-        depth = np.linspace(0.0, 1.0, 8, dtype=np.float32).reshape(1, 8)
+    def test_near_bins_are_greener_than_far_bins(self) -> None:
+        depth = np.linspace(0.0, 50.0, 8, dtype=np.float32).reshape(1, 8)
         valid = np.ones((1, 8), dtype=bool)
         result = depth_to_observer_palette(depth, valid)
-        near = result[0, 0].astype(np.int32)
+        near = result[0, 0].astype(np.int32)  # BGR
         far = result[0, -1].astype(np.int32)
 
-        assert near[2] > near[0]
-        assert far[0] > far[2]
+        # Near: green-dominant (G >> B, G >> R)
+        assert near[1] > near[0] and near[1] > near[2]
+        # Far: desaturated gray (B > R, channels close together)
+        assert far[0] >= far[2]
 
     def test_midrange_bins_stay_more_muted_than_collision_red(self) -> None:
         depth = np.linspace(0.0, 1.0, 9, dtype=np.float32).reshape(1, 9)
@@ -288,10 +290,10 @@ class TestComputeNavMetrics:
 class TestDistanceColor:
     """Tests for distance-to-colour mapping."""
 
-    def test_close_is_warm(self) -> None:
-        b, _g, r = distance_color(0.3)
-        # Near distance should be warm (high R relative to B)
-        assert r > b
+    def test_close_is_green(self) -> None:
+        b, g, r = distance_color(0.3)
+        # Near distance should be green-dominant
+        assert g > b and g > r
 
     def test_far_is_cool(self) -> None:
         b, _g, r = distance_color(15.0)

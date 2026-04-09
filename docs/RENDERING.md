@@ -11,10 +11,10 @@ regardless of the viewing mode.
 
 | Goal | How It Is Achieved |
 |------|--------------------|
-| **Threat-graded readability** | Collision-red near field transitions through warm → cool → gray so operators read distance intuitively. |
+| **3-band readability** | Green (near) → Blue (mid) → Gray (far) gives instant depth intuition with minimal visual clutter. |
 | **Unbounded range** | Logarithmic scale maps `[0, ∞)` → `[0, 1)` — no hard far-clipping distance. |
-| **Near-field priority** | 50 % of the colour spectrum covers 0–10 m (configurable via `focus_m`). |
-| **Far-field differentiation** | Six distinct gray shades between 25 m and ∞ keep far structure visible. |
+| **Near-field priority** | 50 % of the colour spectrum covers 0–20 m (configurable via `focus_m`). |
+| **Far-field differentiation** | Graduated gray shades from 65 m to ∞ keep far structure visible without clutter. |
 | **Missing-data clarity** | Invalid/unsampled bins get a purple checkerboard tile pattern — impossible to confuse with any distance colour. |
 | **Single source of truth** | One palette definition in `renderers.py` feeds all 10+ consumer surfaces. |
 
@@ -30,8 +30,8 @@ $$
 t = \frac{\ln(1 + d)}{\ln(1 + d) + C}, \quad C = \ln(1 + \text{focus\_m})
 $$
 
-The `focus_m` parameter (default **10.0**) controls where 50 % of the
-colour spectrum is allocated.  With the default: $C = \ln(11) \approx 2.398$.
+The `focus_m` parameter (default **20.0**) controls where 50 % of the
+colour spectrum is allocated.  With the default: $C = \ln(21) \approx 3.045$.
 
 Properties:
 - `t(0) = 0` — contact / collision.
@@ -40,7 +40,7 @@ Properties:
 
 Tuning guide:
 - `focus_m = 5`  — maximises near-field colour detail (indoor micro-nav).
-- `focus_m = 10` — default; balanced near-field and room-scale visibility.
+- `focus_m = 20` — default; balanced near-field and room-scale visibility.
 - `focus_m = 30` — wider view, more colour allocated to mid-range.
 
 ### 2.2  Environment Wire Format
@@ -63,52 +63,54 @@ log mapping above.
 Each anchor is a fixed metric distance with a hand-tuned BGR colour.
 Between anchors, colours are pre-interpolated into a 1024-bin continuous
 LUT at module load time.  All `t`-values below use the default
-`focus_m = 10`.
+`focus_m = 20`.
 
 | # | Distance | Colour Name | BGR | `t` | Spectrum % | LUT Index |
 |--:|:---------|:------------|:----|----:|----------:|----------:|
-| 0 | **0.0 m** | Bright Red | `(30, 30, 255)` | 0.000 | 0.0 % | 0 |
-| 1 | **0.1 m** | Red-Orange | `(25, 90, 255)` | 0.038 | 3.8 % | 39 |
-| 2 | **0.3 m** | Orange | `(30, 155, 255)` | 0.099 | 9.9 % | 101 |
-| 3 | **0.7 m** | Gold / Amber | `(40, 210, 245)` | 0.181 | 18.1 % | 185 |
-| 4 | **1.5 m** | Yellow-Green | `(50, 230, 190)` | 0.276 | 27.6 % | 283 |
-| 5 | **3.0 m** | Fresh Green | `(65, 215, 90)` | 0.366 | 36.6 % | 375 |
-| 6 | **6.0 m** | Teal | `(150, 200, 45)` | 0.448 | 44.8 % | 458 |
-| 7 | **12.0 m** | Steel Blue | `(210, 155, 50)` | 0.517 | 51.7 % | 529 |
-| 8 | **25.0 m** | Medium Blue | `(195, 105, 55)` | 0.576 | 57.6 % | 589 |
-| 9 | **35.0 m** | Dark Steel Blue | `(170, 88, 55)` | 0.599 | 59.9 % | 613 |
-| 10 | **50.0 m** | Dark Blue | `(145, 72, 55)` | 0.621 | 62.1 % | 635 |
-| 11 | **75.0 m** | Blue-Gray | `(118, 64, 56)` | 0.644 | 64.4 % | 658 |
-| 12 | **100.0 m** | Medium Gray | `(95, 58, 56)` | 0.658 | 65.8 % | 673 |
-| 13 | **150.0 m** | Dark Gray | `(72, 52, 50)` | 0.677 | 67.7 % | 692 |
-| 14 | **300.0 m** | Dim Gray | `(56, 48, 48)` | 0.704 | 70.4 % | 720 |
-| 15 | **inf** | Faint Dark Gray | `(42, 40, 40)` | 1.000 | 100.0 % | 1023 |
+| 0 | **0.0 m** | Bright Yellow-Green | `(12, 235, 110)` | 0.000 | 0.0 % | 0 |
+| 1 | **0.15 m** | Warm Green | `(20, 225, 85)` | 0.044 | 4.4 % | 44 |
+| 2 | **0.5 m** | Medium Green | `(40, 210, 62)` | 0.118 | 11.8 % | 120 |
+| 3 | **1.2 m** | Fading Green | `(72, 195, 58)` | 0.206 | 20.6 % | 210 |
+| 4 | **2.5 m** | Pale Teal-Green | `(110, 178, 55)` | 0.292 | 29.2 % | 298 |
+| 5 | **5.0 m** | Teal | `(152, 155, 48)` | 0.370 | 37.0 % | 379 |
+| 6 | **10.0 m** | Medium Blue | `(185, 128, 42)` | 0.441 | 44.1 % | 450 |
+| 7 | **18.0 m** | Soft Blue | `(180, 120, 65)` | 0.492 | 49.2 % | 502 |
+| 8 | **30.0 m** | Pale Blue | `(165, 125, 90)` | 0.530 | 53.0 % | 542 |
+| 9 | **45.0 m** | Very Pale Blue | `(148, 128, 108)` | 0.557 | 55.7 % | 569 |
+| 10 | **65.0 m** | Blue-Gray | `(128, 120, 112)` | 0.579 | 57.9 % | 592 |
+| 11 | **90.0 m** | Medium Gray | `(105, 100, 96)` | 0.597 | 59.7 % | 610 |
+| 12 | **130.0 m** | Dark Gray | `(85, 82, 80)` | 0.616 | 61.6 % | 629 |
+| 13 | **250.0 m** | Dim Gray | `(62, 60, 58)` | 0.645 | 64.5 % | 659 |
+| 14 | **500.0 m** | Very Dim Gray | `(46, 44, 43)` | 0.671 | 67.1 % | 686 |
+| 15 | **inf** | Near-Black | `(35, 34, 33)` | 1.000 | 100.0 % | 1023 |
 
 ### 3.1  Spectrum Allocation per Segment
 
 | Range | Spectrum Span | Description |
 |:------|:-------------|:------------|
-| 0 -- 0.1 m | 3.8 % | Collision / contact zone (bright red) |
-| 0.1 -- 0.3 m | 6.0 % | Danger proximity (red-orange to orange) |
-| 0.3 -- 0.7 m | 8.3 % | Close warning (orange to gold) |
-| 0.7 -- 1.5 m | 9.5 % | Near-field (gold to yellow-green) |
-| 1.5 -- 3.0 m | 9.0 % | Transition (yellow-green to green) |
-| 3.0 -- 6.0 m | 8.2 % | Comfortable navigation (green to teal) |
-| 6.0 -- 12.0 m | 6.9 % | Mid-range structure (teal to steel blue) |
-| 12.0 -- 25.0 m | 5.9 % | Away structure (steel blue to medium blue) |
-| 25.0 -- 35.0 m | 2.3 % | Far transition (medium blue to dark steel blue) |
-| 35.0 -- 50.0 m | 2.2 % | Deep far (dark steel blue to dark blue) |
-| 50.0 -- 75.0 m | 2.2 % | Very far (dark blue to blue-gray) |
-| 75.0 -- 100.0 m | 1.4 % | Distant (blue-gray to medium gray) |
-| 100.0 -- 150.0 m | 1.9 % | Receding (medium gray to dark gray) |
-| 150.0 -- 300.0 m | 2.8 % | Fading horizon (dark gray to dim gray) |
-| 300.0 m -- inf | 29.6 % | Void (dim gray to faint dark gray) |
+| 0 -- 0.15 m | 4.4 % | Contact zone (vivid yellow-green) |
+| 0.15 -- 0.5 m | 7.4 % | Close proximity (warm → medium green) |
+| 0.5 -- 1.2 m | 8.8 % | Close warning (medium → fading green) |
+| 1.2 -- 2.5 m | 8.6 % | Near-field (fading green → pale teal) |
+| 2.5 -- 5.0 m | 7.8 % | Comfortable (pale green → teal transition) |
+| 5.0 -- 10.0 m | 7.1 % | Mid-range (teal → medium blue) |
+| 10.0 -- 18.0 m | 5.1 % | Mid-range structure (medium → soft blue) |
+| 18.0 -- 30.0 m | 3.8 % | General structure (soft → pale blue) |
+| 30.0 -- 45.0 m | 2.7 % | Far structure (pale → very pale blue) |
+| 45.0 -- 65.0 m | 2.2 % | Blue→gray transition (very pale blue → blue-gray) |
+| 65.0 -- 90.0 m | 1.8 % | Far transition (blue-gray → medium gray) |
+| 90.0 -- 130.0 m | 1.9 % | Receding (medium → dark gray) |
+| 130.0 -- 250.0 m | 2.9 % | Distant (dark → dim gray) |
+| 250.0 -- 500.0 m | 2.6 % | Fading horizon (dim → very dim gray) |
+| 500.0 m -- inf | 32.9 % | Void (very dim gray → near-black) |
 
-Key insight: with the default `focus_m = 10`, **~58 % of the spectrum covers
-0--25 m** (the active navigation zone) while the remaining **~42 % stretches
-smoothly from 25 m to infinity** with six distinct gray shades preventing the
-far field from collapsing into a single flat colour.  Compared to the previous
-`focus_m = 30` setting, near-field colour diversity is significantly higher.
+Key insight: the **GREEN → BLUE → GRAY** atmospheric-perspective design uses
+desaturation to encode depth.  Each band starts vivid and washes out as distance
+grows — green desaturates through pale teal, blue desaturates through pale
+washed blue, and gray fades to darkness.  This mimics real-world atmospheric
+haze: close objects are vivid, distant objects are pale, void is dim.  With
+`focus_m = 20`, **~53 % of the spectrum covers 0--30 m** so the green and blue
+bands receive strong spectral diversity.
 
 ---
 
@@ -142,9 +144,9 @@ B B B B A A A A B B B B A A A A
 
 ### Why Purple?
 
-The entire distance palette runs through red → orange → yellow → green → blue →
-gray.  Purple/magenta occupies a completely different hue axis — it is
-**impossible** to confuse with any valid distance at any range.
+The entire distance palette uses only green, blue, and gray.  Purple/magenta
+occupies a completely different hue axis — it is **impossible** to confuse
+with any valid distance at any range.
 
 ### When Does It Appear?
 
