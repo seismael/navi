@@ -24,6 +24,7 @@ from navi_environment.integration.voxel_dag import (
     compile_gmdag_world,
     load_gmdag_asset,
     probe_sdfdag_runtime,
+    repair_mesh,
 )
 
 __all__ = [
@@ -44,6 +45,7 @@ __all__ = [
     "load_gmdag_asset",
     "prepare_training_scene_corpus",
     "probe_sdfdag_runtime",
+    "repair_mesh",
     "resolve_scene_query",
     "validate_compiled_scene_corpus",
 ]

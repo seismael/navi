@@ -509,6 +509,7 @@ def prepare_training_scene_corpus(
     resolution: int = 512,
     min_scene_bytes: int = 1000,
     force_recompile: bool = False,
+    repair: bool = False,
 ) -> PreparedSceneCorpus:
     """Prepare the canonical compiled training corpus.
 
@@ -611,6 +612,7 @@ def prepare_training_scene_corpus(
                     source_path=source_entry.path,
                     output_path=compiled_path,
                     resolution=resolution,
+                    repair=repair,
                 )
         compiled_entries.append(
             CompiledSceneEntry(

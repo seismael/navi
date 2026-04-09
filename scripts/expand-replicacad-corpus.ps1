@@ -1,19 +1,32 @@
 <#
 .SYNOPSIS
-  Download and compile all available ReplicaCAD dataset stage scenes into the live corpus.
+  Download and compile ReplicaCAD dataset scenes into the live corpus.
 
 .DESCRIPTION
-  Incrementally adds new ReplicaCAD dataset stage scenes to the existing
+  Incrementally adds new ReplicaCAD scenes (from any variant) to the existing
   corpus without disturbing other dataset folders. After compilation,
   each scene is quality-validated via qualify-gmdag. Regenerates the
   corpus manifest to include all scenes.
 
+  Supports mesh repair (--Repair) for datasets with incomplete shells
+  (e.g. ReplicaCAD_baked_lighting) which need hole-filling before
+  voxelization to avoid high starvation from escaping rays.
+
+.PARAMETER DatasetId
+    HuggingFace dataset ID. Defaults to ai-habitat/ReplicaCAD_dataset.
+
 .PARAMETER ScenesLimit
     Maximum number of scenes to download. 0 = all available.
+
+.PARAMETER Repair
+    Enable mesh repair (fill holes, fix normals) before compilation.
+    Required for incomplete-shell datasets like ReplicaCAD_baked_lighting.
 #>
 param(
+    [string]$DatasetId = "ai-habitat/ReplicaCAD_dataset",
     [int]$ScenesLimit = 0,
     [int]$Resolution = 512,
+    [switch]$Repair,
     [string]$PythonVersion = "3.12"
 )
 
@@ -21,9 +34,10 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $corpusRoot = Join-Path $repoRoot "artifacts\gmdag\corpus"
-$datasetDir = Join-Path $corpusRoot "ai-habitat_ReplicaCAD_dataset"
+$dsSlug = $DatasetId.Replace("/", "_")
+$datasetDir = Join-Path $corpusRoot $dsSlug
 $scratchDir = Join-Path $repoRoot "artifacts\tmp\replicacad-expand"
-$dsId = "ai-habitat/ReplicaCAD_dataset"
+$dsId = $DatasetId
 
 if (-not (Test-Path $datasetDir)) {
     New-Item -ItemType Directory -Path $datasetDir -Force | Out-Null
@@ -34,7 +48,7 @@ if (-not (Test-Path $scratchDir)) {
 
 # ── Discover available scenes on HuggingFace ──────────────────────
 
-Write-Host "Querying HuggingFace for available ReplicaCAD dataset stages..."
+Write-Host "Querying HuggingFace for available $dsSlug stages..."
 $hfUrl = "https://huggingface.co/api/datasets/$dsId/tree/main/stages"
 $items = Invoke-RestMethod -Uri $hfUrl -UseBasicParsing
 $glbPaths = $items | Where-Object { $_.path -like "*.glb" } | ForEach-Object { $_.path } | Sort-Object
@@ -70,9 +84,10 @@ if ($newPaths.Count -eq 0) {
 
 Write-Host ""
 Write-Host "========================================================"
-Write-Host "  ReplicaCAD Dataset Corpus Expansion"
+Write-Host "  $dsSlug Corpus Expansion"
 Write-Host "  New scenes  : $($newPaths.Count)"
 Write-Host "  Resolution  : $Resolution"
+Write-Host "  Repair      : $Repair"
 Write-Host "  Output      : $datasetDir"
 Write-Host "========================================================"
 Write-Host ""
@@ -102,7 +117,7 @@ foreach ($hfPath in $newPaths) {
     Write-Host "  Downloaded: ${sizeMB} MB"
 
     # Compile
-    Write-Host "  Compiling to .gmdag (resolution=$Resolution)..."
+    Write-Host "  Compiling to .gmdag (resolution=$Resolution, repair=$Repair)..."
     $compileArgs = @(
         "run",
         "--python", $PythonVersion,
@@ -112,8 +127,15 @@ foreach ($hfPath in $newPaths) {
         "--output", $outputGmdag,
         "--resolution", "$Resolution"
     )
+    if ($Repair) {
+        $compileArgs += "--repair"
+    }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & uv @compileArgs
-    if ($LASTEXITCODE -ne 0) {
+    $compileExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($compileExit -ne 0) {
         Write-Warning "  Compilation failed for $sceneName. Skipping."
         if (Test-Path $tempGlb) { Remove-Item $tempGlb -Force }
         $failed++
@@ -133,8 +155,12 @@ foreach ($hfPath in $newPaths) {
         "--gmdag-file", $outputGmdag,
         "--json"
     )
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $qualifyJson = & uv @qualifyArgs 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $qualifyExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($qualifyExit -ne 0) {
         $qualifyObj = $qualifyJson | ConvertFrom-Json -ErrorAction SilentlyContinue
         $verdict = if ($qualifyObj) { $qualifyObj.verdict } else { "ERROR" }
         Write-Warning "  Quality gate FAILED ($verdict) for $sceneName. Removing."

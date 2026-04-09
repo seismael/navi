@@ -18,6 +18,7 @@ dependencies = [
     "jax>=0.4.33",
     "jaxlib>=0.4.33",
     "typer>=0.12",
+    "trimesh>=4.0",
 ]
 
 [project.optional-dependencies]

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import struct
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +20,7 @@ __all__ = [
     "compile_gmdag_world",
     "load_gmdag_asset",
     "probe_sdfdag_runtime",
+    "repair_mesh",
 ]
 
 _HEADER_STRUCT = struct.Struct("<4sIIffffI")
@@ -139,7 +142,7 @@ def probe_sdfdag_runtime(
     except ImportError as exc:
         torch_ready = False
         cuda_ready = False
-        issues.append(f"torch import failed: {exc}"); import traceback; traceback.print_exc(file=open('torch_exc.log', 'w')); import traceback; traceback.print_exc(file=open('torch_exc.log', 'w'))
+        issues.append(f"torch import failed: {exc}")
     else:
         cuda_ready = bool(torch_module.cuda.is_available())
         if not cuda_ready:
@@ -287,13 +290,86 @@ def _resolve_voxel_dag_executable() -> Path:
     raise RuntimeError(msg)
 
 
+_logger = logging.getLogger(__name__)
+
+
+def repair_mesh(source_path: Path, output_path: Path) -> dict[str, object]:
+    """Load a mesh with trimesh, repair it, and export as OBJ.
+
+    Repairs include: merge duplicate vertices, fill holes, fix normals,
+    fix face winding. Returns a dict with repair statistics.
+    """
+    import trimesh
+
+    _logger.info("Loading mesh for repair: %s", source_path)
+    scene_or_mesh = trimesh.load(str(source_path), force=None)
+
+    # Flatten scenes (e.g. .glb with multiple meshes) into a single mesh.
+    # Use scene.dump() to apply scene-graph transforms (scale/position) so
+    # all sub-meshes are in world space before concatenation.
+    if isinstance(scene_or_mesh, trimesh.Scene):
+        world_meshes = [
+            m for m in scene_or_mesh.dump() if isinstance(m, trimesh.Trimesh)
+        ]
+        if not world_meshes:
+            msg = f"No triangle meshes found in scene: {source_path}"
+            raise RuntimeError(msg)
+        mesh = trimesh.util.concatenate(world_meshes)
+        _logger.info("Flattened %d sub-meshes into world-space mesh", len(world_meshes))
+    elif isinstance(scene_or_mesh, trimesh.Trimesh):
+        mesh = scene_or_mesh
+    else:
+        msg = f"Unsupported mesh type loaded from {source_path}: {type(scene_or_mesh)}"
+        raise RuntimeError(msg)
+
+    stats: dict[str, object] = {
+        "original_vertices": len(mesh.vertices),
+        "original_faces": len(mesh.faces),
+        "original_is_watertight": mesh.is_watertight,
+    }
+
+    # Apply repairs
+    mesh.merge_vertices()
+    trimesh.repair.fill_holes(mesh)
+    trimesh.repair.fix_normals(mesh)
+    trimesh.repair.fix_winding(mesh)
+    mesh.update_faces(mesh.nondegenerate_faces())
+    mesh.remove_unreferenced_vertices()
+
+    stats["repaired_vertices"] = len(mesh.vertices)
+    stats["repaired_faces"] = len(mesh.faces)
+    stats["repaired_is_watertight"] = mesh.is_watertight
+
+    _logger.info(
+        "Repair complete: %d→%d verts, %d→%d faces, watertight=%s→%s",
+        stats["original_vertices"],
+        stats["repaired_vertices"],
+        stats["original_faces"],
+        stats["repaired_faces"],
+        stats["original_is_watertight"],
+        stats["repaired_is_watertight"],
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mesh.export(str(output_path), file_type="obj")
+    return stats
+
+
 def compile_gmdag_world(
     *,
     source_path: Path,
     output_path: Path,
     resolution: int,
+    repair: bool = False,
 ) -> GmDagCompileResult:
-    """Compile *source_path* into a `.gmdag` cache via the internal compiler."""
+    """Compile *source_path* into a `.gmdag` cache via the internal compiler.
+
+    When *repair* is True, the source mesh is loaded via trimesh, repaired
+    (merge vertices, fill holes, fix normals/winding), and exported to a
+    temporary OBJ before compilation.  This fixes incomplete-shell meshes
+    (e.g. ReplicaCAD Baked Lighting) that otherwise produce high-starvation
+    observations due to rays escaping through holes.
+    """
     if resolution <= 0:
         msg = "resolution must be a positive integer"
         raise ValueError(msg)
@@ -307,26 +383,41 @@ def compile_gmdag_world(
     compiler = _resolve_voxel_dag_executable()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    command = (
-        str(compiler),
-        "--input",
-        str(source_path),
-        "--output",
-        str(output_path),
-        "--resolution",
-        str(resolution),
-    )
-    compiler_dir = compiler.parent
-    assimp_release_dir = compiler_dir.parent / "_deps" / "assimp-build" / "bin" / "Release"
-    env = os.environ.copy()
-    path_parts = [str(compiler_dir)]
-    if assimp_release_dir.exists():
-        path_parts.append(str(assimp_release_dir))
-    existing_path = env.get("PATH", "")
-    env["PATH"] = os.pathsep.join(path_parts + ([existing_path] if existing_path else []))
+    # Optionally repair the mesh before compilation
+    effective_source = source_path
+    tmp_dir: tempfile.TemporaryDirectory[str] | None = None
+    if repair:
+        tmp_dir = tempfile.TemporaryDirectory(prefix="navi_mesh_repair_")
+        repaired_obj = Path(tmp_dir.name) / f"{source_path.stem}_repaired.obj"
+        repair_stats = repair_mesh(source_path, repaired_obj)
+        _logger.info("Using repaired mesh: %s (%s)", repaired_obj, repair_stats)
+        effective_source = repaired_obj
 
-    # The command is assembled from validated local paths plus an integer resolution.
-    subprocess.run(command, check=True, env=env)  # noqa: S603
+    try:
+        command = (
+            str(compiler),
+            "--input",
+            str(effective_source),
+            "--output",
+            str(output_path),
+            "--resolution",
+            str(resolution),
+        )
+        compiler_dir = compiler.parent
+        assimp_release_dir = compiler_dir.parent / "_deps" / "assimp-build" / "bin" / "Release"
+        env = os.environ.copy()
+        path_parts = [str(compiler_dir)]
+        if assimp_release_dir.exists():
+            path_parts.append(str(assimp_release_dir))
+        existing_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join(path_parts + ([existing_path] if existing_path else []))
+
+        # The command is assembled from validated local paths plus an integer resolution.
+        subprocess.run(command, check=True, env=env)  # noqa: S603
+    finally:
+        if tmp_dir is not None:
+            tmp_dir.cleanup()
+
     return GmDagCompileResult(
         source_path=source_path,
         output_path=output_path,

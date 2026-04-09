@@ -293,6 +293,9 @@ def compile_gmdag(
     ),
     output: str = typer.Option(..., "--output", help="Output .gmdag world cache path"),
     resolution: int = typer.Option(512, help="Compiler voxel resolution for DAG generation"),
+    repair: bool = typer.Option(
+        False, "--repair", help="Repair mesh before compilation (fill holes, fix normals)"
+    ),
 ) -> None:
     """Compile a source model into a `.gmdag` cache via the internal voxel-dag project."""
     setup_logging("navi_environment_gmdag_compiler")
@@ -300,12 +303,14 @@ def compile_gmdag(
         source_path=Path(source),
         output_path=Path(output),
         resolution=resolution,
+        repair=repair,
     )
     typer.echo(
         "Compiled gmdag - "
         f"source={result.source_path}, "
         f"output={result.output_path}, "
         f"resolution={result.resolution}, "
+        f"repair={repair}, "
         f"command={' '.join(result.command)}",
     )
 
@@ -321,6 +326,9 @@ def prepare_corpus(
     force_recompile: bool = typer.Option(
         False, help="Overwrite compiled `.gmdag` outputs during refresh"
     ),
+    repair: bool = typer.Option(
+        False, "--repair", help="Repair meshes before compilation (fill holes, fix normals)"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON summary instead of text"),
 ) -> None:
     """Discover, compile, and summarize the canonical training corpus."""
@@ -334,6 +342,7 @@ def prepare_corpus(
         resolution=resolution,
         min_scene_bytes=min_scene_bytes,
         force_recompile=force_recompile,
+        repair=repair,
     )
 
     if json_output:

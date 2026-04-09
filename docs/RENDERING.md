@@ -67,50 +67,52 @@ LUT at module load time.  All `t`-values below use the default
 
 | # | Distance | Colour Name | BGR | `t` | Spectrum % | LUT Index |
 |--:|:---------|:------------|:----|----:|----------:|----------:|
-| 0 | **0.0 m** | Bright Yellow-Green | `(12, 235, 110)` | 0.000 | 0.0 % | 0 |
-| 1 | **0.15 m** | Warm Green | `(20, 225, 85)` | 0.044 | 4.4 % | 44 |
-| 2 | **0.5 m** | Medium Green | `(40, 210, 62)` | 0.118 | 11.8 % | 120 |
-| 3 | **1.2 m** | Fading Green | `(72, 195, 58)` | 0.206 | 20.6 % | 210 |
-| 4 | **2.5 m** | Pale Teal-Green | `(110, 178, 55)` | 0.292 | 29.2 % | 298 |
-| 5 | **5.0 m** | Teal | `(152, 155, 48)` | 0.370 | 37.0 % | 379 |
-| 6 | **10.0 m** | Medium Blue | `(185, 128, 42)` | 0.441 | 44.1 % | 450 |
-| 7 | **18.0 m** | Soft Blue | `(180, 120, 65)` | 0.492 | 49.2 % | 502 |
-| 8 | **30.0 m** | Pale Blue | `(165, 125, 90)` | 0.530 | 53.0 % | 542 |
-| 9 | **45.0 m** | Very Pale Blue | `(148, 128, 108)` | 0.557 | 55.7 % | 569 |
-| 10 | **65.0 m** | Blue-Gray | `(128, 120, 112)` | 0.579 | 57.9 % | 592 |
-| 11 | **90.0 m** | Medium Gray | `(105, 100, 96)` | 0.597 | 59.7 % | 610 |
-| 12 | **130.0 m** | Dark Gray | `(85, 82, 80)` | 0.616 | 61.6 % | 629 |
-| 13 | **250.0 m** | Dim Gray | `(62, 60, 58)` | 0.645 | 64.5 % | 659 |
-| 14 | **500.0 m** | Very Dim Gray | `(46, 44, 43)` | 0.671 | 67.1 % | 686 |
+| 0 | **0.0 m** | Vivid Orange | `(0, 120, 255)` | 0.000 | 0.0 % | 0 |
+| 1 | **0.15 m** | Warm Amber | `(5, 158, 230)` | 0.044 | 4.4 % | 44 |
+| 2 | **0.5 m** | Yellow | `(12, 198, 170)` | 0.118 | 11.8 % | 120 |
+| 3 | **1.0 m** | Fresh Green | `(30, 220, 90)` | 0.185 | 18.5 % | 189 |
+| 4 | **2.5 m** | Medium Green | `(72, 200, 60)` | 0.292 | 29.2 % | 298 |
+| 5 | **5.0 m** | Pale Teal-Green | `(110, 178, 55)` | 0.370 | 37.0 % | 379 |
+| 6 | **10.0 m** | Teal | `(152, 155, 48)` | 0.441 | 44.1 % | 450 |
+| 7 | **18.0 m** | Medium Blue | `(185, 128, 42)` | 0.492 | 49.2 % | 502 |
+| 8 | **30.0 m** | Soft Blue | `(180, 120, 65)` | 0.530 | 53.0 % | 542 |
+| 9 | **45.0 m** | Pale Blue | `(165, 125, 90)` | 0.557 | 55.7 % | 569 |
+| 10 | **65.0 m** | Very Pale Blue | `(148, 128, 108)` | 0.579 | 57.9 % | 592 |
+| 11 | **90.0 m** | Blue-Gray | `(128, 120, 112)` | 0.597 | 59.7 % | 610 |
+| 12 | **130.0 m** | Medium Gray | `(105, 100, 96)` | 0.616 | 61.6 % | 629 |
+| 13 | **250.0 m** | Dark Gray | `(85, 82, 80)` | 0.645 | 64.5 % | 659 |
+| 14 | **500.0 m** | Dim Gray | `(62, 60, 58)` | 0.671 | 67.1 % | 686 |
 | 15 | **inf** | Near-Black | `(35, 34, 33)` | 1.000 | 100.0 % | 1023 |
 
 ### 3.1  Spectrum Allocation per Segment
 
 | Range | Spectrum Span | Description |
 |:------|:-------------|:------------|
-| 0 -- 0.15 m | 4.4 % | Contact zone (vivid yellow-green) |
-| 0.15 -- 0.5 m | 7.4 % | Close proximity (warm → medium green) |
-| 0.5 -- 1.2 m | 8.8 % | Close warning (medium → fading green) |
-| 1.2 -- 2.5 m | 8.6 % | Near-field (fading green → pale teal) |
-| 2.5 -- 5.0 m | 7.8 % | Comfortable (pale green → teal transition) |
-| 5.0 -- 10.0 m | 7.1 % | Mid-range (teal → medium blue) |
-| 10.0 -- 18.0 m | 5.1 % | Mid-range structure (medium → soft blue) |
-| 18.0 -- 30.0 m | 3.8 % | General structure (soft → pale blue) |
-| 30.0 -- 45.0 m | 2.7 % | Far structure (pale → very pale blue) |
-| 45.0 -- 65.0 m | 2.2 % | Blue→gray transition (very pale blue → blue-gray) |
-| 65.0 -- 90.0 m | 1.8 % | Far transition (blue-gray → medium gray) |
-| 90.0 -- 130.0 m | 1.9 % | Receding (medium → dark gray) |
-| 130.0 -- 250.0 m | 2.9 % | Distant (dark → dim gray) |
-| 250.0 -- 500.0 m | 2.6 % | Fading horizon (dim → very dim gray) |
-| 500.0 m -- inf | 32.9 % | Void (very dim gray → near-black) |
+| 0 -- 0.15 m | 4.4 % | Contact zone (vivid orange alert) |
+| 0.15 -- 0.5 m | 7.4 % | Close proximity (amber to yellow) |
+| 0.5 -- 1.0 m | 6.7 % | Orange-green transition (yellow to fresh green) |
+| 1.0 -- 2.5 m | 10.7 % | Near-field (fresh green, fading) |
+| 2.5 -- 5.0 m | 7.8 % | Comfortable (medium green to pale teal) |
+| 5.0 -- 10.0 m | 7.1 % | Mid-range (teal to medium blue) |
+| 10.0 -- 18.0 m | 5.1 % | Mid-range structure (medium to soft blue) |
+| 18.0 -- 30.0 m | 3.8 % | General structure (soft to pale blue) |
+| 30.0 -- 45.0 m | 2.7 % | Far structure (pale to very pale blue) |
+| 45.0 -- 65.0 m | 2.2 % | Blue-gray transition (very pale blue to blue-gray) |
+| 65.0 -- 90.0 m | 1.8 % | Far transition (blue-gray to medium gray) |
+| 90.0 -- 130.0 m | 1.9 % | Receding (medium to dark gray) |
+| 130.0 -- 250.0 m | 2.9 % | Distant (dark to dim gray) |
+| 250.0 -- 500.0 m | 2.6 % | Fading horizon (dim gray to very dim) |
+| 500.0 m -- inf | 32.9 % | Void (dim gray to near-black) |
 
-Key insight: the **GREEN → BLUE → GRAY** atmospheric-perspective design uses
-desaturation to encode depth.  Each band starts vivid and washes out as distance
-grows — green desaturates through pale teal, blue desaturates through pale
+Key insight: the **ORANGE → GREEN → BLUE → GRAY** atmospheric-perspective
+design uses a vivid orange alert zone (0--1 m) that smoothly transitions through
+yellow into the green near-field, then each band desaturates (washes out) as
+distance grows.  Green fades through pale teal, blue desaturates through pale
 washed blue, and gray fades to darkness.  This mimics real-world atmospheric
-haze: close objects are vivid, distant objects are pale, void is dim.  With
-`focus_m = 20`, **~53 % of the spectrum covers 0--30 m** so the green and blue
-bands receive strong spectral diversity.
+haze with an added proximity warning: extreme near-field objects glow orange,
+close objects are vivid green, mid-range fades to blue, and void is dim.  With
+`focus_m = 20`, **~53 % of the spectrum covers 0--30 m** so all four bands
+receive strong spectral diversity.
 
 ---
 
