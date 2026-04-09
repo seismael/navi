@@ -506,6 +506,10 @@ class PpoTrainer:
 
         self._sim_steps_during_opt: int = 0
         self._total_sim_steps: int = 0
+        self._total_episodes: int = 0
+        self._reward_ema: float = 0.0
+        self._training_wall_start: float = time.perf_counter()
+        self._parent_checkpoint: str | None = None
         self._last_opt_duration_ms: float = 0.0
         self._opt_duration_acc: float = 0.0
         self._opt_duration_count: int = 0
@@ -1015,10 +1019,22 @@ class PpoTrainer:
             self._checkpoint_thread.join()
             self._checkpoint_thread = None
 
+        # Corpus summary for provenance
+        corpus_summary = f"{len(self._scene_pool)} scenes" if self._scene_pool else (self._gmdag_file or "unknown")
+
         # Snapshot state to CPU-resident dicts (fast H2D copy)
         state: dict[str, Any] = {
-            "version": 2,
+            "version": 3,
             "run_id": self._run_context.run_id,
+            "step_id": self._total_sim_steps,
+            "episode_count": self._total_episodes,
+            "reward_ema": self._reward_ema,
+            "wall_time_hours": (time.perf_counter() - self._training_wall_start) / 3600.0,
+            "parent_checkpoint": self._parent_checkpoint,
+            "training_source": "rl",
+            "temporal_core": self._config.temporal_core,
+            "corpus_summary": corpus_summary,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "policy_state_dict": {
                 k: v.cpu() for k, v in self._learner_policy.state_dict().items()
             },
@@ -1067,18 +1083,18 @@ class PpoTrainer:
         self._checkpoint_thread.start()
 
     def load_training_state(self, path: str | Path) -> None:
-        """Restore training state."""
+        """Restore training state from a v3 canonical checkpoint."""
         started_at = time.perf_counter()
         _LOGGER.info("Loading training checkpoint from %s", path)
         data = torch.load(path, weights_only=False, map_location="cpu")
-        if not isinstance(data, dict) or data.get("version") != 2:
+        if not isinstance(data, dict) or data.get("version") != 3:
             raise RuntimeError(
-                "Unsupported training checkpoint format: expected version=2 canonical state",
+                "Unsupported training checkpoint format: expected version 3 canonical state",
             )
 
         self._learner_policy.load_state_dict(data["policy_state_dict"])
         self._rnd.load_state_dict(data["rnd_state_dict"])
-        self._reward_shaper._global_step = int(data.get("reward_shaper_step", 0))
+        self._reward_shaper._global_step = int(data["reward_shaper_step"])
         if "optimizer_state_dict" in data:
             self._learner._get_optimizer(self._learner_policy).load_state_dict(
                 data["optimizer_state_dict"]
@@ -1087,6 +1103,20 @@ class PpoTrainer:
             self._learner._get_rnd_optimizer(self._rnd).load_state_dict(
                 data["rnd_optimizer_state_dict"]
             )
+
+        # Restore accumulated counters from v3 metadata
+        self._total_sim_steps = int(data["step_id"])
+        self._total_episodes = int(data["episode_count"])
+        self._reward_ema = float(data["reward_ema"])
+        self._parent_checkpoint = str(path)
+
+        _LOGGER.info(
+            "Checkpoint loaded (v3): step_id=%d episodes=%d reward_ema=%.4f source=%s",
+            self._total_sim_steps,
+            self._total_episodes,
+            self._reward_ema,
+            data["training_source"],
+        )
 
         # Sync weights to rollout policy after loading
         self._sync_rollout_policy()
@@ -1100,8 +1130,14 @@ class PpoTrainer:
                 metadata={
                     "event": "loaded",
                     "path": str(path),
-                    "checkpoint_run_id": data.get("run_id", "unknown"),
+                    "checkpoint_version": 3,
+                    "checkpoint_run_id": data["run_id"],
                     "reward_shaper_step": self._reward_shaper._global_step,
+                    "step_id": self._total_sim_steps,
+                    "episode_count": self._total_episodes,
+                    "reward_ema": self._reward_ema,
+                    "training_source": data["training_source"],
+                    "parent_checkpoint": data["parent_checkpoint"],
                 },
             ),
         )
@@ -2005,9 +2041,10 @@ class PpoTrainer:
             self._config.minibatch_size,
             self._config.bptt_len,
         )
-        r_ema = torch.zeros((), dtype=torch.float32, device=self._device)
-        ep_cnt = torch.zeros((), dtype=torch.int32, device=self._device)
-        step_id = 0
+        # Restore counters from instance state (populated by load_training_state)
+        r_ema = torch.tensor(self._reward_ema, dtype=torch.float32, device=self._device)
+        ep_cnt = torch.tensor(self._total_episodes, dtype=torch.int32, device=self._device)
+        step_id = self._total_sim_steps
         unbounded = total_steps <= 0
         reward_sum_tensor = torch.zeros((), dtype=torch.float32, device=self._device)
         episode_returns = torch.zeros((n,), dtype=torch.float32, device=self._device)
@@ -2017,6 +2054,7 @@ class PpoTrainer:
         self._publish_dashboard_observations(obs_dict)
 
         t_start = time.perf_counter()
+        self._training_wall_start = t_start
         (
             acc_fwd,
             acc_pack,
@@ -2345,6 +2383,9 @@ class PpoTrainer:
                     zw = self._sim_steps_during_opt / max(1, self._total_sim_steps)
                     reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))
                     ep_cnt_val = int(ep_cnt.item())
+                    # Sync instance state at coarse log cadence for checkpoint enrichment
+                    self._reward_ema = reward_ema_value
+                    self._total_episodes = ep_cnt_val
                     _LOGGER.info(
                         "[step %d] reward_ema=%.4f episodes=%d | sps=%.1f zw=%.1f%% | "
                         "fwd=%.1fms pack=%.1fms env=%.1fms mem=%.1fms trans=%.1fms "
@@ -2470,6 +2511,9 @@ class PpoTrainer:
         reward_mean = float(reward_sum_tensor.item()) / max(1, step_id)
         reward_ema_value = float(r_ema.detach().to(device="cpu", dtype=torch.float32))
         wall_clock_seconds = time.perf_counter() - t_start
+        # Final sync of instance state for checkpoint enrichment
+        self._reward_ema = reward_ema_value
+        self._total_episodes = int(ep_cnt.item())
         self._emit_metrics_record(
             "training_summary",
             build_phase_metrics_payload(

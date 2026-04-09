@@ -297,7 +297,73 @@ Example:
 ./scripts/train-all-night.ps1 -ResumeCheckpoint .\checkpoints\all_night\policy_step_0025000.pt
 ```
 
-## 6. Dashboard Attach
+## 6. Model Lifecycle & Registry
+
+### Checkpoint Format (v3)
+
+All training sources (RL, BC, inference) now emit **v3 checkpoints** with enriched metadata:
+
+| Field | Description |
+|-------|-------------|
+| `version` | Always `3` |
+| `step_id` | Total training steps completed |
+| `episode_count` | Total episodes completed |
+| `reward_ema` | Exponential moving average of episode reward |
+| `wall_time_hours` | Cumulative training wall time |
+| `parent_checkpoint` | Path to the checkpoint this was resumed from |
+| `training_source` | `"rl"`, `"bc"`, or `"inference"` |
+| `temporal_core` | Which temporal core was active (`mamba2`, `gru`, `mambapy`) |
+| `corpus_summary` | Description of training data |
+| `created_at` | ISO timestamp |
+
+Only v3 checkpoints are accepted. Loading v2 or older checkpoints will fail fast with a clear error.
+
+### Model Registry
+
+Promoted models live in `artifacts/models/` with a JSON catalog:
+
+```
+artifacts/models/
+  registry.json       # version catalog with metadata
+  latest.pt           # always points to the best promoted model
+  v001.pt             # versioned copies
+  v002.pt
+  ...
+```
+
+### Promoting a Checkpoint
+
+```bash
+# Manually promote a checkpoint
+uv run brain promote ./artifacts/runs/<run_id>/checkpoints/policy_step_0050000.pt --notes "50K step RL run" --tags rl,mamba2
+
+# List all promoted models
+uv run brain models
+```
+
+### Auto-Continue from Latest
+
+When no `--checkpoint` is specified, both the `train` CLI and `run-ghost-stack.ps1 -Train` automatically resume from `artifacts/models/latest.pt` if it exists. This enables seamless accumulation across RL sessions, BC pre-training, and nightly runs.
+
+### Auto-Promote After Training
+
+After training completes, the trainer automatically promotes the final checkpoint to the registry if its `reward_ema` exceeds the current latest. This ensures the best model is always discoverable.
+
+### Evaluate & Compare
+
+```bash
+# Evaluate a single checkpoint (bounded inference with metrics)
+uv run brain evaluate ./artifacts/models/latest.pt --steps 2000 --json
+
+# Compare two checkpoints side-by-side
+uv run brain compare ./artifacts/models/v001.pt ./artifacts/models/v002.pt --steps 2000
+```
+
+### Nightly Integration
+
+Successful nightly validation runs (`run-nightly-validation.ps1`) automatically promote their best checkpoint to the registry with a `nightly` tag, so the next training session continues from the nightly's progress.
+
+## 7. Dashboard Attach
 
 `run-ghost-stack.ps1 -Train` now keeps the dashboard detached by default so the
 canonical training wrapper does not imply a viewer dependency. Use
@@ -322,13 +388,13 @@ uv run --project .\projects\auditor navi-auditor dashboard-attach-check --actor-
 If you override the training telemetry port on the wrapper, use the same port
 in dashboard attach commands.
 
-## 7. Recovery
+## 8. Recovery
 
 ```powershell
 Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like '*navi-environment*' -or $_.CommandLine -like '*navi-actor*' -or $_.CommandLine -like '*navi-auditor*') } | ForEach-Object { try { & taskkill /PID $_.ProcessId /T /F *> $null } catch {} }
 ```
 
-## 8. Operational Notes
+## 9. Operational Notes
 
 - production training advertises only the canonical `sdfdag` path
 - production training defaults the temporal core to `mamba2`, with `gru` and `mambapy` available as explicit selectors on the same surface when comparing runs
@@ -383,7 +449,7 @@ the policy from human navigation demonstrations before RL fine-tuning.
 
 The BC pipeline trains the **same** `CognitiveMambaPolicy` architecture that PPO
 trains.  No separate model or surrogate is involved.  The result is a standard
-v2 checkpoint loadable by `navi-actor train --checkpoint <path>`.
+v3 checkpoint loadable by `navi-actor train --checkpoint <path>`.
 
 ### Demonstration Capture
 
@@ -469,14 +535,14 @@ Or use the two-step workflow that separates navigation from training:
 3. Shuffle sequences and iterate in minibatches.
 4. Forward through `evaluate_sequence()` — the same pipeline PPO uses.
 5. Optimise negative log-likelihood loss with entropy regularisation.
-6. Save a v2 checkpoint with fresh RND module weights.
+6. Save a v3 checkpoint with fresh RND module weights.
 
 Policy `log_std` is frozen during BC by default (`--freeze-log-std`) to
 preserve exploration capacity for subsequent PPO training.
 
 ### Transition to RL Fine-Tuning
 
-The BC checkpoint is a standard v2 file:
+The BC checkpoint is a standard v3 file:
 
 ```powershell
 uv run --project projects/actor navi-actor train \

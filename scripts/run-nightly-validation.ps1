@@ -1052,12 +1052,34 @@ try {
     Save-Summary -Summary $summary -SummaryPath $summaryPath
 
     $latestCheckpointInfo = Get-LatestCheckpointInfo -CheckpointDir $trainingCheckpointDir
+
+    # Auto-promote best nightly checkpoint to the model registry
+    if ($null -ne $latestCheckpointInfo) {
+        try {
+            $promoteArgs = @(
+                "run",
+                "--python", $PythonVersion,
+                "--project", (Join-Path $repoRoot "projects\actor"),
+                "python", "-m", "navi_actor.cli", "promote",
+                $latestCheckpointInfo.latest_path,
+                "--notes", "Nightly validation $($runContext.RunId) — step $($latestCheckpointInfo.latest_step)",
+                "--tags", "nightly"
+            )
+            $promoteResult = & uv @promoteArgs 2>&1
+            Add-Content -Encoding UTF8 -Path $progressLogPath -Value ("[{0}] nightly-promote: {1}" -f (Get-Date).ToString("o"), ($promoteResult -join "`n"))
+        }
+        catch {
+            Add-SoftWarning -Summary $summary -SummaryPath $summaryPath -Message ("Nightly auto-promote failed: " + $_.Exception.Message)
+        }
+    }
+
     $markdown = @(
         "# Nightly Validation Summary",
         "",
         "- status: passed",
         "- run_dir: $runDir",
         "- latest_checkpoint: $(if ($null -ne $latestCheckpointInfo) { $latestCheckpointInfo.latest_path } else { 'none' })",
+        "- promoted: $(if ($null -ne $latestCheckpointInfo) { 'yes' } else { 'no' })",
         "- soft_warnings: $($summary.soft_warnings.Count)",
         "- phases: $($summary.phases.Count)"
     )

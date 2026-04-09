@@ -2,7 +2,7 @@
 
 Loads demonstration recordings (numpy ``.npz`` archives) and trains the
 full ``CognitiveMambaPolicy`` pipeline via supervised maximum-likelihood
-on human action choices.  Produces a v2 checkpoint compatible with the
+on human action choices.  Produces a v3 checkpoint compatible with the
 canonical ``PpoTrainer.load_training_state()`` for seamless RL fine-tuning.
 
 Algorithm
@@ -12,7 +12,7 @@ Algorithm
 3. For each minibatch of sequences, forward through the full pipeline
    via ``evaluate_sequence()`` and maximise :math:`\\log \\pi(a|o)` plus an
    entropy bonus to prevent premature collapse.
-4. Save a v2 checkpoint with a fresh RND module for PPO compatibility.
+4. Save a v3 checkpoint with a fresh RND module for PPO compatibility.
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ class BehavioralCloningTrainer:
     demo_dir:
         Directory containing ``.npz`` demonstration files.
     output_path:
-        Path for the output v2 checkpoint file.
+        Path for the output v3 checkpoint file.
     temporal_core:
         Temporal core variant to train.
     embedding_dim:
@@ -276,11 +276,11 @@ class BehavioralCloningTrainer:
         total_s = time.perf_counter() - total_start
         _LOG.info("BC training complete in %.1fs", total_s)
 
-        # ── 6. Save v2 checkpoint ────────────────────────────────
+        # ── 6. Save v3 checkpoint ────────────────────────────────
         return self._save_checkpoint(policy, device)
 
     def _save_checkpoint(self, policy: CognitiveMambaPolicy, device: torch.device) -> Path:
-        """Save a PpoTrainer-compatible v2 checkpoint."""
+        """Save a PpoTrainer-compatible v3 checkpoint."""
         # Unfreeze log_std before saving so PPO can train it
         policy.heads.log_std.requires_grad_(True)
 
@@ -293,8 +293,17 @@ class BehavioralCloningTrainer:
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         state = {
-            "version": 2,
+            "version": 3,
             "run_id": f"bc-pretrain-{timestamp}",
+            "step_id": 0,
+            "episode_count": 0,
+            "reward_ema": 0.0,
+            "wall_time_hours": 0.0,
+            "parent_checkpoint": None,
+            "training_source": "bc",
+            "temporal_core": self._temporal_core_name,
+            "corpus_summary": f"bc-pretrain from {self._demo_dir}",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "policy_state_dict": {
                 k: v.cpu() for k, v in policy.state_dict().items()
             },

@@ -609,6 +609,28 @@ def train(
                 },
             )
             typer.echo(f"Loaded checkpoint: {checkpoint}")
+        else:
+            # Auto-continue: check for latest promoted model
+            from navi_actor.model_registry import ModelRegistry
+
+            _latest = ModelRegistry().get_latest()
+            if _latest is not None:
+                t_checkpoint_load = time.perf_counter()
+                trainer.load_training_state(str(_latest))
+                _emit_command_phase_metric(
+                    command_metrics_sink,
+                    operation="checkpoint_load",
+                    started_at=t_checkpoint_load,
+                    include_resources=config.attach_resource_snapshots,
+                    metadata={
+                        "cuda_expected": True,
+                        "checkpoint_path": str(_latest),
+                        "auto_continue": True,
+                    },
+                )
+                typer.echo(f"Auto-continuing from latest model: {_latest}")
+            else:
+                typer.echo("Starting fresh training (no promoted models found)")
 
         t_trainer_start = time.perf_counter()
         trainer.start()  # type: ignore[no-untyped-call]
@@ -682,6 +704,38 @@ def train(
                     f"command={run_context.metrics_root / 'actor_training.command.jsonl'} "
                     f"trainer={run_context.metrics_root / 'actor_training.jsonl'}"
                 )
+
+        # Auto-promote: if training produced a better model than current latest, promote
+        try:
+            from navi_actor.model_registry import ModelRegistry
+
+            _registry = ModelRegistry()
+            _current_latest = _registry.get_latest_entry()
+            _should_promote = (
+                _current_latest is None
+                or metrics.reward_ema > _current_latest.reward_ema
+            )
+            if _should_promote:
+                # Wait for async checkpoint write to finish
+                if trainer._checkpoint_thread is not None:
+                    trainer._checkpoint_thread.join()
+                _entry = _registry.promote(
+                    str(final_ckpt),
+                    notes=f"auto-promoted from {run_context.run_id}",
+                )
+                typer.echo(
+                    f"Auto-promoted → {_entry.id} "
+                    f"(reward_ema={metrics.reward_ema:.4f})"
+                )
+            else:
+                assert _current_latest is not None
+                typer.echo(
+                    f"Not promoted: reward_ema={metrics.reward_ema:.4f} "
+                    f"≤ current latest {_current_latest.id} "
+                    f"({_current_latest.reward_ema:.4f})"
+                )
+        except Exception as _promote_err:
+            _LOG.warning("Auto-promote failed: %s", _promote_err)
     finally:
         if trainer is not None and trainer_started:
             t_trainer_stop = time.perf_counter()
@@ -1059,7 +1113,7 @@ def bc_pretrain(
 
     Trains the full CognitiveMambaPolicy pipeline (RayViTEncoder → TemporalCore
     → ActorCriticHeads) via supervised maximum-likelihood on human navigation
-    demonstrations.  Produces a v2 checkpoint that can be loaded directly by
+    demonstrations.  Produces a v3 checkpoint that can be loaded directly by
     ``navi-actor train --checkpoint <path>`` for RL fine-tuning.
 
     Workflow:
@@ -1121,6 +1175,325 @@ def bc_pretrain(
     typer.echo("")
     typer.echo("Next step — fine-tune with RL:")
     typer.echo(f"  uv run brain train --checkpoint {checkpoint_path}")
+
+
+# ── Model Registry Commands ──────────────────────────────────────
+
+
+@app.command("promote")  # type: ignore[untyped-decorator]
+def promote(
+    checkpoint: str = typer.Argument(help="Path to the checkpoint file to promote."),
+    notes: str = typer.Option("", help="Human-readable notes for this model version."),
+    tags: str = typer.Option("", help="Comma-separated tags (e.g. 'best-replicacad,nightly')."),
+    models_dir: str = typer.Option(
+        "artifacts/models", help="Directory for promoted models and registry.",
+    ),
+) -> None:
+    """Promote a checkpoint to the model registry.
+
+    Copies the checkpoint to ``artifacts/models/vNNN.pt``, updates
+    ``latest.pt``, and records metadata in ``registry.json``.
+    """
+    from navi_actor.model_registry import ModelRegistry
+
+    setup_logging("navi_actor_promote", level=logging.INFO)
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+
+    registry = ModelRegistry(models_dir)
+    entry = registry.promote(checkpoint, notes=notes, tags=tag_list)
+
+    typer.echo(f"Promoted → {entry.id}")
+    typer.echo(f"  Path:       {entry.path}")
+    typer.echo(f"  Step:       {entry.step_id:,}")
+    typer.echo(f"  Episodes:   {entry.episode_count:,}")
+    typer.echo(f"  Reward EMA: {entry.reward_ema:.4f}")
+    typer.echo(f"  Source:     {entry.training_source} ({entry.source_run})")
+    typer.echo(f"  Temporal:   {entry.temporal_core}")
+    typer.echo(f"  Corpus:     {entry.corpus_summary}")
+    if entry.parent_model:
+        typer.echo(f"  Parent:     {entry.parent_model}")
+    if entry.notes:
+        typer.echo(f"  Notes:      {entry.notes}")
+    typer.echo(f"\n  Latest: {registry.get_latest()}")
+
+
+@app.command("models")  # type: ignore[untyped-decorator]
+def models(
+    models_dir: str = typer.Option(
+        "artifacts/models", help="Directory for promoted models and registry.",
+    ),
+) -> None:
+    """List all promoted models in the registry."""
+    from navi_actor.model_registry import ModelRegistry
+
+    registry = ModelRegistry(models_dir)
+    entries = registry.list_models()
+    if not entries:
+        typer.echo("No models promoted yet. Use 'navi-actor promote <checkpoint>' to start.")
+        return
+
+    latest = registry.get_latest_entry()
+    typer.echo(f"{'ID':<8} {'Step':>10} {'Episodes':>10} {'Reward':>10} {'Source':<8} {'Temporal':<8} {'Date':<20} {'Notes'}")
+    typer.echo("─" * 100)
+    for m in entries:
+        marker = " ★" if latest and m.id == latest.id else ""
+        typer.echo(
+            f"{m.id:<8} {m.step_id:>10,} {m.episode_count:>10,} {m.reward_ema:>10.4f} "
+            f"{m.training_source:<8} {m.temporal_core:<8} {m.promoted_at:<20} {m.notes}{marker}"
+        )
+    typer.echo(f"\nLatest: {latest.id if latest else 'none'} → {registry.get_latest()}")
+
+
+@app.command("evaluate")  # type: ignore[untyped-decorator]
+def evaluate(
+    checkpoint: str = typer.Argument(help="Path to the checkpoint to evaluate."),
+    total_steps: int = typer.Option(5000, help="Total evaluation steps (0 = 10 episodes)."),
+    total_episodes: int = typer.Option(10, help="Total episodes to run (when total_steps=0)."),
+    actors: int = typer.Option(1, help="Number of parallel actors."),
+    deterministic: bool = typer.Option(True, help="Use deterministic actions."),
+    gmdag_file: str = typer.Option("", help="Single .gmdag file for evaluation."),
+    corpus_root: str = typer.Option("", help="Corpus root for scene discovery."),
+    datasets: str = typer.Option("", help="Comma-separated dataset include filter."),
+    exclude_datasets: str = typer.Option("", help="Comma-separated dataset exclude filter."),
+    azimuth_bins: int = typer.Option(256, help="Azimuth resolution."),
+    elevation_bins: int = typer.Option(48, help="Elevation resolution."),
+    temporal_core: str = typer.Option("mamba2", help="Temporal core: mamba2|gru|mambapy."),
+    output_json: str = typer.Option("", help="Write evaluation results to JSON file."),
+) -> None:
+    """Evaluate a checkpoint with bounded inference and emit quality metrics.
+
+    Runs bounded inference and reports mean episode return, mean episode
+    length, collision rate, and throughput (SPS).
+    """
+    setup_logging("navi_actor_evaluate", level=logging.INFO)
+
+    from pathlib import Path as _Path
+
+    config = ActorConfig(
+        n_actors=actors,
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+        emit_observation_stream=False,
+        emit_training_telemetry=False,
+        emit_perf_telemetry=False,
+    )
+    resolved_temporal = _resolve_temporal_core(temporal_core, config)
+    config = config.model_copy(update={"temporal_core": resolved_temporal})
+
+    # Resolve scenes
+    scenes: list[str] = []
+    if gmdag_file:
+        scenes = [gmdag_file]
+    elif corpus_root:
+        corpus = _load_training_scenes(
+            gmdag_file="", scene=None, manifest="",
+            corpus_root=corpus_root,
+            datasets=datasets, exclude_datasets=exclude_datasets,
+            compile_resolution=512,
+            force_corpus_refresh=False,
+        )
+        scenes = corpus.compiled_scenes
+    else:
+        corpus = _load_training_scenes(
+            gmdag_file="", scene=None, manifest="",
+            corpus_root="",
+            datasets=datasets, exclude_datasets=exclude_datasets,
+            compile_resolution=512,
+            force_corpus_refresh=False,
+        )
+        scenes = corpus.compiled_scenes
+
+    if not scenes:
+        typer.echo("No scenes found for evaluation.", err=True)
+        raise typer.Exit(code=1)
+
+    _validate_sdfdag_training_scenes(scenes)
+    bootstrap_scene = _select_bootstrap_scene(scenes)
+
+    _configure_torch_training_runtime()
+
+    typer.echo(f"Evaluating: {checkpoint}")
+    typer.echo(f"  Scenes: {len(scenes)}, actors: {actors}, temporal: {resolved_temporal}")
+
+    # Build trainer in inference mode
+    trainer = _build_canonical_trainer(
+        config,
+        gmdag_file=bootstrap_scene,
+        scene_pool=tuple(scenes),
+    )
+    trainer.load_training_state(checkpoint)
+    trainer.start()
+
+    import time as _time
+
+    t_start = _time.perf_counter()
+    try:
+        metrics = trainer.train(
+            total_steps=total_steps,
+            log_every=max(100, total_steps // 10) if total_steps > 0 else 100,
+            checkpoint_every=0,
+        )
+    finally:
+        trainer.stop()
+
+    wall_time = _time.perf_counter() - t_start
+
+    result = {
+        "checkpoint": checkpoint,
+        "total_steps": metrics.total_steps,
+        "episodes": metrics.episodes,
+        "reward_mean": round(metrics.reward_mean, 6),
+        "reward_ema": round(metrics.reward_ema, 6),
+        "sps_mean": round(metrics.sps_mean, 2),
+        "wall_time_seconds": round(wall_time, 2),
+        "actors": actors,
+        "scenes": len(scenes),
+        "temporal_core": str(resolved_temporal),
+        "deterministic": deterministic,
+    }
+
+    typer.echo(f"\n{'─' * 60}")
+    typer.echo(f"  Steps:       {metrics.total_steps:,}")
+    typer.echo(f"  Episodes:    {metrics.episodes:,}")
+    typer.echo(f"  Reward mean: {metrics.reward_mean:.4f}")
+    typer.echo(f"  Reward EMA:  {metrics.reward_ema:.4f}")
+    typer.echo(f"  SPS:         {metrics.sps_mean:.1f}")
+    typer.echo(f"  Wall time:   {wall_time:.1f}s")
+
+    if output_json:
+        import json
+
+        _Path(output_json).parent.mkdir(parents=True, exist_ok=True)
+        _Path(output_json).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        typer.echo(f"  Results written to: {output_json}")
+
+
+@app.command("compare")  # type: ignore[untyped-decorator]
+def compare(
+    checkpoint_a: str = typer.Argument(help="Path to first checkpoint."),
+    checkpoint_b: str = typer.Argument(help="Path to second checkpoint."),
+    total_steps: int = typer.Option(5000, help="Total evaluation steps per model."),
+    actors: int = typer.Option(1, help="Number of parallel actors."),
+    deterministic: bool = typer.Option(True, help="Use deterministic actions."),
+    gmdag_file: str = typer.Option("", help="Single .gmdag file for evaluation."),
+    corpus_root: str = typer.Option("", help="Corpus root for scene discovery."),
+    datasets: str = typer.Option("", help="Comma-separated dataset include filter."),
+    exclude_datasets: str = typer.Option("", help="Comma-separated dataset exclude filter."),
+    azimuth_bins: int = typer.Option(256, help="Azimuth resolution."),
+    elevation_bins: int = typer.Option(48, help="Elevation resolution."),
+    temporal_core: str = typer.Option("mamba2", help="Temporal core: mamba2|gru|mambapy."),
+    output_json: str = typer.Option("", help="Write comparison results to JSON file."),
+) -> None:
+    """Compare two checkpoints side-by-side.
+
+    Runs identical bounded evaluations on both checkpoints and prints
+    a comparison table.
+    """
+    import json
+    import time as _time
+    from pathlib import Path as _Path
+
+    setup_logging("navi_actor_compare", level=logging.INFO)
+
+    config = ActorConfig(
+        n_actors=actors,
+        azimuth_bins=azimuth_bins,
+        elevation_bins=elevation_bins,
+        emit_observation_stream=False,
+        emit_training_telemetry=False,
+        emit_perf_telemetry=False,
+    )
+    resolved_temporal = _resolve_temporal_core(temporal_core, config)
+    config = config.model_copy(update={"temporal_core": resolved_temporal})
+
+    # Resolve scenes
+    scenes: list[str] = []
+    if gmdag_file:
+        scenes = [gmdag_file]
+    else:
+        corpus = _load_training_scenes(
+            gmdag_file="", scene=None, manifest="",
+            corpus_root=corpus_root if corpus_root else "",
+            datasets=datasets, exclude_datasets=exclude_datasets,
+            compile_resolution=512,
+            force_corpus_refresh=False,
+        )
+        scenes = corpus.compiled_scenes
+
+    if not scenes:
+        typer.echo("No scenes found for comparison.", err=True)
+        raise typer.Exit(code=1)
+
+    _validate_sdfdag_training_scenes(scenes)
+    bootstrap_scene = _select_bootstrap_scene(scenes)
+    _configure_torch_training_runtime()
+
+    results = {}
+    for label, ckpt_path in [("A", checkpoint_a), ("B", checkpoint_b)]:
+        typer.echo(f"\n{'=' * 60}")
+        typer.echo(f"  Model {label}: {ckpt_path}")
+        typer.echo(f"{'=' * 60}")
+
+        trainer = _build_canonical_trainer(
+            config,
+            gmdag_file=bootstrap_scene,
+            scene_pool=tuple(scenes),
+        )
+        trainer.load_training_state(ckpt_path)
+        trainer.start()
+
+        t_start = _time.perf_counter()
+        try:
+            metrics = trainer.train(
+                total_steps=total_steps,
+                log_every=max(100, total_steps // 10) if total_steps > 0 else 100,
+                checkpoint_every=0,
+            )
+        finally:
+            trainer.stop()
+
+        wall_time = _time.perf_counter() - t_start
+        results[label] = {
+            "checkpoint": ckpt_path,
+            "total_steps": metrics.total_steps,
+            "episodes": metrics.episodes,
+            "reward_mean": round(metrics.reward_mean, 6),
+            "reward_ema": round(metrics.reward_ema, 6),
+            "sps_mean": round(metrics.sps_mean, 2),
+            "wall_time_seconds": round(wall_time, 2),
+        }
+
+    # Print comparison table
+    typer.echo(f"\n{'=' * 60}")
+    typer.echo("  COMPARISON RESULTS")
+    typer.echo(f"{'=' * 60}")
+    typer.echo(f"  {'Metric':<20} {'Model A':>15} {'Model B':>15} {'Diff':>12}")
+    typer.echo(f"  {'─' * 62}")
+    for key in ["total_steps", "episodes", "reward_mean", "reward_ema", "sps_mean", "wall_time_seconds"]:
+        a_val = results["A"][key]
+        b_val = results["B"][key]
+        diff = b_val - a_val
+        sign = "+" if diff >= 0 else ""
+        if isinstance(a_val, float):
+            typer.echo(f"  {key:<20} {a_val:>15.4f} {b_val:>15.4f} {sign}{diff:>11.4f}")
+        else:
+            typer.echo(f"  {key:<20} {a_val:>15,} {b_val:>15,} {sign}{diff:>11,}")
+
+    # Determine winner
+    a_ema = results["A"]["reward_ema"]
+    b_ema = results["B"]["reward_ema"]
+    if b_ema > a_ema:
+        typer.echo(f"\n  → Model B is better (reward_ema {b_ema:.4f} > {a_ema:.4f})")
+    elif a_ema > b_ema:
+        typer.echo(f"\n  → Model A is better (reward_ema {a_ema:.4f} > {b_ema:.4f})")
+    else:
+        typer.echo("\n  → Models are equivalent")
+
+    if output_json:
+        _Path(output_json).parent.mkdir(parents=True, exist_ok=True)
+        _Path(output_json).write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        typer.echo(f"  Results written to: {output_json}")
 
 
 def brain_main() -> None:

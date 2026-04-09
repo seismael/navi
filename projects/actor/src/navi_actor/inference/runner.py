@@ -191,6 +191,11 @@ class InferenceRunner:
         """Load policy weights from a training checkpoint."""
         state = torch.load(path, weights_only=False, map_location="cpu")
         if "policy_state_dict" in state:
+            _LOGGER.info(
+                "Checkpoint metadata: v%d step=%d episodes=%d reward_ema=%.4f source=%s parent=%s",
+                state["version"], state["step_id"], state["episode_count"],
+                state["reward_ema"], state["training_source"], state["parent_checkpoint"],
+            )
             state = state["policy_state_dict"]
         self._policy.load_state_dict(state)
         self._policy.eval()

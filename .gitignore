@@ -80,6 +80,7 @@ artifacts/*.out.log
 
 # Checkpoints
 checkpoints/
+artifacts/models/
 *.pt
 *.pth
 *.ckpt

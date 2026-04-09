@@ -143,6 +143,16 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Future Promotion Rule:** Hardware-fused `mamba-ssm` remains a future upgrade target. It may replace the active Mamba2 SSD path only after a supported environment exists and the real bounded trainer proves the upgrade.
 - **Promotion Rule:** Benchmark-proven end-to-end training quality or throughput wins MAY replace the current temporal-core default or other canonical performance defaults, but only when config defaults, wrappers, tests, and docs are updated together in the same change so the repository has one coherent source of truth.
 
+### 2.9 Model Registry & Checkpoint Standard
+- **Checkpoint Version:** All training sources (RL, BC, inference) MUST emit v3 checkpoints containing: `step_id`, `episode_count`, `reward_ema`, `wall_time_hours`, `parent_checkpoint`, `training_source`, `temporal_core`, `corpus_summary`, and `created_at`.
+- **v3-Only Rule:** Only v3 checkpoints are accepted. Loading or promoting v2 or older checkpoints MUST fail fast with a clear error.
+- **Registry Location:** Promoted models live in `artifacts/models/` with `registry.json` (version catalog), `latest.pt` (best model pointer), and versioned `vNNN.pt` copies.
+- **Auto-Continue Rule:** When no explicit checkpoint is provided, `train` CLI and `run-ghost-stack.ps1 -Train` MUST auto-resume from `artifacts/models/latest.pt` if it exists. This enables seamless accumulation across RL, BC, and nightly training.
+- **Auto-Promote Rule:** After training completes, the trainer MUST auto-promote the final checkpoint to the registry when its `reward_ema` exceeds the current latest, ensuring the best model is always discoverable.
+- **Nightly Promotion Rule:** Successful nightly validation runs MUST auto-promote their best checkpoint with a `nightly` tag.
+- **Lineage Tracking:** Every checkpoint records `parent_checkpoint` to maintain full training lineage from BC pre-training through RL accumulation.
+- **Evaluate & Compare:** `evaluate` and `compare` CLI commands provide bounded inference with quality metrics for any checkpoint.
+
 ## 3) Performance Mandates
 
 ### 3.1 Batched Sphere Tracing (SDF/DAG Canonical Path)

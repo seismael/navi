@@ -137,8 +137,30 @@ Train on accumulated demonstrations:
 ./scripts/run-bc-pretrain.ps1 -Checkpoint artifacts\checkpoints\bc_base_model.pt
 ```
 
-The BC checkpoint is a standard v2 file loadable by `navi-actor train --checkpoint <path>`
+The BC checkpoint is a standard v3 file loadable by `navi-actor train --checkpoint <path>`
 for RL fine-tuning.
+
+### Model Management
+
+```bash
+# Promote a checkpoint to the model registry
+uv run brain promote ./checkpoints/policy_step_0050000.pt --notes "50K RL run" --tags rl,mamba2
+
+# List all promoted models
+uv run brain models
+
+# Evaluate a checkpoint (bounded inference with quality metrics)
+uv run brain evaluate ./artifacts/models/latest.pt --steps 2000
+
+# Compare two checkpoints side-by-side
+uv run brain compare ./artifacts/models/v001.pt ./artifacts/models/v002.pt --steps 2000
+
+# Evaluate with JSON output for scripting
+uv run brain evaluate ./artifacts/models/latest.pt --steps 2000 --json
+```
+
+Training auto-continues from `artifacts/models/latest.pt` when no `--checkpoint` is specified.
+After training, the final checkpoint is auto-promoted if its `reward_ema` exceeds the current latest.
 
 ### Windows Wrapper
 
@@ -180,19 +202,28 @@ environment exists and end-to-end training proves the upgrade.
 
 ---
 
-## Checkpoint Format (v2)
+## Checkpoint Format (v3)
 
 | Key | Description |
 |-----|-------------|
-| `version` | Format version (2) |
+| `version` | Format version (3) |
+| `step_id` | Total training steps completed |
+| `episode_count` | Total episodes completed |
+| `reward_ema` | Exponential moving average of episode reward |
+| `wall_time_hours` | Cumulative training wall time |
+| `parent_checkpoint` | Path to the checkpoint this was resumed from |
+| `training_source` | `"rl"`, `"bc"`, or `"inference"` |
+| `temporal_core` | Active temporal core (`mamba2`, `gru`, `mambapy`) |
+| `corpus_summary` | Description of training data |
+| `created_at` | ISO timestamp |
 | `policy_state_dict` | All policy network weights |
 | `rnd_state_dict` | RND predictor + running statistics |
-| `optimizer_state` | Adam optimizer state |
-| `rnd_optimizer_state` | RND optimizer state |
+| `optimizer_state_dict` | Adam optimizer state (if available) |
+| `rnd_optimizer_state_dict` | RND optimizer state (if available) |
 | `reward_shaper_step` | Reward shaper annealing step counter |
 
-Checkpoints are saved as `.pt` files. The `--checkpoint` flag resumes training
-from any previous checkpoint, preserving all learned knowledge across scenes.
+Only v3 checkpoints are accepted. The `--checkpoint` flag resumes training
+from any previous checkpoint, preserving all learned knowledge across sessions.
 
 ---
 

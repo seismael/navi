@@ -20,6 +20,7 @@
     .\run-ghost-stack.ps1 -Infer -Checkpoint ".\my_model.pt" -TotalSteps 10000 -NoDashboard
 
     # Canonical PPO training on the full discovered corpus without the dashboard
+    # (auto-continues from artifacts\models\latest.pt if available)
     .\run-ghost-stack.ps1 -Train
 
     # Canonical PPO training on the full discovered corpus with 8 actors and dashboard
@@ -30,6 +31,9 @@
 
     # Resume from an explicit prior run checkpoint
     .\run-ghost-stack.ps1 -Train -TotalSteps 500000 -Checkpoint ".\artifacts\runs\<run_id>\checkpoints\policy_step_0010000.pt"
+
+    # Inference using the latest promoted model (auto-selected)
+    .\run-ghost-stack.ps1 -Infer
 
     # Train on only the best dataset (ReplicaCAD baked lighting)
     .\run-ghost-stack.ps1 -Train -Datasets "ai-habitat_ReplicaCAD_baked_lighting" -WithDashboard
@@ -459,6 +463,14 @@ if ($Train) {
             throw "Checkpoint file not found: $Checkpoint"
         }
     }
+    else {
+        # Auto-continue: use latest promoted model if available
+        $latestModel = Join-Path $repoRoot "artifacts\models\latest.pt"
+        if (Test-Path $latestModel) {
+            $Checkpoint = $latestModel
+            Write-Host "[ghost-stack] Auto-continuing from latest promoted model: $Checkpoint" -ForegroundColor Cyan
+        }
+    }
 
     $trainArgs = @(
         "run",
@@ -651,7 +663,15 @@ if ($Train) {
 # ═══════════════════════════════════════════════════════════════════
 if ($Infer) {
     if ([string]::IsNullOrWhiteSpace($Checkpoint)) {
-        throw "-Infer requires -Checkpoint <path> to specify the trained model."
+        # Auto-select latest promoted model if available
+        $latestModel = Join-Path $repoRoot "artifacts\models\latest.pt"
+        if (Test-Path $latestModel) {
+            $Checkpoint = $latestModel
+            Write-Host "[ghost-stack] Using latest promoted model for inference: $Checkpoint" -ForegroundColor Cyan
+        }
+        else {
+            throw "-Infer requires -Checkpoint <path> to specify the trained model (no latest promoted model found)."
+        }
     }
 
     if ($NoDashboard -and $WithDashboard) {

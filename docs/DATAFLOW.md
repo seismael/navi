@@ -151,7 +151,7 @@ BC Training (offline, in actor project):
       -> policy.evaluate_sequence(obs_seqs, act_seqs, hidden=None)
       -> loss = -log_prob.mean() - entropy_coeff * entropy
       -> optimizer step with gradient clipping
-  -> save v2 checkpoint (policy_state_dict + fresh RND)
+  -> save v3 checkpoint (policy_state_dict + fresh RND)
   -> optional: load checkpoint for incremental training on next scene
 ```
 

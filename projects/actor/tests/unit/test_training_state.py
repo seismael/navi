@@ -130,7 +130,72 @@ def test_legacy_checkpoint_is_rejected() -> None:
         torch.save(trainer._learner_policy.state_dict(), ckpt)
 
         trainer2 = _make_trainer()
-        with pytest.raises(RuntimeError, match="expected version=2 canonical state"):
+        with pytest.raises(RuntimeError, match="expected version 3 canonical state"):
+            trainer2.load_training_state(ckpt)
+
+
+def test_v3_checkpoint_enriched_metadata_roundtrip() -> None:
+    """v3 checkpoint should persist step_id, episode_count, reward_ema, and lineage."""
+    trainer = _make_trainer()
+
+    # Simulate accumulated training state
+    trainer._total_sim_steps = 50000
+    trainer._total_episodes = 620
+    trainer._reward_ema = -0.85
+    trainer._parent_checkpoint = "artifacts/models/v001.pt"
+    trainer._reward_shaper._global_step = 50000
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt = Path(tmpdir) / "v3_state.pt"
+        trainer.save_training_state(ckpt)
+
+        # Wait for async write
+        if trainer._checkpoint_thread is not None:
+            trainer._checkpoint_thread.join()
+
+        # Verify file contents directly
+        data = torch.load(ckpt, weights_only=False, map_location="cpu")
+        assert data["version"] == 3
+        assert data["step_id"] == 50000
+        assert data["episode_count"] == 620
+        assert abs(data["reward_ema"] - (-0.85)) < 1e-6
+        assert data["parent_checkpoint"] == "artifacts/models/v001.pt"
+        assert data["training_source"] == "rl"
+        assert "temporal_core" in data
+        assert "corpus_summary" in data
+        assert "created_at" in data
+
+        # Load into a fresh trainer and verify state restoration
+        trainer2 = _make_trainer()
+        trainer2.load_training_state(ckpt)
+
+        assert trainer2._total_sim_steps == 50000
+        assert trainer2._total_episodes == 620
+        assert abs(trainer2._reward_ema - (-0.85)) < 1e-6
+        assert trainer2._parent_checkpoint == str(ckpt)
+        assert trainer2._reward_shaper._global_step == 50000
+
+
+def test_v2_checkpoint_is_rejected() -> None:
+    """v2 checkpoints must be rejected — only v3 is accepted."""
+    trainer = _make_trainer()
+
+    state = {
+        "version": 2,
+        "run_id": "test-v2-reject",
+        "policy_state_dict": {
+            k: v.cpu() for k, v in trainer._learner_policy.state_dict().items()
+        },
+        "rnd_state_dict": {k: v.cpu() for k, v in trainer._rnd.state_dict().items()},
+        "reward_shaper_step": 1000,
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt = Path(tmpdir) / "v2_state.pt"
+        torch.save(state, ckpt)
+
+        trainer2 = _make_trainer()
+        with pytest.raises(RuntimeError, match="expected version 3 canonical state"):
             trainer2.load_training_state(ckpt)
 
 

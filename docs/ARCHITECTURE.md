@@ -389,7 +389,7 @@ behavioral cloning (BC).  The pipeline is:
    `CognitiveMambaPolicy` (RayViTEncoder → TemporalCore → ActorCriticHeads)
    via supervised maximum-likelihood on the captured demonstrations.  BPTT
    sequences preserve temporal-core state.
-3. **Checkpoint** — the trainer produces a v2 checkpoint compatible with
+3. **Checkpoint** — the trainer produces a v3 checkpoint compatible with
    `PpoTrainer.load_training_state()`.  The `--checkpoint` flag enables
    incremental improvement across scenes.
 4. **Fine-tune** — the BC checkpoint can be loaded by `navi-actor train

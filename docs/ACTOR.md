@@ -504,7 +504,7 @@ Architectural properties:
 - uses BPTT sequences to preserve temporal-core context
 - freezes `log_std` during BC to preserve exploration capacity for subsequent
   PPO fine-tuning
-- produces standard v2 checkpoints loadable by `PpoTrainer.load_training_state()`
+- produces standard v3 checkpoints loadable by `PpoTrainer.load_training_state()`
 - supports `--checkpoint` for incremental improvement across scenes
 
 Demonstration capture occurs in the auditor project (`DemonstrationRecorder`),
@@ -520,7 +520,7 @@ space.
 3. Shuffle and iterate in minibatches through the full dataset per epoch.
 4. Compute loss: `L = -E[log pi(a|o)] - beta * H(pi)` where `H` is entropy.
 5. Gradient clip and Adam optimiser step.
-6. Save v2 checkpoint with fresh RND weights.
+6. Save v3 checkpoint with fresh RND weights.
 
 ### 18.2 BC Commands
 
