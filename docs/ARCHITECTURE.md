@@ -167,6 +167,23 @@ into environment or actor behavior.
 
 It may not become a mandatory dependency of the training path.
 
+### 5.7 Model Lifecycle
+
+All training sources (RL, BC, nightly) produce v3 checkpoints with enriched
+metadata. Promoted models live in `artifacts/models/` with a JSON catalog:
+
+- `registry.json` — version catalog with per-model metadata
+- `latest.pt` — always points to the best promoted model
+- `vNNN.pt` — versioned copies
+
+Training auto-continues from `latest.pt` when no explicit checkpoint is
+specified. After training, the final checkpoint is auto-promoted if its
+`reward_ema` exceeds the current latest. Every checkpoint records
+`parent_checkpoint` for full lineage tracking from BC bootstrap through
+RL accumulation. Only v3 checkpoints are accepted; v2 loads fail fast.
+
+See `docs/TRAINING.md` § 6 for the full checkpoint format and registry details.
+
 ## 6. Mathematical Foundations
 
 ### 6.1 Signed-Distance Execution

@@ -537,7 +537,48 @@ uv run --project projects/actor brain bc-pretrain --checkpoint artifacts/checkpo
 ./scripts/run-bc-pretrain.ps1
 ```
 
-## 19. Related Docs
+## 19. Model Management & Checkpoint Lineage
+
+All training sources (RL, BC, inference) emit **v3 checkpoints** with enriched
+metadata including `step_id`, `episode_count`, `reward_ema`, `parent_checkpoint`,
+`training_source`, `temporal_core`, and `corpus_summary`. Only v3 checkpoints
+are accepted; loading v2 or older will fail fast.
+
+### Auto-Continue
+
+When no `--checkpoint` is specified, both the `train` CLI and
+`run-ghost-stack.ps1 -Train` automatically resume from
+`artifacts/models/latest.pt` if it exists. This enables seamless accumulation
+across BC pre-training, RL sessions, and nightly validation.
+
+### Auto-Promote
+
+After training completes, the trainer auto-promotes the final checkpoint to the
+model registry when its `reward_ema` exceeds the current latest.
+
+### Checkpoint Lineage
+
+Every checkpoint records `parent_checkpoint` to maintain the full training
+lineage:
+
+```
+BC Baseline (v001)  →  RL Fine-tuned (v002)  →  RL Continued (v003)
+  source: bc              source: rl               source: rl
+  parent: null            parent: v001             parent: v002
+```
+
+### CLI Commands
+
+| Command | Purpose |
+|---------|---------||
+| `brain promote <path>` | Register a checkpoint in the model registry |
+| `brain models` | List all promoted models with metadata |
+| `brain evaluate <path>` | Bounded inference with quality metrics |
+| `brain compare <a> <b>` | Side-by-side checkpoint comparison |
+
+See `docs/TRAINING.md` § 6 for format details and registry structure.
+
+## 20. Related Docs
 
 - `docs/ARCHITECTURE.md`
 - `docs/SIMULATION.md`

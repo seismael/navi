@@ -108,8 +108,9 @@ The dashboard automatically detects inference mode when it receives
 
 ## Checkpoint Compatibility
 
-The inference runner accepts both:
-1. **Raw state dict**: `torch.save(policy.state_dict(), path)`
-2. **Training snapshot**: files with `policy_state_dict` key (produced by `PpoTrainer`)
+The inference runner accepts only **v3 checkpoints** containing a `policy_state_dict`
+key and `version: 3` metadata (produced by `PpoTrainer` and `BehavioralCloningTrainer`).
+Loading v2 or older checkpoints will fail fast with a clear error.
 
-The runner automatically detects the format and loads appropriately.
+When no `--checkpoint` is specified, inference auto-selects `artifacts/models/latest.pt`
+from the promoted model registry.

@@ -1,3 +1,5 @@
+← [Navi Overview](../../README.md)
+
 # navi-contracts
 
 Wire-format models and serialization for the Navi ecosystem. This is the shared
@@ -31,15 +33,30 @@ This is a library package — no long-running service process.
 | `StepResult` | Step result with reward, done, truncated, episode return |
 | `TelemetryEvent` | Keyed numeric telemetry for dashboarding and replay |
 
-## Wire Topics
+## Wire Protocol
 
-| Constant | Value | Transport |
-|----------|-------|-----------|
-| `TOPIC_DISTANCE_MATRIX` | `distance_matrix_v2` | PUB/SUB |
-| `TOPIC_ACTION` | `action_v2` | PUB/SUB |
-| `TOPIC_STEP_REQUEST` | `step_request_v2` | REQ/REP |
-| `TOPIC_STEP_RESULT` | `step_result_v2` | REQ/REP |
-| `TOPIC_TELEMETRY_EVENT` | `telemetry_event_v2` | PUB/SUB |
+All inter-service communication in the Navi ecosystem uses ZMQ with MessagePack
+serialization. This package defines the canonical wire formats consumed by all
+other projects.
+
+| Topic | Direction | Transport |
+|-------|-----------|-----------|
+| `distance_matrix_v2` | Environment → Brain, Gallery | PUB/SUB |
+| `action_v2` | Brain → Environment, Gallery | PUB/SUB |
+| `step_request_v2` | Brain → Environment | REQ/REP |
+| `step_result_v2` | Environment → Brain | REQ/REP |
+| `telemetry_event_v2` | Any → Gallery | PUB/SUB |
+
+### Default Network Ports
+
+| Port | Service | Role |
+|------|---------|------|
+| `5559` | Environment | PUB (observation broadcast) |
+| `5560` | Environment | REP (step request/response) |
+| `5557` | Actor | PUB (action + telemetry broadcast) |
+
+Ports are configurable via the root `.env` file or CLI parameters. The unified
+trainer only uses port `5557` for the passive dashboard telemetry stream.
 
 ---
 
