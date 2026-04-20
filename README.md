@@ -1163,6 +1163,7 @@ operator tailing.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture, runtime boundaries, layer responsibilities |
 | [docs/TRAINING.md](docs/TRAINING.md) | Corpus refresh, training algorithms, resume, recovery |
 | [docs/ACTOR.md](docs/ACTOR.md) | Sacred cognitive engine: RayViT → Mamba-2 → Episodic Memory → PPO |
+| [docs/SIM_TO_REAL_PARITY.md](docs/SIM_TO_REAL_PARITY.md) | Dual-pipeline architecture: simulation training ↔ real-world deployment |
 | [docs/SIMULATION.md](docs/SIMULATION.md) | Environment runtime, kinematics, reward shaping |
 | [docs/SDFDAG_RUNTIME.md](docs/SDFDAG_RUNTIME.md) | SDF/DAG backend: batched sphere tracing, tensor contracts |
 | [docs/GMDAG.md](docs/GMDAG.md) | `.gmdag` binary format specification |
