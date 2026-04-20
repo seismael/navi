@@ -1173,6 +1173,7 @@ operator tailing.
 | [docs/INFERENCE.md](docs/INFERENCE.md) | In-process inference: architecture, telemetry, CLI, scripts |
 | [docs/AUDITOR.md](docs/AUDITOR.md) | Dashboard, recording, replay, demonstration capture |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Throughput targets, profiling, bottleneck analysis |
+| [docs/FUTURE_HARDWARE_ROADMAP.md](docs/FUTURE_HARDWARE_ROADMAP.md) | Implementation-ready specs for performance work blocked on `sm_61` |
 | [docs/RESOLUTION_BENCHMARKS.md](docs/RESOLUTION_BENCHMARKS.md) | Observation-resolution sweep results |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Temporal-core comparison results (Mamba-2 vs GRU) |
 | [docs/NIGHTLY_VALIDATION.md](docs/NIGHTLY_VALIDATION.md) | Nightly validation pipeline specification |

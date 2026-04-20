@@ -30,7 +30,9 @@ def test_prepare_training_scene_corpus_discovers_and_compiles_sources(
 
     compile_calls: list[tuple[Path, Path, int]] = []
 
-    def fake_compile_gmdag_world(*, source_path: Path, output_path: Path, resolution: int) -> None:
+    def fake_compile_gmdag_world(
+        *, source_path: Path, output_path: Path, resolution: int, repair: bool = False
+    ) -> None:
         compile_calls.append((source_path, output_path, resolution))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"G" * 1024)
@@ -82,7 +84,9 @@ def test_prepare_training_scene_corpus_reuses_existing_compiled_assets(
 
     compile_calls: list[tuple[Path, Path, int]] = []
 
-    def fake_compile_gmdag_world(*, source_path: Path, output_path: Path, resolution: int) -> None:
+    def fake_compile_gmdag_world(
+        *, source_path: Path, output_path: Path, resolution: int, repair: bool = False
+    ) -> None:
         compile_calls.append((source_path, output_path, resolution))
 
     monkeypatch.setattr(
@@ -166,7 +170,9 @@ def test_prepare_training_scene_corpus_recompiles_resolution_mismatches(
 
     compile_calls: list[tuple[Path, Path, int]] = []
 
-    def fake_compile_gmdag_world(*, source_path: Path, output_path: Path, resolution: int) -> None:
+    def fake_compile_gmdag_world(
+        *, source_path: Path, output_path: Path, resolution: int, repair: bool = False
+    ) -> None:
         compile_calls.append((source_path, output_path, resolution))
 
     class _FakeAsset:

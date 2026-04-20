@@ -234,6 +234,46 @@ The latest attribution matrix in
 `artifacts/benchmarks/attribution-matrix/20260309-095734/summary.csv` supports
 that interpretation.
 
+### 4.0.1 Apr 2026 Optimization Closeout (sm_61)
+
+The H1/H2/H3 levers tracked in TODO.md Phase H were instrumented and measured
+on the active MX150. Bake-off
+`artifacts/benchmarks/cadence-compare/cadence-compare-20260420-230927/comparison-summary.json`
+recorded mamba2+gru × rollout 256/512 × 3 repeats × 4096 steps, with each run
+starting from a fresh policy via the new `--no-auto-resume` CLI flag:
+
+| Configuration                 | Mar 2026 baseline | Apr 2026 mean | Apr 2026 median |
+|-------------------------------|------------------:|--------------:|----------------:|
+| mamba2 + 256 (current default)| ~72 SPS           | 68.5          | 74.4            |
+| mamba2 + 512                  | not measured      | 72.4          | 75.3            |
+| gru + 256                     | ~100 SPS          | 69.4          | 79.6            |
+| gru + 512                     | not measured      | 87.3          | 92.7            |
+
+**Conclusions:**
+
+- Cadence tuning (lever A) on the canonical mamba2 core is **not a win** on
+  this hardware (+6%, within noise). `rollout_length` was left at 256.
+- Throughput-only winner is gru + 512 (+21–27% vs mamba2+256), but it was
+  **not promoted** because the original Mar 2026 25K-step decision was made
+  on learning quality (mamba2 reward_ema −0.88 vs GRU −1.48) per §2.7
+  Promotion Rule. A short bake-off cannot disprove that.
+- The PPO sub-attribution timers (`loss_build_ms`, `zero_grad_ms`) added by
+  H1 are in place but were not active in this run because
+  `--profile-cuda-events` was not enabled. Re-running the wrapper with
+  `-ProfileCudaEvents` is the cheap next step to populate the new fields.
+- The GRU **regression vs Mar 2026** (~100 → ~87 SPS even at 2× cadence) is
+  an unexplained signal that should be diagnosed before reading too much
+  into Apr 2026 throughput numbers. Suspected sources are the Apr-only
+  reward-shaping additions (info foraging, structure seeking, void grace
+  period per §3.4), the spawn quality gate, and the mesh-repair pipeline.
+
+This closeout confirms the §3.1.2 GPU Compute Utilization Standard
+diagnosis: **no Python-side micro-optimization will materially move
+throughput on sm_61.** Real gains require either sm_70+ hardware
+(`torch.compile`), Linux + hardware-fused `mamba-ssm`, or PPO/rollout
+double-buffer overlap. See TODO.md Phase J for the full pickup checklist on
+new hardware.
+
 ## 4.1 Observation-Resolution Scaling
 
 March 2026 bounded canonical trainer sweeps produced the current reference
@@ -422,9 +462,78 @@ These values are current reference points, not final goals.
 No design becomes canonical because it is elegant on paper.
 It becomes canonical when it is contract-correct and faster in real training.
 
-## 9. Related Docs
+## 9. Optimization Roadmap and Blocked Proposals
 
-- `docs/ACTOR.md`
-- `docs/TRAINING.md`
-- `docs/VERIFICATION.md`
-- `docs/RESOLUTION_BENCHMARKS.md`
+This section records optimization proposals that are commonly suggested but
+**blocked on the active MX150 (`sm_61`) machine** — either by hardware
+capability or by canonical architecture rules in [AGENTS.md](../AGENTS.md).
+It exists so future contributors do not re-propose, re-investigate, or
+prematurely retry blocked work.
+
+### 9.1 Blocked on Active Hardware (Future-Hardware Roadmap)
+
+For implementation-ready specs (anchors, capability gates, validation gates,
+rejection conditions, and recommended execution order) for every item in this
+table, see [FUTURE_HARDWARE_ROADMAP.md](FUTURE_HARDWARE_ROADMAP.md).
+
+| Proposal | Blocker | Hardware Unlock | Expected Gain |
+|----------|---------|-----------------|---------------|
+| `torch.compile` on PPO learner / sequence path | Triton requires `sm_70+`; MX150 is `sm_61` | RTX 2060 / Volta+ | Eliminates dispatcher gaps on PPO update (~1020 ms today) |
+| `torch.compile` on RayViTEncoder + reward shaping | Already implemented and capability-gated; auto-disables on `sm_61` and falls back to eager / `jit.script` | RTX 2060 / Volta+ | Eliminates ~50% of remaining dispatcher gaps |
+| `bfloat16` distance output from `cast_rays` kernel + tensor-core ingestion | MX150 has zero tensor cores (Pascal `sm_61`); native `bfloat16` requires `sm_80+` | RTX 3060 / Ampere+ | Halves output bandwidth; enables tensor-core MatMul in RayViT/heads |
+| Hardware-fused `mamba-ssm` Triton kernels for the temporal core | Not available on Windows; requires `sm_70+` Triton | Linux + Volta+ | Collapses Mamba2's 55–60 dispatches/forward to a fused scan |
+| Multi-group rollout overlap (`rollout_overlap_groups > 1`) | MX150 has 3 SMs — overlap causes ~47% throughput regression from SM starvation | Larger SM count (≥ 30 SMs typical) | Hides PPO backward behind environment stepping |
+
+### 9.2 Permanently Blocked by Architecture (Not Hardware-Dependent)
+
+| Proposal | Blocker | Authority |
+|----------|---------|-----------|
+| CUDA Graph capture of the rollout loop | Data-dependent control flow: `.nonzero()`, `.item()`, dynamic spawn-grid sizing, per-actor collision response, episode reset, scene rotation. None of this can be statically recorded. | [AGENTS.md §3.1.2](../AGENTS.md#3-performance-mandates), repeated in [SDFDAG_RUNTIME.md](SDFDAG_RUNTIME.md), [SIMULATION.md](SIMULATION.md) |
+| Alternate trainer modes / shadow benchmark entrypoints | Forbidden by Controlled Selector Rule and Hot-Path Discipline — investigations must add attribution on the existing `navi-actor train` surface | [AGENTS.md §2.7](../AGENTS.md#27-temporal-core-standard-mar-2026), [AGENTS.md §3.3.1](../AGENTS.md#331-actor-hot-path-discipline) |
+| Pinned-CPU / host-staged rollout slabs on the canonical path | Forbidden — canonical rollout storage must remain GPU-resident | [AGENTS.md §2.8](../AGENTS.md#28-sdfdag-integration-standard) |
+
+### 9.3 Active-Hardware Levers (Real Next Jumps)
+
+The dominant cost on this machine is the **PPO update (~1020 ms)** versus the
+**environment step (~36.5 ms)** — a roughly 28× imbalance. Bandwidth and
+graph-capture proposals do not address it. The actionable levers are:
+
+1. **PPO update cadence tuning** — explicitly authorised by
+   [AGENTS.md §2.7 Update-Frequency Rule](../AGENTS.md#27-temporal-core-standard-mar-2026):
+   reduce optimizer update frequency on the canonical trainer surface. Must be
+   benchmark-gated against learning quality.
+2. **Temporal-core re-bake-off** — the Mar 2026 25K-step bake-off chose
+   Mamba2 for learning quality (final reward_ema −0.88 vs GRU −1.48). On a
+   throughput-constrained `sm_61` machine where backward dispatcher cost
+   dominates, the trade-off space may have shifted. Re-validate via
+   [scripts/run-temporal-bakeoff.ps1](../scripts/run-temporal-bakeoff.ps1)
+   under current PPO cadence settings.
+3. **PPO backward sub-attribution** — current profiling attributes ~1129 ms
+   to the backward pass broadly. Per-section attribution (Mamba2 SSD scan vs.
+   policy heads vs. critic vs. KL/clip math) is needed before further
+   optimization can be targeted intelligently.
+
+### 9.4 Why The Common HPC Playbook Doesn't Apply Here
+
+The standard HPC optimization playbook (CUDA graphs → reduce dispatcher
+overhead, half-precision → bandwidth, `torch.compile` → fusion) assumes a
+modern data-center or workstation GPU. On `sm_61`:
+
+- No tensor cores → `bfloat16` saves bandwidth but cannot accelerate compute
+- No Triton support → `torch.compile` falls back to eager
+- Per-actor episodic reset and collision recovery → graph capture is incompatible
+  with the canonical Pipeline-A invariants documented in
+  [SIM_TO_REAL_PARITY.md](SIM_TO_REAL_PARITY.md)
+
+These same proposals **should be the canonical roadmap on `sm_70+` /
+`sm_80+` hardware** and should be the first wave of work after a hardware
+upgrade.
+
+## 10. Related Docs
+
+- [ACTOR.md](ACTOR.md)
+- [TRAINING.md](TRAINING.md)
+- [VERIFICATION.md](VERIFICATION.md)
+- [RESOLUTION_BENCHMARKS.md](RESOLUTION_BENCHMARKS.md)
+- [SDFDAG_RUNTIME.md](SDFDAG_RUNTIME.md)
+- [SIM_TO_REAL_PARITY.md](SIM_TO_REAL_PARITY.md)

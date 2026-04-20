@@ -338,6 +338,16 @@ def train(
     checkpoint_every: int = typer.Option(25_000, help="Checkpoint interval (0 = disabled)"),
     checkpoint_dir: str = typer.Option("checkpoints", help="Checkpoint directory"),
     checkpoint: str = typer.Option("", help="Resume from checkpoint path (.pt)"),
+    no_auto_resume: bool = typer.Option(
+        False,
+        "--no-auto-resume",
+        help=(
+            "Disable AGENTS.md §2.9 auto-resume from artifacts/models/latest.pt. "
+            "Required for bake-off runs that intentionally start fresh, e.g. when "
+            "comparing temporal cores whose state_dicts are incompatible with the "
+            "currently promoted model."
+        ),
+    ),
     # Logging
     log_every: int = typer.Option(100, help="Steps between log messages"),
     # Telemetry fan-out (performance)
@@ -609,6 +619,8 @@ def train(
                 },
             )
             typer.echo(f"Loaded checkpoint: {checkpoint}")
+        elif no_auto_resume:
+            typer.echo("Starting fresh training (--no-auto-resume set; auto-continue skipped)")
         else:
             # Auto-continue: check for latest promoted model
             from navi_actor.model_registry import ModelRegistry

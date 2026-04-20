@@ -341,7 +341,7 @@ def test_backend_accepts_explicit_max_distance(monkeypatch: pytest.MonkeyPatch) 
         128,
     )
 
-    assert captured["argc"] == 10
+    assert captured["argc"] == 11
     assert captured["max_distance"] == 17.5
 
 

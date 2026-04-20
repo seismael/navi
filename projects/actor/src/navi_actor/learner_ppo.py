@@ -97,7 +97,9 @@ class PpoMetrics:
     minibatch_fetch_ms: float = 0.0
     minibatch_prep_ms: float = 0.0
     policy_eval_ms: float = 0.0
+    loss_build_ms: float = 0.0
     backward_ms: float = 0.0
+    zero_grad_ms: float = 0.0
     grad_clip_ms: float = 0.0
     optimizer_step_ms: float = 0.0
     rnd_step_ms: float = 0.0
@@ -108,7 +110,9 @@ class PpoMetrics:
     minibatch_fetch_ms_total: float = 0.0
     minibatch_prep_ms_total: float = 0.0
     policy_eval_ms_total: float = 0.0
+    loss_build_ms_total: float = 0.0
     backward_ms_total: float = 0.0
+    zero_grad_ms_total: float = 0.0
     grad_clip_ms_total: float = 0.0
     optimizer_step_ms_total: float = 0.0
     rnd_step_ms_total: float = 0.0
@@ -124,7 +128,9 @@ class PpoMetrics:
     policy_eval_encode_device_ms_total: float = 0.0
     policy_eval_temporal_device_ms_total: float = 0.0
     policy_eval_heads_device_ms_total: float = 0.0
+    loss_build_device_ms_total: float = 0.0
     backward_device_ms_total: float = 0.0
+    zero_grad_device_ms_total: float = 0.0
     grad_clip_device_ms_total: float = 0.0
     optimizer_step_device_ms_total: float = 0.0
     rnd_step_device_ms_total: float = 0.0
@@ -345,7 +351,9 @@ class PpoLearner:
         eval_encode_ms_acc = 0.0
         eval_temporal_ms_acc = 0.0
         eval_heads_ms_acc = 0.0
+        loss_build_ms_acc = 0.0
         backward_ms_acc = 0.0
+        zero_grad_ms_acc = 0.0
         grad_clip_ms_acc = 0.0
         optimizer_step_ms_acc = 0.0
         rnd_step_ms_acc = 0.0
@@ -355,7 +363,9 @@ class PpoLearner:
         eval_encode_device_ms_acc = 0.0
         eval_temporal_device_ms_acc = 0.0
         eval_heads_device_ms_acc = 0.0
+        loss_build_device_ms_acc = 0.0
         backward_device_ms_acc = 0.0
+        zero_grad_device_ms_acc = 0.0
         grad_clip_device_ms_acc = 0.0
         optimizer_device_ms_acc = 0.0
         rnd_device_ms_acc = 0.0
@@ -470,27 +480,39 @@ class PpoLearner:
                                 obs, acts, aux_tensor=aux_tensor
                             )
 
-                    new_vals = new_vals.squeeze(-1)
-                    log_ratio = new_lp - old_lp
-                    ratio = log_ratio.exp()
-                    surr1 = ratio * adv
-                    surr2 = (
-                        torch.clamp(ratio, 1.0 - self._clip_ratio, 1.0 + self._clip_ratio) * adv
-                    )
-                    policy_loss = -torch.min(surr1, surr2).mean()
+                    # H1 sub-attribution: nested timer isolates the loss-build math
+                    # (clipped surrogate, value clipping, total composition). The outer
+                    # eval_ms timer continues to cover both forward and loss build to
+                    # preserve back-compat semantics for existing consumers.
+                    with _stage_timer(
+                        device=device, use_cuda_events=self._profile_cuda_events
+                    ) as loss_build_ms:
+                        new_vals = new_vals.squeeze(-1)
+                        log_ratio = new_lp - old_lp
+                        ratio = log_ratio.exp()
+                        surr1 = ratio * adv
+                        surr2 = (
+                            torch.clamp(ratio, 1.0 - self._clip_ratio, 1.0 + self._clip_ratio)
+                            * adv
+                        )
+                        policy_loss = -torch.min(surr1, surr2).mean()
 
-                    value_pred_clipped = old_vals + torch.clamp(
-                        new_vals - old_vals, -self._clip_ratio, self._clip_ratio
-                    )
-                    vf_loss = (
-                        0.5
-                        * torch.max((new_vals - ret) ** 2, (value_pred_clipped - ret) ** 2).mean()
-                    )
+                        value_pred_clipped = old_vals + torch.clamp(
+                            new_vals - old_vals, -self._clip_ratio, self._clip_ratio
+                        )
+                        vf_loss = (
+                            0.5
+                            * torch.max(
+                                (new_vals - ret) ** 2, (value_pred_clipped - ret) ** 2
+                            ).mean()
+                        )
 
-                    total_loss = (
-                        policy_loss + self._value_coeff * vf_loss - self._entropy_coeff * ent
-                    )
+                        total_loss = (
+                            policy_loss + self._value_coeff * vf_loss - self._entropy_coeff * ent
+                        )
                 eval_ms_acc += eval_ms.wall_ms
+                loss_build_ms_acc += loss_build_ms.wall_ms
+                loss_build_device_ms_acc += loss_build_ms.device_ms
                 eval_device_ms_acc += eval_ms.device_ms
                 if eval_stage_metrics is not None:
                     eval_encode_ms_acc += eval_stage_metrics.encode_ms
@@ -525,10 +547,18 @@ class PpoLearner:
                 with _stage_timer(
                     device=device, use_cuda_events=self._profile_cuda_events
                 ) as backward_ms:
-                    optimizer.zero_grad(set_to_none=True)
+                    # H1 sub-attribution: nested timer isolates zero_grad cost from
+                    # the autograd traversal. backward_ms continues to report the
+                    # combined block for back-compat with existing consumers.
+                    with _stage_timer(
+                        device=device, use_cuda_events=self._profile_cuda_events
+                    ) as zero_grad_ms:
+                        optimizer.zero_grad(set_to_none=True)
                     total_loss.backward()
                 backward_ms_acc += backward_ms.wall_ms
                 backward_device_ms_acc += backward_ms.device_ms
+                zero_grad_ms_acc += zero_grad_ms.wall_ms
+                zero_grad_device_ms_acc += zero_grad_ms.device_ms
 
                 with _stage_timer(
                     device=device, use_cuda_events=self._profile_cuda_events
@@ -688,7 +718,9 @@ class PpoLearner:
             minibatch_fetch_ms=(fetch_ms_acc / max(1, n_updates)),
             minibatch_prep_ms=(prep_ms_acc / max(1, n_updates)),
             policy_eval_ms=(eval_ms_acc / max(1, n_updates)),
+            loss_build_ms=(loss_build_ms_acc / max(1, n_updates)),
             backward_ms=(backward_ms_acc / max(1, n_updates)),
+            zero_grad_ms=(zero_grad_ms_acc / max(1, n_updates)),
             grad_clip_ms=(grad_clip_ms_acc / max(1, n_updates)),
             optimizer_step_ms=(optimizer_step_ms_acc / max(1, n_updates)),
             rnd_step_ms=(rnd_step_ms_acc / max(1, n_updates)),
@@ -703,6 +735,8 @@ class PpoLearner:
             policy_eval_temporal_ms_total=eval_temporal_ms_acc,
             policy_eval_heads_ms_total=eval_heads_ms_acc,
             backward_ms_total=backward_ms_acc,
+            zero_grad_ms_total=zero_grad_ms_acc,
+            loss_build_ms_total=loss_build_ms_acc,
             grad_clip_ms_total=grad_clip_ms_acc,
             optimizer_step_ms_total=optimizer_step_ms_acc,
             rnd_step_ms_total=rnd_step_ms_acc,
@@ -716,6 +750,8 @@ class PpoLearner:
             policy_eval_temporal_device_ms_total=eval_temporal_device_ms_acc,
             policy_eval_heads_device_ms_total=eval_heads_device_ms_acc,
             backward_device_ms_total=backward_device_ms_acc,
+            zero_grad_device_ms_total=zero_grad_device_ms_acc,
+            loss_build_device_ms_total=loss_build_device_ms_acc,
             grad_clip_device_ms_total=grad_clip_device_ms_acc,
             optimizer_step_device_ms_total=optimizer_device_ms_acc,
             rnd_step_device_ms_total=rnd_device_ms_acc,
