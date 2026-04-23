@@ -85,13 +85,35 @@ Navi eliminates this entire pipeline:
 - [Diagnostics](#diagnostics)
 - [Repository Commands](#repository-commands)
 - [Artifact Layout](#artifact-layout)
+- [Governance & Community](#governance--community)
+- [Security](#security)
 - [Documentation Index](#documentation-index)
 - [Performance Targets](#performance-targets)
 - [License](#license)
 
 ---
 
-## Canonical Runtime Path
+## Governance & Community
+
+Navi is an open-source project that welcomes contributions and collaboration.
+We strive to build a welcoming and inclusive community.
+
+- **Code of Conduct:** We expect all participants to adhere to our
+  [Code of Conduct](CODE_OF_CONDUCT.md).
+- **Contributing:** Please see our [Contributing Guide](CONTRIBUTING.md) for
+  instructions on how to get involved.
+- **Discussions:** Use GitHub Issues or Discussions for technical questions and
+  feature proposals.
+
+## Security
+
+If you believe you have found a security vulnerability in Navi, please report
+it according to our [Security Policy](SECURITY.md).
+
+---
+
+## Documentation Index
+
 
 ```
  Source Meshes (.glb/.obj/.bsp)
@@ -1213,6 +1235,5 @@ See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for the full analysis.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE). You are free to use,
-modify, and distribute this software, provided the original copyright notice and
-license text are included in all copies or substantial portions of the software.
+This project is licensed under the [Apache License, Version 2.0](LICENSE).
+See the [LICENSE](LICENSE) and [NOTICE](NOTICE) files for details.
