@@ -426,6 +426,7 @@ class PpoTrainer:
         self._learner_policy = CognitiveMambaPolicy(
             embedding_dim=config.embedding_dim,
             temporal_core=config.temporal_core,
+            encoder_backend=config.encoder_backend,
             azimuth_bins=config.azimuth_bins,
             elevation_bins=config.elevation_bins,
             max_forward=config.max_forward,
@@ -437,6 +438,7 @@ class PpoTrainer:
         self._rollout_policy = CognitiveMambaPolicy(
             embedding_dim=config.embedding_dim,
             temporal_core=config.temporal_core,
+            encoder_backend=config.encoder_backend,
             azimuth_bins=config.azimuth_bins,
             elevation_bins=config.elevation_bins,
             max_forward=config.max_forward,
@@ -1035,6 +1037,7 @@ class PpoTrainer:
             "parent_checkpoint": self._parent_checkpoint,
             "training_source": "rl",
             "temporal_core": self._config.temporal_core,
+            "encoder_backend": self._config.encoder_backend,
             "corpus_summary": corpus_summary,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "policy_state_dict": {
@@ -1092,6 +1095,15 @@ class PpoTrainer:
         if not isinstance(data, dict) or data.get("version") != 3:
             raise RuntimeError(
                 "Unsupported training checkpoint format: expected version 3 canonical state",
+            )
+
+        # Validate encoder backend matches
+        stored_encoder = data.get("encoder_backend", "rayvit")
+        if stored_encoder != self._config.encoder_backend:
+            raise RuntimeError(
+                f"Cannot load checkpoint: encoder backend mismatch. "
+                f"Checkpoint uses '{stored_encoder}', "
+                f"config specifies '{self._config.encoder_backend}'"
             )
 
         self._learner_policy.load_state_dict(data["policy_state_dict"])

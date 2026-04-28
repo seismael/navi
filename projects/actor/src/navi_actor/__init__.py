@@ -20,6 +20,7 @@ __all__: list[str] = [
     "RewardShaper",
     "RNDModule",
     "ShapedReward",
+    "SphericalCNNEncoder",
     "TrajectoryBuffer",
 ]
 
@@ -30,7 +31,7 @@ from navi_actor.gru_core import GRUTemporalCore
 from navi_actor.learner_ppo import PpoLearner, PpoMetrics
 from navi_actor.mamba_core import Mamba2TemporalCore
 from navi_actor.memory.episodic import EpisodicMemory
-from navi_actor.perception import RayViTEncoder
+from navi_actor.perception import RayViTEncoder, SphericalCNNEncoder
 from navi_actor.reward_shaping import RewardShaper, ShapedReward
 from navi_actor.rnd import RNDModule
 from navi_actor.rollout_buffer import (

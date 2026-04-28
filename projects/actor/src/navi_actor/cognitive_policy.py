@@ -116,6 +116,7 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         embedding_dim: int = 128,
         *,
         temporal_core: TemporalCoreName = "mamba2",
+        encoder_backend: str = "rayvit",
         azimuth_bins: int = 128,
         elevation_bins: int = 24,
         max_forward: float = 1.0,
@@ -129,12 +130,21 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         super().__init__()
         self.embedding_dim = embedding_dim
         self.temporal_core_name = temporal_core
+        self.encoder_backend = encoder_backend
         self.azimuth_bins = azimuth_bins
         self.elevation_bins = elevation_bins
 
-        from navi_actor.perception import RayViTEncoder
+        # ── Encoder dispatch ──────────────────────────────────
+        if encoder_backend == "spherical_cnn":
+            from navi_actor.perception import SphericalCNNEncoder
 
-        self.encoder = RayViTEncoder(embedding_dim=embedding_dim)
+            self.encoder: nn.Module = SphericalCNNEncoder(
+                in_channels=3, d_model=embedding_dim
+            )
+        else:
+            from navi_actor.perception import RayViTEncoder
+
+            self.encoder = RayViTEncoder(embedding_dim=embedding_dim)
 
         # Attempt torch.compile on encoder for kernel fusion on supported GPUs.
         # Falls back to eager on unsupported hardware or missing compiler.
@@ -143,9 +153,10 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
         try:
             capability = torch.cuda.get_device_capability()
             if tuple(int(part) for part in capability) < (7, 0):
-                _compile_reason = f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
+                _compile_reason = (
+                    f"CUDA capability {capability[0]}.{capability[1]} is below the Triton minimum 7.0"
+                )
             else:
-                # Validate that inductor can find a C/C++ compiler before wrapping.
                 from torch._inductor.cpp_builder import get_cpp_compiler
 
                 get_cpp_compiler()
@@ -156,20 +167,35 @@ class CognitiveMambaPolicy(nn.Module):  # type: ignore[misc]
                 _compile_reason = str(exc)
         if _compile_ok:
             try:
-                # fullgraph=False: encoder has dynamic padding (pad_az/pad_el)
-                # that prevents full-graph capture; jit.script also incompatible.
+                # SphericalCNN has fixed input dims — try fullgraph capture first.
+                # RayViT has dynamic padding — requires fullgraph=False.
+                _fullgraph = encoder_backend == "spherical_cnn"
                 self.encoder = torch.compile(  # type: ignore[assignment]
                     self.encoder,
-                    fullgraph=False,
+                    fullgraph=_fullgraph,
                     dynamic=False,
                     mode="reduce-overhead",
                 )
-                _log.info("RayViTEncoder: torch.compile activated")
+                _log.info("%s: torch.compile activated (fullgraph=%s)", type(self.encoder).__name__, _fullgraph)
             except Exception:
-                _log.info("RayViTEncoder: torch.compile wrapping failed, using eager mode")
+                if _fullgraph:
+                    try:
+                        self.encoder = torch.compile(  # type: ignore[assignment]
+                            self.encoder,
+                            fullgraph=False,
+                            dynamic=False,
+                            mode="reduce-overhead",
+                        )
+                        _log.info("%s: torch.compile activated (fullgraph=False fallback)", type(self.encoder).__name__)
+                    except Exception:
+                        _log.info("%s: torch.compile wrapping failed, using eager mode", type(self.encoder).__name__)
+                else:
+                    _log.info("%s: torch.compile wrapping failed, using eager mode", type(self.encoder).__name__)
         else:
             _log.info(
-                "RayViTEncoder: skipping torch.compile (%s), using eager mode", _compile_reason
+                "%s: skipping torch.compile (%s), using eager mode",
+                type(self.encoder).__name__,
+                _compile_reason,
             )
 
         self.temporal_core = _build_temporal_core(

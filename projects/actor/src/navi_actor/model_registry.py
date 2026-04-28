@@ -37,6 +37,7 @@ class ModelEntry:
     episode_count: int
     reward_ema: float
     temporal_core: str
+    encoder_backend: str
     corpus_summary: str
     promoted_at: str
     notes: str = ""
@@ -129,6 +130,7 @@ class ModelRegistry:
             episode_count=int(data["episode_count"]),
             reward_ema=float(data["reward_ema"]),
             temporal_core=data["temporal_core"],
+            encoder_backend=data.get("encoder_backend", "rayvit"),
             corpus_summary=data["corpus_summary"],
             promoted_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             notes=notes,

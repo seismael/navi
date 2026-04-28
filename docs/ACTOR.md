@@ -126,7 +126,7 @@ The public `Action` model remains stable for service mode and diagnostics.
 ```text
 DistanceMatrix semantics
   -> stacked observation tensor
-  -> Ray-ViT encoder
+  -> encoder (rayvit default / spherical_cnn experimental)
   -> latent embedding z_t
   -> RND and episodic-memory side channels
   -> temporal core
@@ -136,22 +136,36 @@ DistanceMatrix semantics
 
 This pipeline is sacred and immutable at the architectural level.
 Compiler/runtime improvements must preserve it rather than pressure it into new
-sensor-specific branches.
+sensor-specific branches.  The encoder is selectable via `--encoder-backend`
+or `NAVI_ACTOR_ENCODER_BACKEND`; see [ENCODER_ARCHITECTURE.md](ENCODER_ARCHITECTURE.md).
 
-## 7. Perception: Ray-ViT Encoder
+## 7. Perception: Encoder (Ray-ViT / SphericalCNN)
 
 **Module:** `perception.py`
 
-The Ray-ViT encoder treats spherical observations as structured patches with
-fixed positional meaning.
+The canonical default is `rayvit` — a Vision Transformer that treats spherical
+observations as structured patches with fixed positional meaning.  An
+experimental `spherical_cnn` encoder replaces quadratic self-attention with
+linear convolutions on the spherical grid with circular azimuth padding.
 
-Current properties:
+Current properties (all encoders):
 
 - input shape `(B, 3, Az, El)`
 - output latent embedding `z_t` with configurable embedding dimension
+- encoder contract: must consume `(B, 3, Az, El)` and produce `(B, embedding_dim)`
+
+Ray-ViT (`rayvit`) properties:
+
 - strided `Conv2d` patch projection with `patch_size=8`
 - `nn.TransformerEncoder` over patch tokens plus one `[CLS]` token
 - fixed spherical positional structure rather than ad hoc flattened features
+
+SphericalCNN (`spherical_cnn`) properties:
+
+- `CircularAzimuthConv2d` for azimuth wrap, zero-padded elevation
+- depthwise-separable convolution blocks for FLOP efficiency
+- global average pooling instead of massive linear projection
+- ~226K params (vs RayViT's ~306K), ~29M FLOPs forward (vs ~150M)
 
 Architectural consequence:
 
@@ -499,7 +513,7 @@ maximum-likelihood loss instead of the clipped surrogate objective.
 
 Architectural properties:
 
-- trains the **identical** pipeline: `RayViTEncoder` → `TemporalCore` →
+- trains the **identical** pipeline: encoder → `TemporalCore` →
   `ActorCriticHeads`
 - uses BPTT sequences to preserve temporal-core context
 - freezes `log_std` during BC to preserve exploration capacity for subsequent

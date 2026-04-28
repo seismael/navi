@@ -304,6 +304,49 @@ so token count grows from `192` at `256x48` to `768` at `512x96` and `1728` at
 `768x144`. Full self-attention then grows roughly with the square of that token
 count.
 
+### 4.2 SphericalCNN Encoder Baselines (Apr 2026)
+
+The `spherical_cnn` encoder replaces RayViT's quadratic self-attention
+($O(N^2)$ on 192 tokens) with linear convolutions ($O(H \\cdot W \\cdot C)$)
+on the spherical distance matrix treated as a 2D image with circular azimuth
+wrapping.
+
+**Architecture:** 3-ch input (depth, semantic, valid) → Stem → 2× depthwise-
+separable blocks → 1× standard conv refinement → global average pool →
+small projection MLP.
+
+**Estimated costs (hardware-independent):**
+
+| Metric | RayViT (baseline) | SphericalCNN | Ratio |
+|---|---|---|---|
+| Encoder FLOPs (forward) | ~150M | ~29M | 5.1× |
+| Encoder parameters | ~306K | ~225K | 1.36× |
+
+**Measured results — MX150 (`sm_61`, no `torch.compile`):**
+
+| Metric | RayViT (median) | SphericalCNN (median) | Ratio |
+|---|---|---|---|
+| Encoder forward (4×256×48) | 5.0 ms | 4.3 ms | 1.2× |
+| Encoder fwd+bwd (4×256×48) | 11.1 ms | 10.8 ms | 1.0× |
+| Full-policy forward (4×256×48) | 17.0 ms | 15.8 ms | 1.1× |
+| PPO minibatch BPTT (8×8 seq) | 46.9 ms | 44.8 ms | 1.0× |
+| Training SPS (4096 steps, 4 actors) | 52.8 | 46.4 | 0.9× |
+| Early reward_ema (2K steps) | −0.68 | −2.59 | — |
+
+**Interpretation:** On `sm_61` without `torch.compile`, the SphericalCNN's
+depthwise-separable convs dispatch many small CUDA kernels whose Python-side
+eager-dispatch overhead consumes the 5.1× FLOP advantage.  The actual SPS
+is comparable or slightly *worse* than RayViT, and early learning quality
+favours RayViT.  The `encoder_backend` selector is integrated and tested,
+but `rayvit` remains the canonical default per the §2.9 Default Rule.
+
+**Predicted on `sm_70+` with `torch.compile`:** When the compiler fuses
+the CNN's depthwise and pointwise conv dispatches into single kernels,
+encoder forward latency is expected to drop to ~0.5 ms and full-policy
+forward to ~12 ms, providing a 1.2–1.4× training SPS improvement.
+A bounded 25K-step bake-off on `sm_70+` hardware is required before the
+default encoder can be promoted.
+
 Environment-only comparison remains important because it shows the CUDA runtime
 is not the same ceiling. The environment path still remained benchmark-viable
 above the trainer limit on the same machine, which means future work must keep

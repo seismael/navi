@@ -141,6 +141,7 @@ class BehavioralCloningTrainer:
         output_path: Path,
         checkpoint_path: Path | None = None,
         temporal_core: TemporalCoreName = "mamba2",
+        encoder_backend: str = "rayvit",
         embedding_dim: int = 128,
         azimuth_bins: int = 256,
         elevation_bins: int = 48,
@@ -156,6 +157,7 @@ class BehavioralCloningTrainer:
         self._output_path = Path(output_path)
         self._checkpoint_path = checkpoint_path
         self._temporal_core_name: TemporalCoreName = temporal_core
+        self._encoder_backend = encoder_backend
         self._embedding_dim = embedding_dim
         self._azimuth_bins = azimuth_bins
         self._elevation_bins = elevation_bins
@@ -195,6 +197,7 @@ class BehavioralCloningTrainer:
         policy = CognitiveMambaPolicy(
             embedding_dim=self._embedding_dim,
             temporal_core=self._temporal_core_name,
+            encoder_backend=self._encoder_backend,
             azimuth_bins=self._azimuth_bins,
             elevation_bins=self._elevation_bins,
         ).to(device)
@@ -302,6 +305,7 @@ class BehavioralCloningTrainer:
             "parent_checkpoint": None,
             "training_source": "bc",
             "temporal_core": self._temporal_core_name,
+            "encoder_backend": self._encoder_backend,
             "corpus_summary": f"bc-pretrain from {self._demo_dir}",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "policy_state_dict": {

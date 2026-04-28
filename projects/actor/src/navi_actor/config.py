@@ -58,6 +58,10 @@ class ActorConfig(BaseSettings):
         default="mamba2",
         validation_alias="NAVI_ACTOR_TEMPORAL_CORE",
     )
+    encoder_backend: str = Field(
+        default="rayvit",
+        validation_alias="NAVI_ACTOR_ENCODER_BACKEND",
+    )
     azimuth_bins: int = Field(default=256, validation_alias="NAVI_AZIMUTH_BINS")
     elevation_bins: int = Field(default=48, validation_alias="NAVI_ELEVATION_BINS")
     embedding_dim: int = 128

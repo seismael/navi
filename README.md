@@ -403,9 +403,10 @@ sources or environment backends.
 DistanceMatrix (B, 3, Az, El)
          │
     ┌────▼──────────┐
-    │ RayViTEncoder  │  Vision Transformer: (B, 3, Az, El) → (B, 128)
-    └────┬──────────┘  Spherical positional encoding + patch projection
-         │             Cached sin/cos encodings (no recomputation)
+    │   Encoder      │  (B, 3, Az, El) → (B, 128)
+    │                │  rayvit (default): ViT with spherical positional encoding
+    │                │  spherical_cnn: CNN with circular azimuth padding
+    └────┬──────────┘
     ┌────▼──────────┐
     │ RND Curiosity  │  Random Network Distillation intrinsic reward
     └────┬──────────┘  Drives exploration by rewarding embedding novelty
@@ -423,12 +424,15 @@ DistanceMatrix (B, 3, Az, El)
     └───────────────────┘  [forward, vertical, lateral, yaw] + V(s)
 ```
 
-**Stage 1 — RayViTEncoder:** A Vision Transformer that processes the 3-channel
-distance observation `(depth, semantic, delta_depth)` through fixed spherical
-positional encodings. Patch projection with `patch_size=8` converts the
-`(Az, El)` grid into a token sequence; self-attention produces a 128-dimensional
-spatial embedding. Sin/cos positional encodings are cached at initialization to
-avoid redundant recomputation on every forward pass.
+**Stage 1 — Encoder:** The canonical default is `rayvit` — a Vision Transformer
+that processes the 3-channel distance observation `(depth, semantic, valid)`
+through fixed spherical positional encodings. Patch projection with `patch_size=8`
+converts the `(Az, El)` grid into 192 tokens; self-attention produces a
+128-dimensional spatial embedding. Sin/cos positional encodings are cached at
+initialization. An experimental `spherical_cnn` encoder replaces quadratic
+self-attention with linear convolutions on the spherical grid with circular
+azimuth padding (see [docs/ENCODER_ARCHITECTURE.md](docs/ENCODER_ARCHITECTURE.md)).
+Select via `--encoder-backend` or `NAVI_ACTOR_ENCODER_BACKEND`.
 
 **Stage 2 — RND Curiosity:** Random Network Distillation compares the spatial
 embedding against a fixed random target network. When the agent encounters
@@ -752,6 +756,8 @@ hard-coded fallback defaults in each project's `config.py`.
 | `NAVI_ENV_PUB_ADDRESS` | `tcp://localhost:5559` | Environment PUB socket (observation broadcast) |
 | `NAVI_ENV_REP_ADDRESS` | `tcp://localhost:5560` | Environment REP socket (step request/response) |
 | `NAVI_ACTOR_PUB_ADDRESS` | `tcp://localhost:5557` | Actor PUB socket (actions + telemetry) |
+| `NAVI_ACTOR_TEMPORAL_CORE` | `mamba2` | Temporal core selector: `mamba2`, `gru`, or `mambapy` |
+| `NAVI_ACTOR_ENCODER_BACKEND` | `rayvit` | Encoder selector: `rayvit` (default) or `spherical_cnn` |
 | `NAVI_AZIMUTH_BINS` | `256` | Observation azimuth resolution |
 | `NAVI_ELEVATION_BINS` | `48` | Observation elevation resolution |
 | `NAVI_GMDAG_RESOLUTION` | `512` | Canonical `.gmdag` compile resolution |
@@ -1185,6 +1191,7 @@ operator tailing.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture, runtime boundaries, layer responsibilities |
 | [docs/TRAINING.md](docs/TRAINING.md) | Corpus refresh, training algorithms, resume, recovery |
 | [docs/ACTOR.md](docs/ACTOR.md) | Sacred cognitive engine: RayViT → Mamba-2 → Episodic Memory → PPO |
+| [docs/ENCODER_ARCHITECTURE.md](docs/ENCODER_ARCHITECTURE.md) | Encoder selector architecture: RayViT vs SphericalCNN, benchmarks, roadmap |
 | [docs/SIM_TO_REAL_PARITY.md](docs/SIM_TO_REAL_PARITY.md) | Dual-pipeline architecture: simulation training ↔ real-world deployment |
 | [docs/SIMULATION.md](docs/SIMULATION.md) | Environment runtime, kinematics, reward shaping |
 | [docs/SDFDAG_RUNTIME.md](docs/SDFDAG_RUNTIME.md) | SDF/DAG backend: batched sphere tracing, tensor contracts |

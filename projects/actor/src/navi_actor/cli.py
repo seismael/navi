@@ -219,6 +219,10 @@ def serve(
         "",
         help="Temporal core selector: mamba2 (default), gru, or mambapy.",
     ),
+    encoder_backend: str = typer.Option(
+        "",
+        help="Encoder backend: rayvit (default) or spherical_cnn.",
+    ),
     azimuth_bins: int = typer.Option(256, help="Expected distance-matrix azimuth resolution"),
     elevation_bins: int = typer.Option(48, help="Expected distance-matrix elevation resolution"),
 ) -> None:
@@ -227,6 +231,7 @@ def serve(
 
     default_config = ActorConfig()
     resolved_temporal_core = _resolve_temporal_core(temporal_core, default_config)
+    resolved_encoder = encoder_backend or default_config.encoder_backend
 
     config = ActorConfig(
         sub_address=sub or default_config.sub_address,
@@ -234,6 +239,7 @@ def serve(
         mode=mode,
         step_endpoint=step_endpoint or default_config.step_endpoint,
         temporal_core=resolved_temporal_core,
+        encoder_backend=resolved_encoder,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
     )
@@ -245,6 +251,7 @@ def serve(
             policy_checkpoint,
             embedding_dim=config.embedding_dim,
             temporal_core=config.temporal_core,
+            encoder_backend=config.encoder_backend,
             azimuth_bins=azimuth_bins,
             elevation_bins=elevation_bins,
             max_forward=config.max_forward,
@@ -256,6 +263,7 @@ def serve(
         runtime_policy = CognitiveMambaPolicy(
             embedding_dim=config.embedding_dim,
             temporal_core=config.temporal_core,
+            encoder_backend=config.encoder_backend,
             azimuth_bins=azimuth_bins,
             elevation_bins=elevation_bins,
             max_forward=config.max_forward,
@@ -296,6 +304,10 @@ def train(
     temporal_core: str = typer.Option(
         "",
         help="Temporal core selector: mamba2 (default), gru, or mambapy.",
+    ),
+    encoder_backend: str = typer.Option(
+        "",
+        help="Encoder backend: rayvit (default) or spherical_cnn.",
     ),
     azimuth_bins: int = typer.Option(256, help="Expected azimuth resolution"),
     elevation_bins: int = typer.Option(48, help="Expected elevation resolution"),
@@ -420,12 +432,14 @@ def train(
     try:
         default_config = ActorConfig()
         resolved_temporal_core = _resolve_temporal_core(temporal_core, default_config)
+        resolved_encoder = encoder_backend or default_config.encoder_backend
 
         # Resolve actor config
         config = ActorConfig(
             pub_address=actor_pub or default_config.pub_address,
             mode="step",
             temporal_core=resolved_temporal_core,
+            encoder_backend=resolved_encoder,
             azimuth_bins=azimuth_bins,
             elevation_bins=elevation_bins,
             n_actors=actors,
@@ -542,7 +556,7 @@ def train(
         total_steps_label = "continuous" if total_steps <= 0 else f"{total_steps} total steps"
         typer.echo(
             f"Scene pool: {len(scenes)} scenes, {actors} actors, "
-            f"{total_steps_label}, shuffle={shuffle}, runtime=sdfdag, temporal={config.temporal_core}"
+            f"{total_steps_label}, shuffle={shuffle}, runtime=sdfdag, temporal={config.temporal_core}, encoder={config.encoder_backend}"
         )
         typer.echo(f"  Source root: {corpus.source_root}")
         typer.echo(f"  Source manifest: {corpus.source_manifest_path}")
@@ -569,6 +583,7 @@ def train(
                 "command": "train",
                 "actors": actors,
                 "temporal_core": config.temporal_core,
+                "encoder_backend": config.encoder_backend,
                 "azimuth_bins": azimuth_bins,
                 "elevation_bins": elevation_bins,
                 "scene_count": len(scenes),
@@ -773,6 +788,10 @@ def profile(
     actors: int = typer.Option(4, help="Parallel actors"),
     azimuth_bins: int = typer.Option(256),
     elevation_bins: int = typer.Option(48),
+    encoder_backend: str = typer.Option(
+        "",
+        help="Encoder backend: rayvit (default) or spherical_cnn.",
+    ),
 ) -> None:
     """Run a fixed-length rollout with CUDA profiling active (Phase 14)."""
     del ctx
@@ -785,10 +804,12 @@ def profile(
 
     _configure_torch_training_runtime()
 
+    default_cfg = ActorConfig()
     config = ActorConfig(
         n_actors=actors,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
+        encoder_backend=encoder_backend or default_cfg.encoder_backend,
     )
     env_cfg = EnvironmentConfig(
         gmdag_file=scene,
@@ -829,6 +850,10 @@ def infer(
     compile_resolution: int = typer.Option(512, help="Compiler voxel resolution"),
     force_corpus_refresh: bool = typer.Option(False, help="Force recompile of corpus"),
     temporal_core: str = typer.Option("", help="Temporal core: mamba2 (default), gru, mambapy."),
+    encoder_backend: str = typer.Option(
+        "",
+        help="Encoder backend: rayvit (default) or spherical_cnn.",
+    ),
     azimuth_bins: int = typer.Option(256, help="Azimuth resolution"),
     elevation_bins: int = typer.Option(48, help="Elevation resolution"),
     embedding_dim: int = typer.Option(128, help="Encoder embedding dimension"),
@@ -865,11 +890,13 @@ def infer(
 
     default_config = ActorConfig()
     resolved_temporal_core = _resolve_temporal_core(temporal_core, default_config)
+    resolved_encoder = encoder_backend or default_config.encoder_backend
 
     config = ActorConfig(
         pub_address=actor_pub or default_config.pub_address,
         mode="step",
         temporal_core=resolved_temporal_core,
+        encoder_backend=resolved_encoder,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
         n_actors=actors,
@@ -1009,6 +1036,10 @@ def brain(
     actors: int = typer.Option(4, help="[train/audit/profile] Number of parallel actors"),
     azimuth_bins: int = typer.Option(256, help="Azimuth resolution"),
     elevation_bins: int = typer.Option(48, help="Elevation resolution"),
+    encoder_backend: str = typer.Option(
+        "",
+        help="Encoder backend: rayvit (default) or spherical_cnn.",
+    ),
 ) -> None:
     """Unified Brain service entry point (Phase 10/14)."""
     del ctx
@@ -1022,6 +1053,8 @@ def brain(
             "--actors",
             str(actors),
         ]
+        if encoder_backend:
+            train_args.extend(["--encoder-backend", encoder_backend])
         if scene:
             train_args.extend(["--scene", scene])
         if checkpoint:
@@ -1035,6 +1068,8 @@ def brain(
             "--elevation-bins",
             str(elevation_bins),
         ]
+        if encoder_backend:
+            serve_args.extend(["--encoder-backend", encoder_backend])
         if checkpoint:
             serve_args.extend(["--policy-checkpoint", checkpoint])
         app(serve_args)
@@ -1067,6 +1102,8 @@ def brain(
             "--actors",
             str(actors),
         ]
+        if encoder_backend:
+            infer_args.extend(["--encoder-backend", encoder_backend])
         if checkpoint:
             infer_args.extend(["--checkpoint", checkpoint])
         if scene:
@@ -1107,6 +1144,10 @@ def bc_pretrain(
     temporal_core: str = typer.Option(
         "",
         help="Temporal core selector: mamba2 (default), gru, or mambapy.",
+    ),
+    encoder_backend: str = typer.Option(
+        "",
+        help="Encoder backend: rayvit (default) or spherical_cnn.",
     ),
     embedding_dim: int = typer.Option(128, help="Encoder embedding dimension."),
     azimuth_bins: int = typer.Option(256, help="Observation azimuth resolution."),
@@ -1149,11 +1190,13 @@ def bc_pretrain(
         TemporalCoreName,
         temporal_core if temporal_core in SUPPORTED_TEMPORAL_CORES else config.temporal_core,
     )
+    resolved_encoder = encoder_backend or config.encoder_backend
 
     _LOG.info(
-        "BC pre-training — demos=%s temporal=%s epochs=%d lr=%.1e checkpoint=%s",
+        "BC pre-training — demos=%s temporal=%s encoder=%s epochs=%d lr=%.1e checkpoint=%s",
         demonstrations,
         resolved_temporal,
+        resolved_encoder,
         epochs,
         learning_rate,
         checkpoint or "(none)",
@@ -1171,6 +1214,7 @@ def bc_pretrain(
         output_path=Path(output),
         checkpoint_path=resolved_checkpoint,
         temporal_core=resolved_temporal,
+        encoder_backend=resolved_encoder,
         embedding_dim=embedding_dim,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
@@ -1271,6 +1315,10 @@ def evaluate(
     azimuth_bins: int = typer.Option(256, help="Azimuth resolution."),
     elevation_bins: int = typer.Option(48, help="Elevation resolution."),
     temporal_core: str = typer.Option("mamba2", help="Temporal core: mamba2|gru|mambapy."),
+    encoder_backend: str = typer.Option(
+        "rayvit",
+        help="Encoder backend: rayvit or spherical_cnn.",
+    ),
     output_json: str = typer.Option("", help="Write evaluation results to JSON file."),
 ) -> None:
     """Evaluate a checkpoint with bounded inference and emit quality metrics.
@@ -1286,6 +1334,7 @@ def evaluate(
         n_actors=actors,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
+        encoder_backend=encoder_backend,
         emit_observation_stream=False,
         emit_training_telemetry=False,
         emit_perf_telemetry=False,
@@ -1395,6 +1444,10 @@ def compare(
     azimuth_bins: int = typer.Option(256, help="Azimuth resolution."),
     elevation_bins: int = typer.Option(48, help="Elevation resolution."),
     temporal_core: str = typer.Option("mamba2", help="Temporal core: mamba2|gru|mambapy."),
+    encoder_backend: str = typer.Option(
+        "rayvit",
+        help="Encoder backend: rayvit or spherical_cnn.",
+    ),
     output_json: str = typer.Option("", help="Write comparison results to JSON file."),
 ) -> None:
     """Compare two checkpoints side-by-side.
@@ -1412,6 +1465,7 @@ def compare(
         n_actors=actors,
         azimuth_bins=azimuth_bins,
         elevation_bins=elevation_bins,
+        encoder_backend=encoder_backend,
         emit_observation_stream=False,
         emit_training_telemetry=False,
         emit_perf_telemetry=False,

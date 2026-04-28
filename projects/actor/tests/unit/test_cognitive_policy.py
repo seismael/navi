@@ -16,10 +16,13 @@ from navi_actor.mamba2_core import Mamba2SSDTemporalCore
 from navi_actor.mambapy_core import MambapyTemporalCore
 
 
-def _make_policy(*, temporal_core: TemporalCoreName = "mamba2") -> CognitiveMambaPolicy:
+def _make_policy(
+    *, temporal_core: TemporalCoreName = "mamba2", encoder_backend: str = "rayvit"
+) -> CognitiveMambaPolicy:
     return CognitiveMambaPolicy(
         embedding_dim=128,
         temporal_core=temporal_core,
+        encoder_backend=encoder_backend,
         azimuth_bins=64,
         elevation_bins=32,
     )
@@ -270,3 +273,97 @@ def test_policy_rejects_unsupported_temporal_core() -> None:
     """Unsupported temporal-core names must fail fast at policy construction."""
     with pytest.raises(ValueError, match="Unsupported temporal core"):
         CognitiveMambaPolicy(temporal_core=cast("Any", "mamba-ssm"))
+
+
+# ── SphericalCNN encoder dispatch tests ──────────────────────────
+
+
+def test_policy_constructs_with_cnn_encoder() -> None:
+    """Policy should construct successfully with spherical_cnn encoder."""
+    policy = _make_policy(encoder_backend="spherical_cnn")
+    from navi_actor.perception import SphericalCNNEncoder
+
+    assert isinstance(policy.encoder, SphericalCNNEncoder)
+    assert policy.encoder_backend == "spherical_cnn"
+
+
+def test_cnn_forward_shapes() -> None:
+    """forward() via CNN encoder should return correct shapes."""
+    policy = _make_policy(encoder_backend="spherical_cnn")
+    obs = torch.randn(2, 3, 128, 24)
+    actions, log_probs, values, _, z_t = policy.forward(obs)
+    assert actions.shape == (2, 4)
+    assert log_probs.shape == (2,)
+    assert values.shape == (2,)
+    assert z_t.shape == (2, 128)
+
+
+def test_cnn_evaluate_shapes() -> None:
+    """evaluate() via CNN encoder should return correct shapes."""
+    policy = _make_policy(encoder_backend="spherical_cnn")
+    obs = torch.randn(2, 3, 128, 24)
+    acts = torch.randn(2, 4)
+    lp, val, ent, _, z_t = policy.evaluate(obs, acts)
+    assert lp.shape == (2,)
+    assert val.shape == (2,)
+    assert ent.dim() == 0
+    assert z_t.shape == (2, 128)
+
+
+def test_cnn_evaluate_sequence_shapes() -> None:
+    """evaluate_sequence() via CNN encoder should return correct shapes."""
+    policy = _make_policy(encoder_backend="spherical_cnn")
+    obs_seq = torch.randn(2, 4, 3, 128, 24)
+    acts_seq = torch.randn(2, 4, 4)
+    lp, val, ent, _, z_t = policy.evaluate_sequence(obs_seq, acts_seq)
+    assert lp.shape == (8,)
+    assert val.shape == (8,)
+    assert ent.dim() == 0
+    assert z_t.shape == (8, 128)
+
+
+def test_cnn_checkpoint_roundtrip() -> None:
+    """Saving and loading a CNN policy should recover identical weights."""
+    import tempfile
+
+    policy = _make_policy(encoder_backend="spherical_cnn")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "test.pt"
+        policy.save_checkpoint(path)
+        loaded = CognitiveMambaPolicy.load_checkpoint(
+            path,
+            embedding_dim=128,
+            temporal_core="mamba2",
+            encoder_backend="spherical_cnn",
+            azimuth_bins=64,
+            elevation_bins=32,
+        )
+        for (k1, v1), (k2, v2) in zip(policy.state_dict().items(), loaded.state_dict().items()):
+            assert k1 == k2, f"Key mismatch: {k1} vs {k2}"
+            torch.testing.assert_close(v1, v2, msg=f"Mismatch in {k1}")
+
+
+def test_cnn_critic_stop_gradient() -> None:
+    """Value-loss gradients must not flow into the CNN encoder."""
+    policy = _make_policy(encoder_backend="spherical_cnn")
+    obs = torch.randn(2, 3, 128, 24)
+    actions = torch.randn(2, 4)
+    _, values, _, _, _ = policy.evaluate(obs, actions)
+    # values come from critic(encoder(obs).detach()) — no grad to encoder
+    loss = values.sum()
+    loss.backward()
+    for name, param in policy.named_parameters():
+        if name.startswith("encoder.") and param.grad is not None:
+            assert False, f"Gradient leaked into {name} from value loss"
+
+
+def test_cnn_actor_gradient_to_encoder() -> None:
+    """Policy-loss gradients MUST flow into the CNN encoder."""
+    policy = _make_policy(encoder_backend="spherical_cnn")
+    obs = torch.randn(2, 3, 128, 24)
+    actions = torch.randn(2, 4)
+    log_probs, _, _, _, _ = policy.evaluate(obs, actions)
+    loss = -log_probs.sum()
+    loss.backward()
+    grad_names = [n for n, p in policy.named_parameters() if p.grad is not None and n.startswith("encoder.")]
+    assert len(grad_names) > 0, "Policy loss gradients did not reach CNN encoder"

@@ -143,7 +143,16 @@ Each project must provide a dedicated `uv run` shortcut and a corresponding wrap
 - **Future Promotion Rule:** Hardware-fused `mamba-ssm` remains a future upgrade target. It may replace the active Mamba2 SSD path only after a supported environment exists and the real bounded trainer proves the upgrade.
 - **Promotion Rule:** Benchmark-proven end-to-end training quality or throughput wins MAY replace the current temporal-core default or other canonical performance defaults, but only when config defaults, wrappers, tests, and docs are updated together in the same change so the repository has one coherent source of truth.
 
-### 2.9 Model Registry & Checkpoint Standard
+### 2.9 Encoder Selector Standard (Apr 2026)
+
+- **Controlled Encoder Selector Rule:** Production scripts, wrappers, defaults, and docs MUST expose one encoder selector contract on the one canonical trainer surface. The active surface supports `rayvit` (ViT with patch-based self-attention) and `spherical_cnn` (CNN with circular azimuth padding) as selectable encoder backends; alternate encoder architectures and dual canonical surfaces are forbidden.
+- **Encoder Contract:** All encoders MUST consume `(B, 3, Az, El)` and produce `(B, embedding_dim)`. Changing the encoder MUST NOT alter the temporal core, actor-critic heads, episodic memory, reward shaping, environment backend, or observation contract.
+- **SDF/DAG Preservation Rule:** Introducing a new encoder backend MUST NOT replace or degrade the canonical SDF/DAG sphere-tracing path. The environment backend remains `sdfdag` regardless of encoder selection.
+- **V3 Checkpoint Rule:** All v3 checkpoints MUST record `encoder_backend` in their metadata. Loading a checkpoint whose `encoder_backend` does not match the active configuration MUST fail fast with a clear error.
+- **Promotion Rule:** Benchmark-proven end-to-end training quality or throughput wins MAY replace the current encoder default, but only when config defaults, wrappers, tests, and docs are updated together in the same change so the repository has one coherent source of truth.
+- **Default Rule (Apr 2026):** The canonical encoder default is `rayvit`. On the active MX150 (`sm_61`) hardware without `torch.compile`, end-to-end SPS comparison showed no consistent throughput advantage for `spherical_cnn` (46-52 SPS vs RayViT's 52-53 SPS, high variance) and RayViT showed better early reward_ema at 2K steps (-0.68 vs -2.59). Both SPS and learning quality gates remain open — the default promotion gate is gated on a `sm_70+` hardware bake-off where `torch.compile` can fuse the CNN's depthwise-separable conv dispatches and both throughput AND converged reward_ema must be benchmark-proven superior.
+
+### 2.10 Model Registry & Checkpoint Standard
 - **Checkpoint Version:** All training sources (RL, BC, inference) MUST emit v3 checkpoints containing: `step_id`, `episode_count`, `reward_ema`, `wall_time_hours`, `parent_checkpoint`, `training_source`, `temporal_core`, `corpus_summary`, and `created_at`.
 - **v3-Only Rule:** Only v3 checkpoints are accepted. Loading or promoting v2 or older checkpoints MUST fail fast with a clear error.
 - **Registry Location:** Promoted models live in `artifacts/models/` with `registry.json` (version catalog), `latest.pt` (best model pointer), and versioned `vNNN.pt` copies.
